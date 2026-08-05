@@ -27,6 +27,8 @@ Use the sparkle button in the collapsed rail to request a change. Or use the `â—
 
 Targeted requests include a sanitized, stable envelope based on an explicit `data-target-id`. It contains the element identity, semantic tag/role, a safe label or explicitly marked static text, page and room context, and its viewport rectangle. Input values, message bodies, query strings, and secrets are not included. See [targeting and integration](./docs/targeting.md).
 
+The App Harness toolbar and status strip frame the host app rather than living inside it. They support target-aware requests plus durable comments and freehand feedback; see [overlay canvas](./docs/overlay-canvas.md). These annotations are context for a future guarded agent, not executable requests.
+
 ### Current autonomous policy
 
 The app may autonomously execute only these exact, benign requests:

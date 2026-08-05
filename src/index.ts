@@ -59,9 +59,32 @@ type TargetEnvelope = {
 	rect: TargetRectangle;
 };
 
+type DrawingPoint = {
+	x: number;
+	y: number;
+};
+
+type HarnessAnnotation =
+	| {
+			id: string;
+			kind: "comment";
+			target: TargetEnvelope;
+			text: string;
+			createdAt: number;
+		}
+	| {
+			id: string;
+			kind: "draw";
+			points: DrawingPoint[];
+			page: string;
+			room: string;
+			createdAt: number;
+		};
+
 type ClientEvent =
 	| { type: "chat:send"; author?: unknown; text?: unknown }
-	| { type: "workflow:request"; request?: unknown; target?: unknown };
+	| { type: "workflow:request"; request?: unknown; target?: unknown }
+	| { type: "harness:annotation"; annotation?: unknown };
 
 type WorkflowCallback = {
 	requestId?: unknown;
@@ -78,7 +101,9 @@ type RuntimeEnv = Env & {
 const MAX_MESSAGE_LENGTH = 2_000;
 const MAX_REQUEST_LENGTH = 500;
 const MAX_STORED_MESSAGES = 200;
+const MAX_STORED_ANNOTATIONS = 100;
 const WORKFLOW_KEY = "workflow";
+const ANNOTATIONS_KEY = "harness-annotations";
 const TERMINAL_PHASES: ReadonlySet<WorkflowPhase> = new Set([
 	"completed",
 	"requires_review",
@@ -123,12 +148,14 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		const [client, server] = Object.values(pair);
 		this.ctx.acceptWebSocket(server);
 
-		const [messages, workflow] = await Promise.all([
+		const [messages, workflow, annotations] = await Promise.all([
 			this.ctx.storage.get<ChatMessage[]>("messages"),
 			this.ctx.storage.get<WorkflowRecord>(WORKFLOW_KEY),
+			this.ctx.storage.get<HarnessAnnotation[]>(ANNOTATIONS_KEY),
 		]);
 		server.send(JSON.stringify({ type: "chat:snapshot", messages: messages ?? [] }));
 		server.send(JSON.stringify({ type: "workflow:snapshot", workflow: workflow ?? null }));
+		server.send(JSON.stringify({ type: "harness:annotations", annotations: annotations ?? [] }));
 		this.broadcastPresence();
 
 		return new Response(null, { status: 101, webSocket: client });
@@ -151,6 +178,11 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 
 		if (event.type === "workflow:request") {
 			await this.startWorkflow(socket, event.request, event.target);
+			return;
+		}
+
+		if (event.type === "harness:annotation") {
+			await this.addHarnessAnnotation(socket, event.annotation);
 		}
 	}
 
@@ -179,6 +211,20 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		messages.push(message);
 		await this.ctx.storage.put("messages", messages.slice(-MAX_STORED_MESSAGES));
 		this.broadcast({ type: "chat:message", message });
+	}
+
+	private async addHarnessAnnotation(socket: WebSocket, input: unknown): Promise<void> {
+		const annotation = normalizeAnnotation(input);
+		if (!annotation) {
+			socket.send(JSON.stringify({ type: "workflow:notice", message: "That comment or drawing could not be saved." }));
+			return;
+		}
+
+		const annotations = (await this.ctx.storage.get<HarnessAnnotation[]>(ANNOTATIONS_KEY)) ?? [];
+		annotations.push(annotation);
+		const stored = annotations.slice(-MAX_STORED_ANNOTATIONS);
+		await this.ctx.storage.put(ANNOTATIONS_KEY, stored);
+		this.broadcast({ type: "harness:annotations", annotations: stored });
 	}
 
 	private async startWorkflow(socket: WebSocket, input: unknown, targetInput: unknown): Promise<void> {
@@ -356,6 +402,53 @@ function normalizeRectangle(value: unknown): TargetRectangle | null {
 function describeTarget(target: TargetEnvelope | null): string | null {
 	if (!target) return null;
 	return target.label || target.text || target.targetId.replace(/[-_]+/g, " ");
+}
+
+function normalizeAnnotation(value: unknown): HarnessAnnotation | null {
+	if (!value || typeof value !== "object") return null;
+	const candidate = value as Record<string, unknown>;
+	const createdAt = Date.now();
+
+	if (candidate.kind === "comment") {
+		const target = normalizeTarget(candidate.target);
+		const text = normalizeAnnotationText(candidate.text);
+		if (!target || !text) return null;
+		return { id: crypto.randomUUID(), kind: "comment", target, text, createdAt };
+	}
+
+	if (candidate.kind === "draw") {
+		const points = normalizeDrawingPoints(candidate.points);
+		const page = normalizePage(candidate.page);
+		if (!points || !page) return null;
+		return { id: crypto.randomUUID(), kind: "draw", points, page, room: "main", createdAt };
+	}
+
+	return null;
+}
+
+function normalizeAnnotationText(value: unknown): string | null {
+	if (typeof value !== "string") return null;
+	const text = value.trim().replace(/\s+/g, " ");
+	return text && text.length <= MAX_REQUEST_LENGTH ? text : null;
+}
+
+function normalizeDrawingPoints(value: unknown): DrawingPoint[] | null {
+	if (!Array.isArray(value) || value.length < 2 || value.length > 240) return null;
+	const points: DrawingPoint[] = [];
+	for (const rawPoint of value) {
+		if (!rawPoint || typeof rawPoint !== "object") return null;
+		const point = rawPoint as Record<string, unknown>;
+		if (
+			typeof point.x !== "number" ||
+			typeof point.y !== "number" ||
+			!Number.isFinite(point.x) ||
+			!Number.isFinite(point.y) ||
+			Math.abs(point.x) > 100_000 ||
+			Math.abs(point.y) > 100_000
+		) return null;
+		points.push({ x: Math.round(point.x * 100) / 100, y: Math.round(point.y * 100) / 100 });
+	}
+	return points;
 }
 
 function roomName(pathname: string): string | null {

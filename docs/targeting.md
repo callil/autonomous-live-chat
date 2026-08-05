@@ -38,3 +38,5 @@ A hosted configurator may later create the project configuration, connect the gu
 Today, target mode enriches the Durable Object request ledger and public activity record. It does not broaden the deterministic fallback: only the existing exact accent and empty-state transformations can execute. Out-of-policy targeted requests still require human review.
 
 The future NanoCodex handoff should pass the request, sanitized target envelope, and candidate-workspace provenance manifest to an isolated agent session. CI and the Durable Object remain the validation, policy, and audit authorities. The OpenAI API-key prerequisite described in [Next architecture: NanoCodex](./next-architecture-nanocodex.md) remains unchanged.
+
+Freehand marks and comments are a separate feedback channel; see [Overlay canvas](./overlay-canvas.md). They never become executable requests by themselves.
