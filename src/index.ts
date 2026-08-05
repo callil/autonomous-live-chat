@@ -352,6 +352,9 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 				now,
 			});
 			workItems.unshift(workItem);
+			// Issue creation resolves the item from durable storage so an external
+			// handoff can never race a newly submitted targeted request.
+			await this.saveWorkItems(workItems);
 		}
 
 		const policyApproved = isPolicyApprovedFallbackRequest(request);
