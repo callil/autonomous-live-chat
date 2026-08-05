@@ -15,9 +15,14 @@ on:
         description: Durable room name
         required: true
         type: string
+      issue_number:
+        description: Linked App Harness GitHub issue number
+        required: true
+        type: string
 
 permissions:
   contents: write
+  issues: write
   pull-requests: write
 
 concurrency:
@@ -32,6 +37,7 @@ jobs:
       AUTONOMY_REQUEST_ID: ${{ inputs.request_id }}
       AUTONOMY_REQUEST: ${{ inputs.request }}
       AUTONOMY_ROOM: ${{ inputs.room }}
+      AUTONOMY_GITHUB_ISSUE: ${{ inputs.issue_number }}
       AUTONOMY_CALLBACK_URL: ${{ secrets.AUTONOMY_CALLBACK_URL }}
       AUTONOMY_GITHUB_TOKEN: ${{ secrets.AUTONOMY_GITHUB_TOKEN }}
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -56,15 +62,14 @@ jobs:
 
       - name: Hold request for review
         if: steps.apply.outcome != 'success'
-        run: node scripts/autonomy-callback.mjs requires_review "Request requires human review; no candidate branch, source change, or deployment was created." "The autonomous policy allows only exact accent-color and empty-state copy requests."
+        run: |
+          gh issue edit "$AUTONOMY_GITHUB_ISSUE" --add-label awaiting-coding-agent-triage
+          gh issue comment "$AUTONOMY_GITHUB_ISSUE" --body "Guarded fallback declined this request. It remains awaiting coding-agent triage; NanoCodex is not configured."
+          node scripts/autonomy-callback.mjs requires_review "Request requires human review; no candidate branch, source change, or deployment was created." "The autonomous policy allows only exact accent-color and empty-state copy requests."
 
       - name: Stop after policy hold
         if: steps.apply.outcome != 'success'
         run: exit 0
-
-      - name: Announce candidate
-        if: steps.apply.outcome == 'success'
-        run: node scripts/autonomy-callback.mjs preparing_candidate "Allowlisted request accepted. Creating and publishing a candidate branch."
 
       - name: Commit and publish candidate
         if: steps.apply.outcome == 'success'
@@ -74,7 +79,9 @@ jobs:
           git add public/index.html
           git commit -m "Autonomous visual change: ${AUTONOMY_REQUEST_ID}"
           git push origin "autonomy/${AUTONOMY_REQUEST_ID}"
-          gh pr create --base main --head "autonomy/${AUTONOMY_REQUEST_ID}" --title "Autonomous visual change" --body "Allowlisted autonomous request: ${AUTONOMY_REQUEST}"
+          PR_URL=$(gh pr create --base main --head "autonomy/${AUTONOMY_REQUEST_ID}" --title "Autonomous visual change" --body "Allowlisted autonomous request: ${AUTONOMY_REQUEST}")
+          gh issue comment "$AUTONOMY_GITHUB_ISSUE" --body "Candidate branch published: `autonomy/${AUTONOMY_REQUEST_ID}`. Pull request: ${PR_URL}"
+          node scripts/autonomy-callback.mjs preparing_candidate "Candidate branch and pull request created: ${PR_URL}" "$PR_URL"
 
       - name: Validate candidate
         if: steps.apply.outcome == 'success'
@@ -92,6 +99,7 @@ jobs:
           git checkout main
           git pull --ff-only origin main
           npx wrangler deploy
+          gh issue comment "$AUTONOMY_GITHUB_ISSUE" --body "Validation passed and the policy-approved candidate was merged and deployed to production."
 
       - name: Publish outcome
         if: steps.apply.outcome == 'success'

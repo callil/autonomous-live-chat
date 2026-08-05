@@ -12,7 +12,7 @@ The summoned menu has only three intentional tools:
 
 The per-room Durable Object persists the latest 100 annotation records and a matching durable activity record, then broadcasts both snapshots to every connected client. Comments include the same sanitized target envelope used by requests. Drawings include page/room context and up to 240 normalized screen-space points. The overlay never includes input values, message bodies, query strings, credentials, or secrets in target metadata.
 
-Every submission is acknowledged in the compact composer or authoring menu and gets an activity state: **received**, **triaged**, **queued**, **building**, **completed**, **rejected**, or **needs review**. The on-demand **Activity** list survives reconnects and is the shared place to follow the result.
+Every submission is acknowledged in the compact composer or authoring menu and gets an activity state: **received**, **triaged**, **queued**, **building**, **completed**, **rejected**, or **needs review**. Each one also creates a real GitHub issue containing its safe context; the on-demand **Activity** list survives reconnects and exposes the actual issue URL (and a pull-request URL when a guarded candidate exists). If external issue creation fails, that failure is shown instead of being hidden.
 
 The **Annotations** control opens a small manager only when needed. Each annotation entry has a direct **Remove** action, and **Clear all canvas marks** asks for confirmation that it affects this room's annotations only. Both operations are durable and immediately broadcast to connected clients. They never remove or alter ordinary chat messages.
 
@@ -20,7 +20,7 @@ The **Annotations** control opens a small manager only when needed. Each annotat
 
 The host sidebar, its navigation items, the floating launcher, and every meaningful open-menu control use human-readable `data-target-id` values and safe labels. In inspect mode they are highlighted and intercepted exactly like host content: selecting one opens the targeted composer instead of activating its normal action. Selecting the Target control first leaves inspect mode, which prevents a recursive toggle. This makes the App Harness authoring surface itself available for carefully scoped future change requests.
 
-Comments and drawing marks are an intake layer; they do not widen the deterministic fallback policy. A comment that exactly matches the documented fallback grammar (accent or empty-state copy) becomes a real guarded candidate request and can progress through GitHub candidate/CI/deploy. Any other comment, and every drawing, is visibly recorded as awaiting agent triage. It does not silently build itself. That closed loop remains intentionally incomplete until NanoCodex has been configured with its required credential.
+Comments and drawing marks are an intake layer; they do not widen the deterministic fallback policy. A comment that exactly matches the documented fallback grammar (accent or empty-state copy) becomes a real guarded candidate request and can progress through GitHub candidate/CI/deploy. Any other comment, and every drawing, is visibly recorded as **awaiting coding-agent triage** with its GitHub issue. It does not silently build itself. That model-driven closed loop remains intentionally incomplete until NanoCodex has been configured with its required credential.
 
 ## Tldraw adapter decision
 

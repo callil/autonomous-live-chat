@@ -104,6 +104,8 @@ type HarnessWorkItem = {
 	createdAt: number;
 	updatedAt: number;
 	workflowId?: string;
+	githubIssue?: { number: number; url: string };
+	githubPullRequestUrl?: string;
 };
 
 type ClientEvent =
@@ -133,6 +135,7 @@ const WORKFLOW_KEY = "workflow";
 const ANNOTATIONS_KEY = "harness-annotations";
 const WORK_ITEMS_KEY = "harness-work-items";
 const MAX_STORED_WORK_ITEMS = 100;
+const LIVE_APP_URL = "https://autonomous-live-chat.coda-a.workers.dev/?room=main";
 const TERMINAL_PHASES: ReadonlySet<WorkflowPhase> = new Set([
 	"completed",
 	"requires_review",
@@ -177,12 +180,15 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		const [client, server] = Object.values(pair);
 		this.ctx.acceptWebSocket(server);
 
-		const [messages, workflow, annotations, workItems] = await Promise.all([
+		await this.backfillExternalHandoffs();
+		const [storedMessages, workflow, annotations, workItems] = await Promise.all([
 			this.ctx.storage.get<ChatMessage[]>("messages"),
 			this.ctx.storage.get<WorkflowRecord>(WORKFLOW_KEY),
 			this.ctx.storage.get<HarnessAnnotation[]>(ANNOTATIONS_KEY),
 			this.ctx.storage.get<HarnessWorkItem[]>(WORK_ITEMS_KEY),
 		]);
+		const messages = storedMessages ?? seededMessages();
+		if (!storedMessages) await this.ctx.storage.put("messages", messages);
 		server.send(JSON.stringify({ type: "chat:snapshot", messages: messages ?? [] }));
 		server.send(JSON.stringify({ type: "workflow:snapshot", workflow: workflow ?? null }));
 		server.send(JSON.stringify({ type: "harness:annotations", annotations: annotations ?? [] }));
@@ -290,8 +296,9 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		this.broadcast({ type: "harness:annotations", annotations: stored });
 		this.broadcastWorkItems(workItems);
 
+		const issueCreated = await this.ensureGitHubIssue(workItem.id, approvedComment, false);
 		if (approvedComment && annotation.kind === "comment") {
-			await this.startWorkflow(socket, annotation.text, annotation.target, workItem.clientSubmissionId, workItem.id);
+			if (issueCreated) await this.startWorkflow(socket, annotation.text, annotation.target, workItem.clientSubmissionId, workItem.id);
 		}
 	}
 
@@ -347,6 +354,22 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 			workItems.unshift(workItem);
 		}
 
+		const policyApproved = isPolicyApprovedFallbackRequest(request);
+		const workItemId = workItem.id;
+		const issueCreated = await this.ensureGitHubIssue(workItemId, policyApproved, false);
+		if (!issueCreated) return;
+		workItems = await this.getWorkItems();
+		workItem = workItems.find((item) => item.id === workItemId) ?? workItem;
+		if (!policyApproved) {
+			this.transitionWorkItem(
+				workItem,
+				"needs_review",
+				`GitHub issue #${workItem.githubIssue?.number ?? "?"} created — awaiting coding-agent triage. NanoCodex is not configured.`,
+			);
+			await this.saveWorkItems(workItems);
+			return;
+		}
+
 		const active = await this.ctx.storage.get<WorkflowRecord>(WORKFLOW_KEY);
 		if (active && !TERMINAL_PHASES.has(active.phase)) {
 			this.transitionWorkItem(workItem, "needs_review", "A guarded run is already active. This request is recorded for human triage.");
@@ -371,7 +394,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		};
 
 		workItem.workflowId = workflow.id;
-		this.transitionWorkItem(workItem, "queued", "Queued for the guarded candidate workflow.");
+		this.transitionWorkItem(workItem, "queued", "GitHub issue created. Guarded fallback workflow dispatched; no model-driven agent is involved.");
 		await Promise.all([this.ctx.storage.put(WORKFLOW_KEY, workflow), this.saveWorkItems(workItems)]);
 		this.broadcastWorkflow(workflow);
 
@@ -398,7 +421,12 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 				},
 				body: JSON.stringify({
 					ref: "main",
-					inputs: { request_id: workflow.id, request: workflow.request, room: "main" },
+					inputs: {
+						request_id: workflow.id,
+						request: workflow.request,
+						room: "main",
+						issue_number: String((await this.workItemForWorkflow(workflow))?.githubIssue?.number ?? ""),
+					},
 				}),
 			},
 		);
@@ -429,8 +457,12 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		const workItem = workflow.workItemId ? workItems.find((item) => item.id === workflow.workItemId) : undefined;
 		if (workItem) {
 			this.transitionWorkItem(workItem, workItemPhaseFor(workflow.phase), callback.message.slice(0, 280));
+			if (typeof callback.result === "string" && /^https:\/\/github\.com\/[^/]+\/[^/]+\/pull\/\d+$/i.test(callback.result)) {
+				workItem.githubPullRequestUrl = callback.result;
+			}
 		}
 		await Promise.all([this.ctx.storage.put(WORKFLOW_KEY, workflow), this.saveWorkItems(workItems)]);
+		if (workItem) await this.appendGitHubIssueStatus(workItem, callback.message.slice(0, 280), typeof callback.result === "string" ? callback.result : undefined);
 		this.broadcastWorkflow(workflow);
 	}
 
@@ -443,6 +475,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		const workItem = workflow.workItemId ? workItems.find((item) => item.id === workflow.workItemId) : undefined;
 		if (workItem) this.transitionWorkItem(workItem, "needs_review", message);
 		await Promise.all([this.ctx.storage.put(WORKFLOW_KEY, workflow), this.saveWorkItems(workItems)]);
+		if (workItem) await this.appendGitHubIssueStatus(workItem, message);
 		this.broadcastWorkflow(workflow);
 	}
 
@@ -487,6 +520,116 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		this.broadcastWorkItems(stored);
 	}
 
+	private async workItemForWorkflow(workflow: WorkflowRecord): Promise<HarnessWorkItem | undefined> {
+		if (!workflow.workItemId) return undefined;
+		return (await this.getWorkItems()).find((item) => item.id === workflow.workItemId);
+	}
+
+	private async backfillExternalHandoffs(): Promise<void> {
+		const workItems = await this.getWorkItems();
+		for (const workItem of workItems) {
+			if (workItem.githubIssue) continue;
+			await this.ensureGitHubIssue(
+				workItem.id,
+				workItem.kind !== "draw" && isPolicyApprovedFallbackRequest(workItem.summary),
+				true,
+			);
+		}
+	}
+
+	private async ensureGitHubIssue(workItemId: string, policyApproved: boolean, backfill: boolean): Promise<boolean> {
+		const workItems = await this.getWorkItems();
+		const workItem = workItems.find((item) => item.id === workItemId);
+		if (!workItem) return false;
+		if (workItem.githubIssue) return true;
+
+		const target = workItem.target;
+		const targetDetails = target
+			? [
+					"### Safe target envelope",
+					`- Target: \`${target.targetId}\``,
+					`- Selector: \`${target.selector}\``,
+					`- Element: \`${target.tag}${target.role ? ` (${target.role})` : ""}\``,
+					`- Label: ${target.label ?? target.text ?? "—"}`,
+					`- Room/page: \`${target.room}${target.page}\``,
+				].join("\n")
+			: "### Safe target envelope\nNo element target was supplied (freehand drawing feedback).";
+		const classification = policyApproved
+			? "Eligible for the deterministic guarded fallback. This is not a model-driven coding-agent run."
+			: "Awaiting coding-agent triage. NanoCodex is not configured because its required OpenAI API credential is unavailable.";
+		const body = [
+			"## App Harness intake",
+			`- Work item: \`${workItem.id}\``,
+			`- Kind: \`${workItem.kind}\``,
+			`- Live room: [open App Harness](${LIVE_APP_URL})`,
+			`- Policy classification: ${classification}`,
+			backfill ? "- Note: This issue backfills a request submitted before external handoff was enabled." : "",
+			"",
+			"### Request or feedback",
+			workItem.summary,
+			"",
+			targetDetails,
+		].filter(Boolean).join("\n");
+		try {
+			const response = await fetch(`https://api.github.com/repos/${this.env.GITHUB_REPOSITORY}/issues`, {
+				method: "POST",
+				headers: {
+					Accept: "application/vnd.github+json",
+					Authorization: `Bearer ${this.env.GITHUB_AUTOMATION_TOKEN}`,
+					"Content-Type": "application/json",
+					"User-Agent": "app-harness-autonomy",
+					"X-GitHub-Api-Version": "2022-11-28",
+				},
+				body: JSON.stringify({
+					title: `App Harness: ${workItem.summary.slice(0, 90)}`,
+					body,
+					labels: ["app-harness", policyApproved ? "guarded-fallback" : "awaiting-coding-agent-triage"],
+				}),
+			});
+			if (!response.ok) throw new Error(`GitHub issue creation failed (${response.status})`);
+			const issue = (await response.json()) as { number?: unknown; html_url?: unknown };
+			if (typeof issue.number !== "number" || typeof issue.html_url !== "string") throw new Error("GitHub returned an invalid issue response");
+			workItem.githubIssue = { number: issue.number, url: issue.html_url };
+			this.transitionWorkItem(
+				workItem,
+				policyApproved ? "triaged" : "needs_review",
+				policyApproved
+					? `GitHub issue #${issue.number} created. The deterministic fallback may now start.`
+					: `GitHub issue #${issue.number} created — awaiting coding-agent triage.`,
+			);
+			await this.saveWorkItems(workItems);
+			return true;
+		} catch (error) {
+			const detail = error instanceof Error ? error.message : "unknown handoff error";
+			this.transitionWorkItem(workItem, "needs_review", `External GitHub handoff failed (${detail}). The intake is retained in App Harness.`);
+			await this.saveWorkItems(workItems);
+			return false;
+		}
+	}
+
+	private async appendGitHubIssueStatus(workItem: HarnessWorkItem, message: string, result?: string): Promise<void> {
+		if (!workItem.githubIssue) return;
+		const details = result ? `\n\nResult: ${result}` : "";
+		try {
+			await fetch(
+				`https://api.github.com/repos/${this.env.GITHUB_REPOSITORY}/issues/${workItem.githubIssue.number}/comments`,
+				{
+					method: "POST",
+					headers: {
+						Accept: "application/vnd.github+json",
+						Authorization: `Bearer ${this.env.GITHUB_AUTOMATION_TOKEN}`,
+						"Content-Type": "application/json",
+						"User-Agent": "app-harness-autonomy",
+						"X-GitHub-Api-Version": "2022-11-28",
+					},
+					body: JSON.stringify({ body: `App Harness status: ${message}${details}` }),
+				},
+			);
+		} catch (error) {
+			console.error("GitHub issue status update failed", error);
+		}
+	}
+
 	private broadcast(payload: unknown): void {
 		const body = JSON.stringify(payload);
 		for (const socket of this.ctx.getWebSockets()) {
@@ -516,6 +659,30 @@ function normalizeAuthor(value: unknown): string {
 	if (typeof value !== "string") return "Guest";
 	const author = value.trim().replace(/\s+/g, " ").slice(0, 32);
 	return author || "Guest";
+}
+
+function seededMessages(): ChatMessage[] {
+	const now = Date.now();
+	return [
+		{
+			id: "seed-welcome",
+			author: "Mara",
+			text: "I left the first pass in place. What should we refine next?",
+			createdAt: now - 1000 * 60 * 18,
+		},
+		{
+			id: "seed-authoring",
+			author: "Jon",
+			text: "Keep the conversation focused. The authoring layer should appear only when someone calls for it.",
+			createdAt: now - 1000 * 60 * 12,
+		},
+		{
+			id: "seed-harness",
+			author: "Mara",
+			text: "Agreed — the room needs to feel useful before anyone decides to annotate it.",
+			createdAt: now - 1000 * 60 * 6,
+		},
+	];
 }
 
 function workItemPhaseFor(phase: WorkflowPhase): WorkItemPhase {
