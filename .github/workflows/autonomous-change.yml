@@ -1,0 +1,97 @@
+name: Autonomous change
+
+on:
+  workflow_dispatch:
+    inputs:
+      request_id:
+        description: Durable request identifier
+        required: true
+        type: string
+      request:
+        description: Natural-language request
+        required: true
+        type: string
+      room:
+        description: Durable room name
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: autonomous-change-main
+  cancel-in-progress: false
+
+jobs:
+  controlled-change:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      AUTONOMY_REQUEST_ID: ${{ inputs.request_id }}
+      AUTONOMY_REQUEST: ${{ inputs.request }}
+      AUTONOMY_ROOM: ${{ inputs.room }}
+      AUTONOMY_CALLBACK_URL: ${{ secrets.AUTONOMY_CALLBACK_URL }}
+      AUTONOMY_CALLBACK_SECRET: ${{ secrets.AUTONOMY_CALLBACK_SECRET }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Apply allowlisted transformation
+        id: apply
+        run: |
+          git checkout -b "autonomy/${AUTONOMY_REQUEST_ID}"
+          node scripts/apply-autonomous-change.mjs
+        continue-on-error: true
+
+      - name: Hold request for review
+        if: steps.apply.outcome != 'success'
+        run: node scripts/autonomy-callback.mjs requires_review "Request requires human review; no candidate branch, source change, or deployment was created." "The autonomous policy allows only exact accent-color and empty-state copy requests."
+
+      - name: Stop after policy hold
+        if: steps.apply.outcome != 'success'
+        run: exit 0
+
+      - name: Announce candidate
+        if: steps.apply.outcome == 'success'
+        run: node scripts/autonomy-callback.mjs preparing_candidate "Allowlisted request accepted. Creating and publishing a candidate branch."
+
+      - name: Commit and publish candidate
+        if: steps.apply.outcome == 'success'
+        run: |
+          git config user.name "livework-autonomy[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add public/index.html
+          git commit -m "Autonomous visual change: ${AUTONOMY_REQUEST_ID}"
+          git push origin "autonomy/${AUTONOMY_REQUEST_ID}"
+          gh pr create --base main --head "autonomy/${AUTONOMY_REQUEST_ID}" --title "Autonomous visual change" --body "Allowlisted autonomous request: ${AUTONOMY_REQUEST}"
+
+      - name: Validate candidate
+        if: steps.apply.outcome == 'success'
+        run: |
+          node scripts/autonomy-callback.mjs validating "Candidate branch published. Running the project's required type and Cloudflare binding checks."
+          npm ci
+          npm run cf-typegen
+          npx tsc --noEmit
+
+      - name: Promote and deploy
+        if: steps.apply.outcome == 'success'
+        run: |
+          node scripts/autonomy-callback.mjs deploying "Validation passed. Promoting the policy-approved candidate and deploying it to production."
+          gh pr merge "autonomy/${AUTONOMY_REQUEST_ID}" --squash --delete-branch
+          git checkout main
+          git pull --ff-only origin main
+          npx wrangler deploy
+
+      - name: Publish outcome
+        if: steps.apply.outcome == 'success'
+        run: node scripts/autonomy-callback.mjs completed "Candidate validated, promoted under the allowlist policy, and deployed to production." "The request was applied through a reviewed, bounded source transformation."

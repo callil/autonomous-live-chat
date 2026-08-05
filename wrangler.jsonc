@@ -20,6 +20,9 @@
 		"directory": "./public",
 		"binding": "ASSETS"
 	},
+	"vars": {
+		"GITHUB_REPOSITORY": "callil/autonomous-live-chat"
+	},
 	"durable_objects": {
 		"bindings": [
 			{

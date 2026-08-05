@@ -17,8 +17,23 @@ Open the local URL in two browser windows and send a message from either one. Th
 npm run deploy
 ```
 
-## Extension seam: autonomous iteration
+## Autonomous change loop
 
-The chat room is intentionally the only active product feature. `ChatRoom` is already the ordered, durable room coordinator. A future workflow can add room-scoped status events (for example: request received, work underway, awaiting review, deployed) and broadcast them through the same durable coordination point. The currently collapsed sidebar leaves that future status rail out of the way until it is needed.
+Use the sparkle button in the collapsed rail to request a change. The room's Durable Object durably stores the request and its public activity record, then broadcasts each transition to every connected client. The compact expandable status record is deliberately the only workflow UI.
 
-This first version does not include any autonomous code-editing or deployment behavior.
+### Current autonomous policy
+
+The app may autonomously execute only these exact, benign requests:
+
+- `set accent to blue`, `green`, `purple`, or `orange`
+- `set empty state to "Your short message"` using only letters, numbers, ordinary punctuation, and at most 80 characters
+
+Everything else is held as **requires review**. The runner never interprets raw request text as a command. It maps an exact supported sentence to one parameter in a fixed transform of `public/index.html`.
+
+For an allowed request, GitHub Actions creates a candidate branch and pull request, runs `npm run cf-typegen` and `npx tsc --noEmit`, automatically promotes the policy-approved candidate, then deploys with Wrangler. Signed callbacks update the durable public record through **received**, **interpreting**, **preparing candidate**, **validating**, **deploying**, and **completed**.
+
+### Explicit boundary
+
+The autonomous runner cannot change data, authentication or authorization, credentials, dependencies, Worker configuration, backend logic, workflow policy, or arbitrary source files. It can only make the allowlisted visual/content transformations above. Service credentials are held as deployment secrets, never exposed to the chat UI or its requests.
+
+The next safe extension is a guarded workflow with a broader, separately reviewed transform catalog. Each new transform should still create a candidate branch, run CI, produce a preview, and require an explicit promotion policy before deployment.
