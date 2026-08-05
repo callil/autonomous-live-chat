@@ -30,10 +30,10 @@ The app may autonomously execute only these exact, benign requests:
 
 Everything else is held as **requires review**. The runner never interprets raw request text as a command. It maps an exact supported sentence to one parameter in a fixed transform of `public/index.html`.
 
-For an allowed request, GitHub Actions creates a candidate branch and pull request, runs `npm run cf-typegen` and `npx tsc --noEmit`, automatically promotes the policy-approved candidate, then deploys with Wrangler. Signed callbacks update the durable public record through **received**, **interpreting**, **preparing candidate**, **validating**, **deploying**, and **completed**.
+For an allowed request, GitHub Actions creates a candidate branch and pull request, runs `npm run cf-typegen` and `npx tsc --noEmit`, automatically promotes the policy-approved candidate, then deploys with Wrangler. Authenticated callbacks update the durable public record through **received**, **interpreting**, **preparing candidate**, **validating**, **deploying**, and **completed**.
 
 ### Explicit boundary
 
-The autonomous runner cannot change data, authentication or authorization, credentials, dependencies, Worker configuration, backend logic, workflow policy, or arbitrary source files. It can only make the allowlisted visual/content transformations above. Service credentials are held as deployment secrets, never exposed to the chat UI or its requests.
+The autonomous runner cannot change data, authentication or authorization, credentials, dependencies, Worker configuration, backend logic, workflow policy, or arbitrary source files. It can only make the allowlisted visual/content transformations above. Service credentials authenticate the private runner and callback, and are never exposed to the chat UI or its requests.
 
 The next safe extension is a guarded workflow with a broader, separately reviewed transform catalog. Each new transform should still create a candidate branch, run CI, produce a preview, and require an explicit promotion policy before deployment.

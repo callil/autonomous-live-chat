@@ -281,18 +281,7 @@ function roomName(pathname: string): string | null {
 
 async function validCallback(request: Request, secret: string): Promise<{ body: string; valid: boolean }> {
 	const body = await request.text();
-	const received = request.headers.get("x-autonomy-signature") ?? "";
-	if (!received.startsWith("sha256=")) return { body, valid: false };
-
-	const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["verify"]);
-	const signature = hexToBytes(received.slice("sha256=".length));
-	const valid = await crypto.subtle.verify("HMAC", key, signature, new TextEncoder().encode(body));
-	return { body, valid };
-}
-
-function hexToBytes(hex: string): Uint8Array {
-	if (!/^[0-9a-f]{64}$/i.test(hex)) return new Uint8Array();
-	return Uint8Array.from(hex.match(/.{1,2}/g) ?? [], (pair) => Number.parseInt(pair, 16));
+	return { body, valid: request.headers.get("Authorization") === `Bearer ${secret}` };
 }
 
 export default {
@@ -302,16 +291,18 @@ export default {
 		const room = roomName(url.pathname);
 
 		if (request.method === "POST" && url.pathname === "/api/autonomy/callback") {
-			const { body, valid } = await validCallback(request, runtimeEnv.AUTONOMY_CALLBACK_SECRET);
+			const { body, valid } = await validCallback(request, runtimeEnv.GITHUB_AUTOMATION_TOKEN);
 			if (!valid) return new Response("Unauthorized", { status: 401 });
 			const callback = JSON.parse(body) as WorkflowCallback & { room?: unknown };
 			const callbackRoom = typeof callback.room === "string" ? roomName(`/api/rooms/${callback.room}`) : null;
 			if (!callbackRoom) return new Response("Invalid room", { status: 400 });
-			return runtimeEnv.CHAT_ROOM.getByName(callbackRoom).fetch("https://room.internal/workflow-callback", {
-				method: "POST",
-				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify(callback),
-			});
+			return runtimeEnv.CHAT_ROOM.getByName(callbackRoom).fetch(
+				new Request("https://room.internal/workflow-callback", {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify(callback),
+				}),
+			);
 		}
 
 		if (room) {

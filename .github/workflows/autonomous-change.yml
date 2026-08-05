@@ -33,7 +33,7 @@ jobs:
       AUTONOMY_REQUEST: ${{ inputs.request }}
       AUTONOMY_ROOM: ${{ inputs.room }}
       AUTONOMY_CALLBACK_URL: ${{ secrets.AUTONOMY_CALLBACK_URL }}
-      AUTONOMY_CALLBACK_SECRET: ${{ secrets.AUTONOMY_CALLBACK_SECRET }}
+      AUTONOMY_GITHUB_TOKEN: ${{ secrets.AUTONOMY_GITHUB_TOKEN }}
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
     steps:
       - uses: actions/checkout@v4
