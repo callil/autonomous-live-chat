@@ -19,6 +19,6 @@ npm run deploy
 
 ## Extension seam: autonomous iteration
 
-The chat room is intentionally the only active product feature. `ChatRoom` is already the ordered, durable room coordinator. A future workflow can add room-scoped status events (for example: request received, work underway, awaiting review, deployed) and broadcast them through the same durable coordination point. The quiet **Workflow** area in the UI is reserved for that thin status rail.
+The chat room is intentionally the only active product feature. `ChatRoom` is already the ordered, durable room coordinator. A future workflow can add room-scoped status events (for example: request received, work underway, awaiting review, deployed) and broadcast them through the same durable coordination point. The currently collapsed sidebar leaves that future status rail out of the way until it is needed.
 
 This first version does not include any autonomous code-editing or deployment behavior.
