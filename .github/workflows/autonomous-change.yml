@@ -96,6 +96,7 @@ jobs:
         run: |
           node scripts/autonomy-callback.mjs deploying "Validation passed. Promoting the policy-approved candidate and deploying it to production."
           gh pr merge "autonomy/${AUTONOMY_REQUEST_ID}" --squash --delete-branch
+          echo "AUTONOMY_PROMOTED=true" >> "$GITHUB_ENV"
           git checkout main
           git pull --ff-only origin main
           npx wrangler deploy
@@ -107,4 +108,9 @@ jobs:
 
       - name: Publish failure
         if: failure()
-        run: node scripts/autonomy-callback.mjs failed "The guarded candidate run stopped before promotion. No production deployment was made." "Inspect the public activity record and GitHub Actions run before retrying."
+        run: |
+          if [[ "${AUTONOMY_PROMOTED:-}" == "true" ]]; then
+            node scripts/autonomy-callback.mjs failed "The guarded candidate merged, but its production deployment failed. Inspect the GitHub Actions run before retrying deployment." "The source change is on main; production may still be serving the prior version."
+          else
+            node scripts/autonomy-callback.mjs failed "The guarded candidate run stopped before promotion. No source or production change was made." "Inspect the public activity record and GitHub Actions run before retrying."
+          fi
