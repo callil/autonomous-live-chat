@@ -187,8 +187,10 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 
 		try {
 			await this.dispatchAutonomousRun(workflow);
-		} catch {
-			await this.failWorkflow(workflow, "Could not dispatch the guarded candidate run. No source or production change was made.");
+		} catch (error) {
+			const detail = error instanceof Error ? error.message : "unknown dispatch error";
+			console.error("Autonomy dispatch failed", detail);
+			await this.failWorkflow(workflow, `Could not dispatch the guarded candidate run (${detail}). No source or production change was made.`);
 		}
 	}
 

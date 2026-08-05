@@ -28,7 +28,7 @@ jobs:
   controlled-change:
     runs-on: ubuntu-latest
     env:
-      GH_TOKEN: ${{ github.token }}
+      GH_TOKEN: ${{ secrets.AUTONOMY_GITHUB_TOKEN }}
       AUTONOMY_REQUEST_ID: ${{ inputs.request_id }}
       AUTONOMY_REQUEST: ${{ inputs.request }}
       AUTONOMY_ROOM: ${{ inputs.room }}
@@ -40,6 +40,7 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
+          token: ${{ secrets.AUTONOMY_GITHUB_TOKEN }}
 
       - uses: actions/setup-node@v4
         with:
@@ -95,3 +96,7 @@ jobs:
       - name: Publish outcome
         if: steps.apply.outcome == 'success'
         run: node scripts/autonomy-callback.mjs completed "Candidate validated, promoted under the allowlist policy, and deployed to production." "The request was applied through a reviewed, bounded source transformation."
+
+      - name: Publish failure
+        if: failure()
+        run: node scripts/autonomy-callback.mjs failed "The guarded candidate run stopped before promotion. No production deployment was made." "Inspect the public activity record and GitHub Actions run before retrying."
