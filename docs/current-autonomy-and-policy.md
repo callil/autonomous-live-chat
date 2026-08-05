@@ -9,7 +9,7 @@ Any other request creates a real GitHub issue and becomes **awaiting coding-agen
 
 Target mode can make either kind of request more legible by attaching its bounded element envelope. It does not expand the allowlist or grant the fallback any ability to interpret an arbitrary target as permission to modify arbitrary code.
 
-Comments and drawings are durable intake, not a claim that freeform feedback is already self-executing. Every intake gets a linked GitHub issue and the Activity list records its actual external handoff and triage state. Only a comment that exactly matches one of the fallback sentences is dispatched to the guarded candidate/CI/deploy loop; all other comments and every drawing remain **awaiting coding-agent triage** until the model-driven NanoCodex path is configured.
+Comments and drawings are durable intake, not a claim that freeform feedback is already self-executing. Every intake gets a linked GitHub issue and the Activity list records its actual external handoff and triage state. Only a comment that exactly matches one of the fallback sentences is dispatched to the guarded candidate/CI/deploy loop; all other comments and every drawing remain **awaiting coding-agent triage** until the Cloudflare OS provider is connected.
 
 Hard prohibitions apply even to future agents unless an explicit policy revision is reviewed and shipped:
 

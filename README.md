@@ -27,7 +27,7 @@ For situated feedback, open the small **App Harness** button at the lower-right,
 
 Targeted requests include a sanitized, stable envelope based on an explicit `data-target-id`. It contains the element identity, semantic tag/role, a safe label or explicitly marked static text, page and room context, and its viewport rectangle. Input values, message bodies, query strings, and secrets are not included. See [targeting and integration](./docs/targeting.md).
 
-The optional App Harness overlay frames the host app rather than becoming its permanent chrome. It stays collapsed when not in use and supports target-aware requests plus durable comments and freehand feedback when opened; see [overlay canvas](./docs/overlay-canvas.md). Every submission creates a durable, shared activity item **and a GitHub issue**. The on-demand Activity list exposes the actual issue and pull-request URLs. Only a comment matching the exact fallback grammar enters the current autonomous candidate/CI/deploy loop; other comments and drawings are accurately recorded as awaiting coding-agent triage until NanoCodex is configured.
+The optional App Harness overlay frames the host app rather than becoming its permanent chrome. It stays collapsed when not in use and supports target-aware requests plus durable comments and freehand feedback when opened; see [overlay canvas](./docs/overlay-canvas.md). Every submission creates a durable, shared activity item **and a GitHub issue**. The on-demand Activity list exposes the actual issue and pull-request URLs. The narrow visual/copy transformations remain a clearly labeled deterministic fallback; other comments and drawings are accurately recorded as awaiting coding-agent triage.
 
 ### Current autonomous policy
 
@@ -44,4 +44,4 @@ For an allowed request, the Durable Object first opens a linked GitHub issue, th
 
 The autonomous runner cannot change data, authentication or authorization, credentials, dependencies, Worker configuration, backend logic, workflow policy, or arbitrary source files. It can only make the allowlisted visual/content transformations above. Service credentials authenticate the private runner and callback, and are never exposed to the chat UI or its requests.
 
-The next safe extension is a guarded workflow with a broader, separately reviewed transform catalog. Each new transform should still create a candidate branch, run CI, produce a preview, and require an explicit promotion policy before deployment.
+The next provider is [Cloudflare OS](./docs/cloudflare-os-provider.md): an isolated Sandbox workspace with narrow Gatekeeper capabilities and a Durable Object audit ledger. Dependent changes must use the [stacked-PR scheduler](./docs/stacked-prs.md), never independent auto-rebase loops.

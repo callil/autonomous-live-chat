@@ -20,7 +20,7 @@ The **Annotations** control opens a small manager only when needed. Each annotat
 
 The host sidebar, its navigation items, the floating launcher, and every meaningful open-menu control use human-readable `data-target-id` values and safe labels. In inspect mode they are highlighted and intercepted exactly like host content: selecting one opens the targeted composer instead of activating its normal action. Selecting the Target control first leaves inspect mode, which prevents a recursive toggle. This makes the App Harness authoring surface itself available for carefully scoped future change requests.
 
-Comments and drawing marks are an intake layer; they do not widen the deterministic fallback policy. A comment that exactly matches the documented fallback grammar (accent or empty-state copy) becomes a real guarded candidate request and can progress through GitHub candidate/CI/deploy. Any other comment, and every drawing, is visibly recorded as **awaiting coding-agent triage** with its GitHub issue. It does not silently build itself. That model-driven closed loop remains intentionally incomplete until NanoCodex has been configured with its required credential.
+Comments and drawing marks are an intake layer; they do not widen the deterministic fallback policy. A comment that exactly matches the documented fallback grammar (accent or empty-state copy) becomes a real guarded candidate request and can progress through GitHub candidate/CI/deploy. Any other comment, and every drawing, is visibly recorded as **awaiting coding-agent triage** with its GitHub issue. It does not silently build itself.
 
 ## Tldraw adapter decision
 

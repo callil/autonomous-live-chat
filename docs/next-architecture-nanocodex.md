@@ -1,19 +1,19 @@
-# Next architecture: NanoCodex
+# Superseded NanoCodex candidate experiment
 
-The next step is a real model-driven coding agent, not a larger rule parser. [NanoCodex](https://github.com/gakonst/nanocodex) is the preferred candidate because it is a headless coding-agent SDK/CLI with an owned session, workspace tools, typed events, and OpenAI-backed model access.
+This earlier GitHub Actions/NanoCodex proposal is no longer the primary architecture. It was never deployed as a model-driven production path. App Harness is pivoting to [Cloudflare OS](./cloudflare-os-provider.md), where capability-scoped Gatekeepers, isolated Sandbox workspaces, and the Durable Object ledger form the intended substrate.
 
-The intended boundary is:
+The prior intended boundary was:
 
 1. The Durable Object remains the authoritative room policy, queue, and public ledger.
 2. A GitHub Actions job checks out an isolated candidate workspace for exactly this repository.
-3. NanoCodex receives the scoped request, sanitized App Harness target envelope, and private target-to-source provenance manifest; it proposes or edits only inside that workspace and emits an auditable event stream.
-4. Existing CI validates the candidate; the delivery policy decides whether it may be promoted and deployed.
+3. NanoCodex would have received the scoped request in a candidate workspace without GitHub or Cloudflare credentials.
+4. A deterministic post-agent verifier would have compared the workspace to its fixed base revision.
 5. The runner reports structured lifecycle events back to the Durable Object for all connected clients.
 
-The deterministic transformer stays as a safe fallback for its tiny allowlist. It is not the coding agent.
+The deterministic transformer remains a safe fallback for its tiny accent/copy allowlist. It is not a coding agent.
 
 ## Credential prerequisite
 
-NanoCodex needs OpenAI access inside the isolated hosted runner. The precise prerequisite is a securely stored GitHub repository secret named `OPENAI_API_KEY` from an OpenAI Platform project. Do not commit, print, or pass that secret through chat or browser code. A desktop Codex/ChatGPT login cannot be inherited by an ephemeral GitHub Actions runner.
+No NanoCodex workflow is enabled. Any future agent provider must use securely stored model credentials and must never pass them through chat or browser code.
 
-Before enabling NanoCodex, keep the current prohibitions and add enforceable workspace, file-path, command, and promotion policies. The agent should never receive credentials beyond the scoped model key and the repository/deployment credentials already required by the validated CI path.
+The next expansion must keep the current prohibitions, use the [stacked-PR scheduler](./stacked-prs.md), and introduce repository access through a narrow GitHub Gatekeeper capability rather than ambient Actions credentials.
