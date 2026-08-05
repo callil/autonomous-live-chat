@@ -2,6 +2,8 @@
 
 A deliberately small multi-user chat proof of concept. A Cloudflare Worker serves the interface and routes each room to one Durable Object. The Durable Object persists the latest 200 messages and broadcasts new messages to every connected WebSocket client.
 
+Contributor documentation lives in [docs/README.md](./docs/README.md).
+
 ## Run it
 
 ```sh
