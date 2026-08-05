@@ -39,4 +39,4 @@ Today, target mode enriches the Durable Object request ledger and public activit
 
 The future NanoCodex handoff should pass the request, sanitized target envelope, and candidate-workspace provenance manifest to an isolated agent session. CI and the Durable Object remain the validation, policy, and audit authorities. The OpenAI API-key prerequisite described in [Next architecture: NanoCodex](./next-architecture-nanocodex.md) remains unchanged.
 
-Freehand marks and comments are a separate feedback channel; see [Overlay canvas](./overlay-canvas.md). They never become executable requests by themselves.
+Freehand marks and comments are a separate feedback channel; see [Overlay canvas](./overlay-canvas.md). They create durable intake items for triage. A comment that exactly matches the already-approved fallback grammar is the narrow exception: it is dispatched as a guarded autonomous request. Other comments and all drawings remain recorded feedback until NanoCodex is configured.

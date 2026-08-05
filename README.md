@@ -27,7 +27,7 @@ Use the sparkle button in the collapsed sidebar to request a change. For situate
 
 Targeted requests include a sanitized, stable envelope based on an explicit `data-target-id`. It contains the element identity, semantic tag/role, a safe label or explicitly marked static text, page and room context, and its viewport rectangle. Input values, message bodies, query strings, and secrets are not included. See [targeting and integration](./docs/targeting.md).
 
-The optional App Harness overlay frames the host app rather than becoming its permanent chrome. It stays collapsed when not in use and supports target-aware requests plus durable comments and freehand feedback when opened; see [overlay canvas](./docs/overlay-canvas.md). These annotations are context for a future guarded agent, not executable requests.
+The optional App Harness overlay frames the host app rather than becoming its permanent chrome. It stays collapsed when not in use and supports target-aware requests plus durable comments and freehand feedback when opened; see [overlay canvas](./docs/overlay-canvas.md). Every submission creates a durable, shared activity item. Only a comment matching the exact fallback grammar enters the current autonomous candidate/CI/deploy loop; other comments and drawings are explicitly recorded for agent triage until NanoCodex is configured.
 
 ### Current autonomous policy
 
