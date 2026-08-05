@@ -45,6 +45,14 @@ jobs:
       - name: Build image and deploy runner to Cloudflare
         run: npx wrangler deploy
 
+      # Wrangler reads the value only from stdin. It is never written to the
+      # repository, emitted into logs, or passed into the Sandbox container.
+      - name: Install runner bridge secret
+        shell: bash
+        run: |
+          test -n "$APP_HARNESS_RUNNER_SECRET"
+          printf '%s' "$APP_HARNESS_RUNNER_SECRET" | npx wrangler secret put APP_HARNESS_RUNNER_SECRET --name app-harness-os-native-git
+
       - name: Verify isolated Sandbox shell
         if: inputs.verify_sandbox
         run: |
