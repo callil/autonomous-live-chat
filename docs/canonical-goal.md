@@ -15,6 +15,6 @@ App Harness is a minimal chat application with one optional contextual authoring
 
 ## Provider contract
 
-Cloudflare OS is the preferred capability and governance provider. Its GitHub Gatekeeper introduces exactly one repository resource through user OAuth, and a Sandbox workspace uses a short-lived scoped capability to clone, branch, inspect, edit, test, commit, push, and open/update PRs. The Durable Object is the authoritative App Harness ledger—not the coding agent—and receives an auditable event for every capability use and command summary.
+Cloudflare OS is the preferred capability and governance provider. The Workshop uses Cloudflare Access with a native Cloudflare identity/account-member policy; GitHub is not required for Workshop sign-in. Its GitHub Gatekeeper separately introduces exactly one repository resource through user OAuth, and a Sandbox workspace uses a short-lived scoped capability to clone, branch, inspect, edit, test, commit, push, and open/update PRs. The Durable Object is the authoritative App Harness ledger—not the coding agent—and receives an auditable event for every capability use and command summary.
 
 The existing deterministic GitHub Actions path remains a fallback only until the Cloudflare OS path has completed the same evidence chain.

@@ -8,7 +8,7 @@ The execution half uses the Cloudflare Sandbox SDK, which is a real isolated Lin
 
 ## Current truthful boundary
 
-The deployed chat application still uses its narrow deterministic GitHub Actions fallback. No Cloudflare OS workspace has been deployed or attached yet, and no model-driven sandbox agent is claimed as live. Cloudflare OS’s official deployment starter additionally requires the account’s Dynamic Worker Loaders, Browser Rendering, KV/R2, an identity configuration, and GitHub OAuth client credentials for the Gatekeeper. Those are separate infrastructure capabilities, not something the live chat worker can silently invent.
+The deployed chat application still uses its narrow deterministic GitHub Actions fallback. No Cloudflare OS workspace has been deployed or attached yet, and no model-driven sandbox agent is claimed as live. Cloudflare OS’s official deployment starter additionally requires the account’s Dynamic Worker Loaders, Browser Rendering, KV/R2, and a Cloudflare Access identity configuration. Workshop sign-in may use Cloudflare's native identity/account-member policy; GitHub is **not** a Workshop sign-in prerequisite. GitHub OAuth client credentials are needed later and separately for the GitHub Gatekeeper repository capability. These are separate infrastructure capabilities, not something the live chat worker can silently invent.
 
 When those capabilities are connected, the provider receives only the sanitized target/provenance envelope, root issue URL, allowed repository resource, and bounded change policy. Its audit adapter writes every capability use, native command summary, branch/PR edge, CI result, and promotion event back to the room Durable Object.
 

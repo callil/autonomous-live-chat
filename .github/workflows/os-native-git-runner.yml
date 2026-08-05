@@ -1,0 +1,54 @@
+name: Deploy OS native Git runner
+
+on:
+  workflow_dispatch:
+    inputs:
+      verify_sandbox:
+        description: Run the fixed Git shell probe after deployment
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: app-harness-os-native-git-runner-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: os-native-git-runner
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      APP_HARNESS_RUNNER_SECRET: ${{ secrets.APP_HARNESS_RUNNER_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: os-native-git-runner/package-lock.json
+
+      - name: Install and verify runner
+        run: |
+          npm ci
+          npm run cf-typegen
+          npm run typecheck
+
+      # GitHub-hosted Ubuntu supplies Docker. Wrangler builds and pushes the
+      # image to Cloudflare's registry; no developer laptop participates.
+      - name: Build image and deploy runner to Cloudflare
+        run: npx wrangler deploy
+
+      - name: Verify isolated Sandbox shell
+        if: inputs.verify_sandbox
+        run: |
+          curl --fail --silent --show-error \
+            --request POST \
+            --header "Authorization: Bearer ${APP_HARNESS_RUNNER_SECRET}" \
+            https://app-harness-os-native-git.coda-a.workers.dev/v1/probe
