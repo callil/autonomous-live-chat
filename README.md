@@ -23,11 +23,11 @@ npm run deploy
 
 ## Autonomous change loop
 
-Use the sparkle button in the collapsed rail to request a change. Or use the `◎` control to enter **target mode**, click a visible element, and describe a change in the small anchored composer. The room's Durable Object durably stores the request and its public activity record, then broadcasts each transition to every connected client. The compact expandable status record is deliberately the only workflow UI.
+Use the sparkle button in the collapsed sidebar to request a change. For situated feedback, open the small **App Harness** button at the lower-right, choose **Target**, click a visible element, and describe a change in the compact anchored composer. The room's Durable Object durably stores the request and its public activity record, then broadcasts each transition to every connected client. The authoring surface stays out of the way until it is summoned.
 
 Targeted requests include a sanitized, stable envelope based on an explicit `data-target-id`. It contains the element identity, semantic tag/role, a safe label or explicitly marked static text, page and room context, and its viewport rectangle. Input values, message bodies, query strings, and secrets are not included. See [targeting and integration](./docs/targeting.md).
 
-The App Harness toolbar and status strip frame the host app rather than living inside it. They support target-aware requests plus durable comments and freehand feedback; see [overlay canvas](./docs/overlay-canvas.md). These annotations are context for a future guarded agent, not executable requests.
+The optional App Harness overlay frames the host app rather than becoming its permanent chrome. It stays collapsed when not in use and supports target-aware requests plus durable comments and freehand feedback when opened; see [overlay canvas](./docs/overlay-canvas.md). These annotations are context for a future guarded agent, not executable requests.
 
 ### Current autonomous policy
 

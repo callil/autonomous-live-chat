@@ -84,7 +84,9 @@ type HarnessAnnotation =
 type ClientEvent =
 	| { type: "chat:send"; author?: unknown; text?: unknown }
 	| { type: "workflow:request"; request?: unknown; target?: unknown }
-	| { type: "harness:annotation"; annotation?: unknown };
+	| { type: "harness:annotation"; annotation?: unknown }
+	| { type: "harness:annotation:delete"; annotationId?: unknown }
+	| { type: "harness:annotations:clear" };
 
 type WorkflowCallback = {
 	requestId?: unknown;
@@ -183,6 +185,16 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 
 		if (event.type === "harness:annotation") {
 			await this.addHarnessAnnotation(socket, event.annotation);
+			return;
+		}
+
+		if (event.type === "harness:annotation:delete") {
+			await this.deleteHarnessAnnotation(socket, event.annotationId);
+			return;
+		}
+
+		if (event.type === "harness:annotations:clear") {
+			await this.clearHarnessAnnotations();
 		}
 	}
 
@@ -225,6 +237,28 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		const stored = annotations.slice(-MAX_STORED_ANNOTATIONS);
 		await this.ctx.storage.put(ANNOTATIONS_KEY, stored);
 		this.broadcast({ type: "harness:annotations", annotations: stored });
+	}
+
+	private async deleteHarnessAnnotation(socket: WebSocket, annotationId: unknown): Promise<void> {
+		if (typeof annotationId !== "string" || !isUuid(annotationId)) {
+			socket.send(JSON.stringify({ type: "workflow:notice", message: "That annotation could not be removed." }));
+			return;
+		}
+
+		const annotations = (await this.ctx.storage.get<HarnessAnnotation[]>(ANNOTATIONS_KEY)) ?? [];
+		const stored = annotations.filter((annotation) => annotation.id !== annotationId);
+		if (stored.length === annotations.length) return;
+		await this.ctx.storage.put(ANNOTATIONS_KEY, stored);
+		this.broadcast({ type: "harness:annotation:deleted", annotationId });
+		this.broadcast({ type: "harness:annotations", annotations: stored });
+	}
+
+	private async clearHarnessAnnotations(): Promise<void> {
+		const annotations = (await this.ctx.storage.get<HarnessAnnotation[]>(ANNOTATIONS_KEY)) ?? [];
+		if (!annotations.length) return;
+		await this.ctx.storage.put(ANNOTATIONS_KEY, []);
+		this.broadcast({ type: "harness:annotations:cleared" });
+		this.broadcast({ type: "harness:annotations", annotations: [] });
 	}
 
 	private async startWorkflow(socket: WebSocket, input: unknown, targetInput: unknown): Promise<void> {
@@ -340,6 +374,10 @@ function normalizeAuthor(value: unknown): string {
 	if (typeof value !== "string") return "Guest";
 	const author = value.trim().replace(/\s+/g, " ").slice(0, 32);
 	return author || "Guest";
+}
+
+function isUuid(value: string): boolean {
+	return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 }
 
 function normalizeRequest(value: unknown): string | null {
