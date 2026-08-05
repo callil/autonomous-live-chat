@@ -2,6 +2,7 @@
 
 App Harness is a small but real experiment in software that can evolve in public.
 
+- [Canonical goal](./canonical-goal.md) — the end-to-end product contract and acceptance chain.
 - [Project intent](./project-intent.md) — why this product exists and what the chat MVP proves.
 - [How it works today](./how-it-works-today.md) — the deployed coordination and delivery path.
 - [Current autonomy and policy](./current-autonomy-and-policy.md) — the constrained fallback and its non-negotiable limits.
