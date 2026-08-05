@@ -7,6 +7,8 @@ The deployed fallback is intentionally narrow. It maps exact natural-language se
 
 Any other request becomes **requires review**. Raw request text is never turned into a shell command, package command, configuration write, or arbitrary source edit.
 
+Target mode can make either kind of request more legible by attaching its bounded element envelope. It does not expand the allowlist or grant the fallback any ability to interpret an arbitrary target as permission to modify arbitrary code.
+
 Hard prohibitions apply even to future agents unless an explicit policy revision is reviewed and shipped:
 
 - destructive data changes or migrations;

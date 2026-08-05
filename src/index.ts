@@ -27,6 +27,7 @@ type WorkflowActivity = {
 type WorkflowRecord = {
 	id: string;
 	request: string;
+	target?: TargetEnvelope;
 	phase: WorkflowPhase;
 	activity: WorkflowActivity[];
 	createdAt: number;
@@ -34,9 +35,33 @@ type WorkflowRecord = {
 	result?: string;
 };
 
+type TargetRectangle = {
+	x: number;
+	y: number;
+	width: number;
+	height: number;
+};
+
+/**
+ * Context from the optional click-to-target authoring surface. This is
+ * deliberately presentation metadata only: no form values, message bodies,
+ * query strings, or credentials are accepted into the durable ledger.
+ */
+type TargetEnvelope = {
+	targetId: string;
+	selector: string;
+	tag: string;
+	role?: string;
+	label?: string;
+	text?: string;
+	page: string;
+	room: string;
+	rect: TargetRectangle;
+};
+
 type ClientEvent =
 	| { type: "chat:send"; author?: unknown; text?: unknown }
-	| { type: "workflow:request"; request?: unknown };
+	| { type: "workflow:request"; request?: unknown; target?: unknown };
 
 type WorkflowCallback = {
 	requestId?: unknown;
@@ -125,7 +150,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		}
 
 		if (event.type === "workflow:request") {
-			await this.startWorkflow(socket, event.request);
+			await this.startWorkflow(socket, event.request, event.target);
 		}
 	}
 
@@ -156,7 +181,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		this.broadcast({ type: "chat:message", message });
 	}
 
-	private async startWorkflow(socket: WebSocket, input: unknown): Promise<void> {
+	private async startWorkflow(socket: WebSocket, input: unknown, targetInput: unknown): Promise<void> {
 		const request = normalizeRequest(input);
 		if (!request) {
 			socket.send(JSON.stringify({ type: "workflow:notice", message: "Describe a change in 500 characters or fewer." }));
@@ -170,14 +195,17 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		}
 
 		const now = Date.now();
+		const target = normalizeTarget(targetInput);
+		const targetDescription = describeTarget(target);
 		const workflow: WorkflowRecord = {
 			id: crypto.randomUUID(),
 			request,
+			target: target ?? undefined,
 			phase: "interpreting",
 			createdAt: now,
 			updatedAt: now,
 			activity: [
-				{ phase: "received", message: "Request received and durably queued.", at: now },
+				{ phase: "received", message: `Request received${targetDescription ? ` for ${targetDescription}` : ""} and durably queued.`, at: now },
 				{ phase: "interpreting", message: "Checking the request against the autonomous change policy.", at: now },
 			],
 		};
@@ -203,7 +231,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 					Accept: "application/vnd.github+json",
 					Authorization: `Bearer ${this.env.GITHUB_AUTOMATION_TOKEN}`,
 					"Content-Type": "application/json",
-					"User-Agent": "livework-autonomy",
+					"User-Agent": "app-harness-autonomy",
 					"X-GitHub-Api-Version": "2022-11-28",
 				},
 				body: JSON.stringify({
@@ -272,6 +300,62 @@ function normalizeRequest(value: unknown): string | null {
 	if (typeof value !== "string") return null;
 	const request = value.trim().replace(/\s+/g, " ");
 	return request && request.length <= MAX_REQUEST_LENGTH ? request : null;
+}
+
+function normalizeTarget(value: unknown): TargetEnvelope | null {
+	if (!value || typeof value !== "object") return null;
+	const candidate = value as Record<string, unknown>;
+	const targetId = normalizeTargetString(candidate.targetId, 64);
+	const tag = normalizeTargetString(candidate.tag, 32)?.toLowerCase();
+	const page = normalizePage(candidate.page);
+	const rect = normalizeRectangle(candidate.rect);
+	if (!targetId || !/^[a-z0-9_-]+$/i.test(targetId) || !tag || !/^[a-z][a-z0-9-]*$/.test(tag) || !page || !rect) return null;
+
+	// The server derives the selector and room rather than trusting either from
+	// the browser. This keeps the envelope stable and prevents arbitrary selector
+	// or room names from entering the durable request ledger.
+	return {
+		targetId,
+		selector: `[data-target-id="${targetId}"]`,
+		tag,
+		role: normalizeTargetString(candidate.role, 48),
+		label: normalizeTargetString(candidate.label, 120),
+		text: normalizeTargetString(candidate.text, 120),
+		page,
+		room: "main",
+		rect,
+	};
+}
+
+function normalizeTargetString(value: unknown, maximum: number): string | undefined {
+	if (typeof value !== "string") return undefined;
+	const normalized = value.trim().replace(/\s+/g, " ");
+	return normalized && normalized.length <= maximum ? normalized : undefined;
+}
+
+function normalizePage(value: unknown): string | null {
+	if (typeof value !== "string") return null;
+	const page = value.trim();
+	return /^\/[a-zA-Z0-9/_-]{0,159}$/.test(page) ? page : null;
+}
+
+function normalizeRectangle(value: unknown): TargetRectangle | null {
+	if (!value || typeof value !== "object") return null;
+	const candidate = value as Record<string, unknown>;
+	const numbers = [candidate.x, candidate.y, candidate.width, candidate.height];
+	if (!numbers.every((number) => typeof number === "number" && Number.isFinite(number) && Math.abs(number) <= 100_000)) return null;
+	if ((candidate.width as number) < 0 || (candidate.height as number) < 0) return null;
+	return {
+		x: Math.round((candidate.x as number) * 100) / 100,
+		y: Math.round((candidate.y as number) * 100) / 100,
+		width: Math.round((candidate.width as number) * 100) / 100,
+		height: Math.round((candidate.height as number) * 100) / 100,
+	};
+}
+
+function describeTarget(target: TargetEnvelope | null): string | null {
+	if (!target) return null;
+	return target.label || target.text || target.targetId.replace(/[-_]+/g, " ");
 }
 
 function roomName(pathname: string): string | null {

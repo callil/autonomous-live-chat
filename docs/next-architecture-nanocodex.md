@@ -6,7 +6,7 @@ The intended boundary is:
 
 1. The Durable Object remains the authoritative room policy, queue, and public ledger.
 2. A GitHub Actions job checks out an isolated candidate workspace for exactly this repository.
-3. NanoCodex receives the scoped request and repository instructions, proposes or edits only inside that workspace, and emits an auditable event stream.
+3. NanoCodex receives the scoped request, sanitized App Harness target envelope, and private target-to-source provenance manifest; it proposes or edits only inside that workspace and emits an auditable event stream.
 4. Existing CI validates the candidate; the delivery policy decides whether it may be promoted and deployed.
 5. The runner reports structured lifecycle events back to the Durable Object for all connected clients.
 

@@ -14,7 +14,7 @@ The system should make the request, policy outcome, candidate work, validation, 
 
 ## Live, malleable software
 
-Bret Victor's work is an inspiration: software should make its behavior and consequences more immediate, inspectable, and malleable. Livework borrows that direction, not an aesthetic. The bar is a tight feedback loop between a request, visible work, and a real result.
+Bret Victor's work is an inspiration: software should make its behavior and consequences more immediate, inspectable, and malleable. App Harness borrows that direction, not an aesthetic. The bar is a tight feedback loop between a request, visible work, and a real result.
 
 ## Do not reward machinery
 

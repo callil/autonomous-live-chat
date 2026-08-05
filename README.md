@@ -1,8 +1,10 @@
-# Livework
+# App Harness
 
-A deliberately small multi-user chat proof of concept. A Cloudflare Worker serves the interface and routes each room to one Durable Object. The Durable Object persists the latest 200 messages and broadcasts new messages to every connected WebSocket client.
+App Harness is a deliberately small reference harness for situated, auditable changes to live software. This repository uses a multi-user chat application to prove the full loop. A Cloudflare Worker serves the interface and routes each room to one Durable Object. The Durable Object persists the latest 200 messages and broadcasts new messages to every connected WebSocket client.
 
 Contributor documentation lives in [docs/README.md](./docs/README.md).
+
+The deployed Worker and GitHub repository retain the historical `autonomous-live-chat` infrastructure names for now. The product and integration surface are App Harness.
 
 ## Run it
 
@@ -21,7 +23,9 @@ npm run deploy
 
 ## Autonomous change loop
 
-Use the sparkle button in the collapsed rail to request a change. The room's Durable Object durably stores the request and its public activity record, then broadcasts each transition to every connected client. The compact expandable status record is deliberately the only workflow UI.
+Use the sparkle button in the collapsed rail to request a change. Or use the `◎` control to enter **target mode**, click a visible element, and describe a change in the small anchored composer. The room's Durable Object durably stores the request and its public activity record, then broadcasts each transition to every connected client. The compact expandable status record is deliberately the only workflow UI.
+
+Targeted requests include a sanitized, stable envelope based on an explicit `data-target-id`. It contains the element identity, semantic tag/role, a safe label or explicitly marked static text, page and room context, and its viewport rectangle. Input values, message bodies, query strings, and secrets are not included. See [targeting and integration](./docs/targeting.md).
 
 ### Current autonomous policy
 
