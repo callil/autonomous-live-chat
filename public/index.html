@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#ffffff" />
+    <title>Livework</title>
+    <style>
+      :root { color: #0d0d0d; background: #fff; font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      * { box-sizing: border-box; }
+      body { margin: 0; min-width: 320px; background: #fff; }
+      button, textarea { font: inherit; }
+      .app { min-height: 100vh; display: grid; grid-template-columns: 260px minmax(0, 1fr); }
+      .sidebar { border-right: 1px solid #ececec; padding: 14px 12px; display: flex; flex-direction: column; gap: 18px; }
+      .brand { font-size: 16px; font-weight: 650; letter-spacing: -.02em; padding: 5px 8px; }
+      .new-chat { width: 100%; background: transparent; border: 1px solid #dedede; border-radius: 8px; color: #171717; cursor: pointer; padding: 9px 10px; text-align: left; font-size: 14px; }
+      .new-chat:hover { background: #f6f6f6; }
+      .room { background: #f4f4f4; border-radius: 7px; font-size: 14px; padding: 8px 10px; }
+      .muted { color: #777; font-size: 12px; line-height: 1.45; }
+      .workflow-seam { margin-top: auto; border-top: 1px solid #ececec; padding: 14px 8px 0; }
+      .workflow-seam strong { display: block; font-size: 12px; font-weight: 600; margin-bottom: 4px; }
+      main { min-width: 0; display: flex; flex-direction: column; }
+      .topbar { height: 56px; border-bottom: 1px solid #ececec; display: flex; align-items: center; justify-content: space-between; padding: 0 24px; }
+      .room-title { font-size: 14px; font-weight: 600; }
+      .connection { color: #6b6b6b; font-size: 12px; display: flex; gap: 7px; align-items: center; }
+      .dot { width: 7px; height: 7px; background: #999; border-radius: 999px; }
+      .dot.live { background: #10a37f; }
+      .conversation { width: min(100%, 780px); margin: 0 auto; padding: 40px 28px 148px; flex: 1; }
+      .empty { color: #777; font-size: 15px; margin-top: 28vh; text-align: center; }
+      .messages { display: grid; gap: 26px; }
+      .message { display: grid; grid-template-columns: 30px minmax(0, 1fr); gap: 12px; }
+      .avatar { width: 30px; height: 30px; border-radius: 50%; background: #202123; color: #fff; display: grid; place-items: center; font-size: 12px; font-weight: 600; }
+      .author { font-size: 14px; font-weight: 650; margin: 3px 0 5px; }
+      .text { font-size: 15px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+      .composer-wrap { position: fixed; bottom: 0; left: 260px; right: 0; background: linear-gradient(to top, #fff 74%, rgba(255,255,255,0)); padding: 28px 28px 22px; }
+      .composer { width: min(100%, 780px); margin: 0 auto; border: 1px solid #d8d8d8; border-radius: 14px; box-shadow: 0 3px 15px rgba(0,0,0,.08); background: #fff; padding: 10px; display: flex; align-items: end; gap: 10px; }
+      textarea { border: 0; outline: 0; resize: none; min-height: 25px; max-height: 180px; flex: 1; padding: 5px 4px; color: #171717; font-size: 15px; line-height: 1.45; background: transparent; }
+      textarea::placeholder { color: #8e8e8e; }
+      .send { border: 0; width: 32px; height: 32px; border-radius: 8px; background: #202123; color: #fff; cursor: pointer; display: grid; place-items: center; font-size: 16px; }
+      .send:disabled { background: #e5e5e5; color: #aaa; cursor: default; }
+      .hint { width: min(100%, 780px); margin: 9px auto 0; text-align: center; color: #999; font-size: 11px; }
+      @media (max-width: 720px) { .app { display: block; } .sidebar { display: none; } .composer-wrap { left: 0; padding: 24px 14px 14px; } .conversation { padding: 30px 18px 130px; } .topbar { padding: 0 18px; } }
+    </style>
+  </head>
+  <body>
+    <div class="app">
+      <aside class="sidebar" aria-label="Workspace navigation">
+        <div class="brand">Livework</div>
+        <button class="new-chat" type="button" title="A single shared room is included in this proof of concept">New chat</button>
+        <div class="room">Main room</div>
+        <div class="workflow-seam"><strong>Workflow</strong><span class="muted">Status rail reserved for a future autonomous iteration workflow.</span></div>
+      </aside>
+      <main>
+        <header class="topbar"><span class="room-title">Main room</span><span class="connection"><i class="dot" id="dot"></i><span id="connection">Connecting</span></span></header>
+        <section class="conversation" aria-live="polite"><div class="empty" id="empty">Start the conversation.</div><div class="messages" id="messages"></div></section>
+      </main>
+    </div>
+    <form class="composer-wrap" id="form">
+      <div class="composer"><textarea id="input" aria-label="Message" rows="1" maxlength="2000" placeholder="Message Main room" autofocus></textarea><button class="send" id="send" type="submit" aria-label="Send message" disabled>↑</button></div>
+      <div class="hint">Messages are shared live with everyone in this room.</div>
+    </form>
+    <script>
+      const messagesEl = document.querySelector('#messages'); const emptyEl = document.querySelector('#empty'); const input = document.querySelector('#input'); const send = document.querySelector('#send'); const form = document.querySelector('#form'); const dot = document.querySelector('#dot'); const connection = document.querySelector('#connection');
+      const author = localStorage.getItem('livework-author') || `Guest ${Math.floor(100 + Math.random() * 900)}`; localStorage.setItem('livework-author', author);
+      let socket; let reconnectTimer; const rendered = new Set();
+      function setConnection(text, live) { connection.textContent = text; dot.classList.toggle('live', live); }
+      function initials(name) { return name.split(/\s+/).map(part => part[0]).join('').slice(0, 2).toUpperCase(); }
+      function render(message) { if (rendered.has(message.id)) return; rendered.add(message.id); emptyEl.hidden = true; const row = document.createElement('article'); row.className = 'message'; const avatar = document.createElement('div'); avatar.className = 'avatar'; avatar.textContent = initials(message.author); const body = document.createElement('div'); const name = document.createElement('div'); name.className = 'author'; name.textContent = message.author; const text = document.createElement('div'); text.className = 'text'; text.textContent = message.text; body.append(name, text); row.append(avatar, body); messagesEl.append(row); row.scrollIntoView({ behavior: 'smooth', block: 'end' }); }
+      function connect() { clearTimeout(reconnectTimer); const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'; socket = new WebSocket(`${protocol}//${location.host}/api/rooms/main`); socket.addEventListener('open', () => setConnection('Live', true)); socket.addEventListener('close', () => { setConnection('Reconnecting', false); reconnectTimer = setTimeout(connect, 1000); }); socket.addEventListener('error', () => socket.close()); socket.addEventListener('message', ({ data }) => { try { const event = JSON.parse(data); if (event.type === 'chat:snapshot') event.messages.forEach(render); if (event.type === 'chat:message') render(event.message); if (event.type === 'chat:presence') setConnection(`${event.count} live`, true); } catch {} }); }
+      function resize() { input.style.height = 'auto'; input.style.height = `${Math.min(input.scrollHeight, 180)}px`; send.disabled = !input.value.trim() || socket?.readyState !== WebSocket.OPEN; }
+      input.addEventListener('input', resize); input.addEventListener('keydown', event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); form.requestSubmit(); } });
+      form.addEventListener('submit', event => { event.preventDefault(); const text = input.value.trim(); if (!text || socket?.readyState !== WebSocket.OPEN) return; socket.send(JSON.stringify({ type: 'chat:send', author, text })); input.value = ''; resize(); });
+      connect(); resize();
+    </script>
+  </body>
+</html>
