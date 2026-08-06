@@ -11,6 +11,7 @@ const body = JSON.stringify({
 	phase,
 	message,
 	result: result || undefined,
+	deploymentUrl: phase === "completed" ? process.env.AUTONOMY_DEPLOYMENT_URL : undefined,
 });
 const response = await fetch(callbackUrl, {
 	method: "POST",

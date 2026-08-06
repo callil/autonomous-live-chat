@@ -89,6 +89,7 @@ jobs:
           npm run test:stack
           npm run test:native-git-preflight
           npm run test:os-provider-bridge
+          npm run test:coordinator
           git diff --check
       - name: Recheck the scoped visual contract
         run: node scripts/check-visual-candidate.mjs

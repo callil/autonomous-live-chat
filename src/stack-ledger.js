@@ -562,6 +562,17 @@ export function applyStackEvent(ledger, event) {
 			}));
 		}
 
+		case "coordinator-blocked": {
+			return apply(ledger, event, (current) => ({
+				...current,
+				status: "blocked",
+				nodes: current.nodes.map((node) => node.state === "merged" || node.state === "closed" || node.state === "failed" ? node : { ...node, state: "blocked" }),
+				runner: { ...current.runner, stage: current.runner.stage === "complete" ? "complete" : "failed", attemptToken: null },
+				promotion: { ...current.promotion, stage: current.promotion.stage === "merged" ? "merged" : "blocked" },
+				deployment: { ...current.deployment, stage: current.deployment.stage === "deployed" ? "deployed" : "blocked", attemptToken: null },
+			}));
+		}
+
 		default:
 			throw new Error("Unsupported stack event type.");
 	}

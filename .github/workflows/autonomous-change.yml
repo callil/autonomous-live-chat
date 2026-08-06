@@ -39,6 +39,7 @@ jobs:
       AUTONOMY_ROOM: ${{ inputs.room }}
       AUTONOMY_GITHUB_ISSUE: ${{ inputs.issue_number }}
       AUTONOMY_CALLBACK_URL: ${{ secrets.AUTONOMY_CALLBACK_URL }}
+      AUTONOMY_DEPLOYMENT_URL: https://autonomous-live-chat.coda-a.workers.dev/
       AUTONOMY_GITHUB_TOKEN: ${{ secrets.AUTONOMY_GITHUB_TOKEN }}
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
     steps:

@@ -1,6 +1,18 @@
 import { DurableObject } from "cloudflare:workers";
+import {
+	applyCoordinatorCallback,
+	blockCoordinatorStack,
+	claimCoordinatorEffect,
+	completeCoordinatorEffect,
+	createCoordinatorEffect,
+	createCoordinatorJob,
+	normalizeAgentProvenance,
+	reconcileCompletedStack,
+	retryCoordinatorEffect,
+} from "./coordinator-state.js";
 import { createGithubIdentityClient, type GithubModelClassification } from "./github-identity-client.js";
 import { classifyOsRunnerResponse, createOsNativeGitJob, createOsPlanningManifest } from "./os-provider-bridge.js";
+import { applyStackEvent, createStackLedger } from "./stack-ledger.js";
 
 type ChatMessage = {
 	id: string;
@@ -121,6 +133,7 @@ type HarnessWorkItem = {
 		startedAt?: number;
 		baseSha?: string;
 		headSha?: string;
+		agent?: { model: string; responseIds: string[]; tools: string[] };
 	};
 };
 
@@ -137,7 +150,22 @@ type WorkflowCallback = {
 	message?: unknown;
 	result?: unknown;
 	deploymentUrl?: unknown;
+	currentMainSha?: unknown;
+	headSha?: unknown;
+	mergeSha?: unknown;
+	runId?: unknown;
 };
+
+type CoordinatorJob = Omit<ReturnType<typeof createCoordinatorJob>, "stage" | "currentEffectId" | "lease"> & {
+	stage: string;
+	terminalPhase?: WorkflowPhase;
+	currentEffectId: string | null;
+	lease: { effectId: string; token: string; expiresAt: number } | null;
+};
+
+type CoordinatorEffect = Omit<ReturnType<typeof createCoordinatorEffect>, "payload"> & { payload: Record<string, unknown> };
+type StackLedger = ReturnType<typeof createStackLedger>;
+type CoordinatorClaim = { job: CoordinatorJob; effect: CoordinatorEffect; leaseToken: string };
 
 type RuntimeEnv = Omit<Env, "OS_NATIVE_GIT_PROVIDER" | "OS_NATIVE_GIT_RUNNER" | "OS_AGENT_ORCHESTRATOR"> & {
 	GITHUB_AUTOMATION_TOKEN: string;
@@ -155,11 +183,21 @@ const MAX_MESSAGE_LENGTH = 2_000;
 const MAX_REQUEST_LENGTH = 500;
 const MAX_STORED_MESSAGES = 200;
 const MAX_STORED_ANNOTATIONS = 100;
+// Kept only as the public "latest workflow" compatibility snapshot. Admission,
+// callbacks, leases, and retries are keyed by workflow/work item below.
 const WORKFLOW_KEY = "workflow";
+const WORKFLOW_PREFIX = "workflow:";
+const JOB_PREFIX = "coordinator-job:";
+const OUTBOX_PREFIX = "coordinator-outbox:";
+const LEDGER_PREFIX = "stack-ledger:";
+const WORK_ITEM_PREFIX = "harness-work-item:";
 const ANNOTATIONS_KEY = "harness-annotations";
 const WORK_ITEMS_KEY = "harness-work-items";
 const MAX_STORED_WORK_ITEMS = 100;
-const OS_RUNNER_LEASE_MS = 180_000;
+const COORDINATOR_LEASE_MS = 180_000;
+const COORDINATOR_MAX_ATTEMPTS = 3;
+const COORDINATOR_BATCH_SIZE = 8;
+const SHA = /^[0-9a-f]{40}$/iu;
 const LIVE_APP_URL = "https://autonomous-live-chat.coda-a.workers.dev/?room=main";
 const TERMINAL_PHASES: ReadonlySet<WorkflowPhase> = new Set([
 	"completed",
@@ -252,12 +290,13 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		const [client, server] = Object.values(pair);
 		this.ctx.acceptWebSocket(server);
 
+		await this.migrateLegacyRecords();
 		await this.backfillExternalHandoffs();
 		await this.reconcileClosedGitHubIssues();
-		await this.schedulePendingOsRunner();
+		await this.scheduleCoordinatorAlarm();
 		const [storedMessages, workflow, annotations, workItems] = await Promise.all([
 			this.ctx.storage.get<ChatMessage[]>("messages"),
-			this.ctx.storage.get<WorkflowRecord>(WORKFLOW_KEY),
+			this.latestWorkflow(),
 			this.ctx.storage.get<HarnessAnnotation[]>(ANNOTATIONS_KEY),
 			this.ctx.storage.get<HarnessWorkItem[]>(WORK_ITEMS_KEY),
 		]);
@@ -272,9 +311,15 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		return new Response(null, { status: 101, webSocket: client });
 	}
 
-	/** Alarms make the external runner handoff durable instead of tying it to a WebSocket event. */
+	/** One alarm drains all per-work-item outbox records using expiring leases. */
 	async alarm(): Promise<void> {
-		await this.resumeOsNativeGitRunner();
+		try {
+			await this.drainCoordinatorOutbox(COORDINATOR_BATCH_SIZE);
+		} catch (error) {
+			console.error("Coordinator alarm failed", error);
+		} finally {
+			await this.scheduleCoordinatorAlarm();
+		}
 	}
 
 	async webSocketMessage(socket: WebSocket, raw: ArrayBuffer | string): Promise<void> {
@@ -379,9 +424,10 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		this.broadcast({ type: "harness:annotations", annotations: stored });
 		this.broadcastWorkItems(workItems);
 
-		const issueCreated = await this.ensureGitHubIssue(workItem.id, approvedComment, false, canPlanComment && osProviderEnabled ? "os-planning" : approvedComment ? "fallback" : "triage");
 		if (canPlanComment && annotation.kind === "comment") {
-			if (issueCreated) await this.startWorkflow(socket, annotation.text, annotation.target, workItem.clientSubmissionId, workItem.id);
+			await this.startWorkflow(socket, annotation.text, annotation.target, workItem.clientSubmissionId, workItem.id);
+		} else {
+			await this.ensureGitHubIssue(workItem.id, approvedComment, false, "triage");
 		}
 	}
 
@@ -424,9 +470,16 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		const now = Date.now();
 		let workItems = await this.getWorkItems();
 		let workItem = existingWorkItemId ? workItems.find((item) => item.id === existingWorkItemId) : undefined;
+		const submissionId = normalizeSubmissionId(clientSubmissionId);
+		if (!workItem && submissionId) workItem = workItems.find((item) => item.clientSubmissionId === submissionId);
+		if (workItem?.workflowId) {
+			const existing = await this.getWorkflow(workItem.workflowId);
+			if (existing) this.broadcastWorkflow(existing);
+			return;
+		}
 		if (!workItem) {
 			workItem = this.createWorkItem({
-				clientSubmissionId: normalizeSubmissionId(clientSubmissionId),
+				clientSubmissionId: submissionId,
 				kind: "request",
 				summary: request,
 				target: target ?? undefined,
@@ -442,26 +495,18 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 
 		const policyApproved = isPolicyApprovedFallbackRequest(request);
 		const osProviderEnabled = this.env.OS_NATIVE_GIT_PROVIDER === "enabled";
-		const workItemId = workItem.id;
-		const issueCreated = await this.ensureGitHubIssue(workItemId, policyApproved, false, osProviderEnabled ? "os-planning" : policyApproved ? "fallback" : "triage");
-		if (!issueCreated) return;
-		workItems = await this.getWorkItems();
-		workItem = workItems.find((item) => item.id === workItemId) ?? workItem;
 		if (!osProviderEnabled && !policyApproved) {
+			const workItemId = workItem.id;
+			const issueCreated = await this.ensureGitHubIssue(workItem.id, policyApproved, false, "triage");
+			if (!issueCreated) return;
+			workItems = await this.getWorkItems();
+			workItem = workItems.find((item) => item.id === workItemId) ?? workItem;
 			this.transitionWorkItem(
 				workItem,
 				"needs_review",
 				`GitHub issue #${workItem.githubIssue?.number ?? "?"} created — awaiting coding-agent triage. NanoCodex is not configured.`,
 			);
 			await this.saveWorkItems(workItems);
-			return;
-		}
-
-		const active = await this.ctx.storage.get<WorkflowRecord>(WORKFLOW_KEY);
-		if (active && !TERMINAL_PHASES.has(active.phase)) {
-			this.transitionWorkItem(workItem, "needs_review", "An autonomous candidate run is already active. This request is recorded for human triage.");
-			await this.saveWorkItems(workItems);
-			socket.send(JSON.stringify({ type: "workflow:notice", message: "This room already has a change request in progress." }));
 			return;
 		}
 
@@ -481,288 +526,526 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		};
 
 		workItem.workflowId = workflow.id;
-		this.transitionWorkItem(workItem, "queued", osProviderEnabled ? "GitHub issue created. Cloudflare OS planning is starting." : "GitHub issue created. Candidate execution is being selected by policy.");
-		await Promise.all([this.ctx.storage.put(WORKFLOW_KEY, workflow), this.saveWorkItems(workItems)]);
+		this.transitionWorkItem(workItem, "queued", workItem.githubIssue
+			? osProviderEnabled ? "Cloudflare OS planning is durably queued." : "Guarded fallback dispatch is durably queued."
+			: "GitHub App issue creation is durably queued before candidate execution.");
+		const firstKind = workItem.githubIssue ? osProviderEnabled ? "plan-os" : "dispatch-fallback" : "create-issue";
+		const firstEffectId = this.effectId(workflow.id, firstKind);
+		const job = createCoordinatorJob({ workflowId: workflow.id, workItemId: workItem.id, pipeline: osProviderEnabled ? "os-native-git" : "fallback", firstEffectId, now });
+		const effect = createCoordinatorEffect({
+			id: firstEffectId,
+			jobId: job.id,
+			workItemId: workItem.id,
+			kind: firstKind,
+			payload: { policyApproved, handoff: osProviderEnabled ? "os-planning" : "fallback" },
+			now,
+		});
+		await Promise.all([
+			this.saveWorkflow(workflow),
+			this.saveWorkItem(workItem),
+			this.ctx.storage.put(this.jobKey(job.id), job),
+			this.ctx.storage.put(this.outboxKey(effect.id), effect),
+		]);
 		this.broadcastWorkflow(workflow);
+		await this.ctx.storage.setAlarm(now + 25);
+		await this.drainCoordinatorOutbox(1);
+	}
 
-		try {
-			if (this.env.OS_NATIVE_GIT_PROVIDER === "enabled") {
-				await this.dispatchOsNativeGitJob(workflow);
-				return;
-			}
-			this.transitionWorkItem(workItem, "queued", "Guarded fallback workflow dispatched; no model-driven agent is involved.");
-			await this.saveWorkItems(workItems);
-			await this.dispatchAutonomousRun(workflow);
-		} catch (error) {
-			const detail = error instanceof Error ? error.message : "unknown dispatch error";
-			console.error("Autonomy dispatch failed", detail);
-			await this.failWorkflow(workflow, `Could not dispatch the guarded candidate run (${detail}). No source or production change was made.`);
+	private workflowKey(id: string): string { return `${WORKFLOW_PREFIX}${id}`; }
+	private jobKey(id: string): string { return `${JOB_PREFIX}${id}`; }
+	private outboxKey(id: string): string { return `${OUTBOX_PREFIX}${id}`; }
+	private ledgerKey(workItemId: string): string { return `${LEDGER_PREFIX}${workItemId}`; }
+	private workItemKey(id: string): string { return `${WORK_ITEM_PREFIX}${id}`; }
+	private effectId(workflowId: string, kind: string, suffix = "main"): string { return `${workflowId}-${kind}-${suffix}`; }
+
+	private async drainCoordinatorOutbox(limit: number): Promise<void> {
+		const effects = [...(await this.ctx.storage.list<CoordinatorEffect>({ prefix: OUTBOX_PREFIX })).values()]
+			.filter((effect) => effect.state === "pending" || effect.state === "leased")
+			.sort((left, right) => (left.state === "leased" ? left.leaseExpiresAt ?? left.availableAt : left.availableAt) - (right.state === "leased" ? right.leaseExpiresAt ?? right.availableAt : right.availableAt));
+		let processed = 0;
+		for (const effect of effects) {
+			if (processed >= limit) break;
+			const dueAt = effect.state === "leased" ? effect.leaseExpiresAt ?? effect.availableAt : effect.availableAt;
+			if (dueAt > Date.now()) break;
+			if (await this.processCoordinatorEffect(effect.id)) processed += 1;
 		}
 	}
 
-	/**
-	 * The OS provider has two deliberately separate boundaries. The planning
-	 * agent sees a bounded manifest (including the request); the native-Git
-	 * runner receives only its schema-validated plan, never user prose or a
-	 * model response. Both sides are capability-scoped service bindings.
-	 */
-	private async dispatchOsNativeGitJob(workflow: WorkflowRecord): Promise<void> {
-		const workItems = await this.getWorkItems();
-		const workItem = workflow.workItemId ? workItems.find((item) => item.id === workflow.workItemId) : undefined;
-		if (!workItem?.githubIssue) {
-			await this.failWorkflow(workflow, "Cloudflare OS job is blocked because the linked GitHub issue is missing.");
-			return;
-		}
-		const manifest = createOsPlanningManifest({
-			workItemId: workItem.id,
-			issueUrl: workItem.githubIssue.url,
-			request: workflow.request,
-			target: workflow.target,
-			room: "main",
-		});
-		workItem.osNativeGit = {
-			jobId: `os-${workItem.id}-g${manifest.stack.generation}`,
-			state: "planning",
-			runnerUrl: manifest.runnerUrl,
-			stackId: manifest.stack.id,
-			generation: manifest.stack.generation,
-		};
-		if (!this.env.OS_AGENT_ORCHESTRATOR || !this.env.OS_AGENT_ORCHESTRATOR_SECRET || !this.env.OS_NATIVE_GIT_RUNNER || !this.env.OS_NATIVE_GIT_RUNNER_SECRET) {
-			workItem.osNativeGit.state = "blocked";
-			this.transitionWorkItem(workItem, "needs_review", "Cloudflare OS provider is enabled but its private planning or runner binding is not configured. No model or native Git action was attempted.");
-			await this.saveWorkItems(workItems);
-			return;
-		}
+	private async scheduleCoordinatorAlarm(): Promise<void> {
+		const effects = [...(await this.ctx.storage.list<CoordinatorEffect>({ prefix: OUTBOX_PREFIX })).values()]
+			.filter((effect) => effect.state === "pending" || effect.state === "leased");
+		if (!effects.length) return;
+		const next = Math.min(...effects.map((effect) => effect.state === "leased" ? effect.leaseExpiresAt ?? effect.availableAt : effect.availableAt));
+		const current = await this.ctx.storage.getAlarm();
+		if (current === null || next < current || current <= Date.now()) await this.ctx.storage.setAlarm(Math.max(Date.now() + 25, next));
+	}
 
-		const planningResponse = await this.env.OS_AGENT_ORCHESTRATOR.fetch(new Request("https://os-agent.internal/v1/plans", {
+	private async claimEffect(effectId: string): Promise<{ job: CoordinatorJob; effect: CoordinatorEffect; leaseToken: string } | null> {
+		return this.ctx.storage.transaction(async (txn) => {
+			const effect = await txn.get<CoordinatorEffect>(this.outboxKey(effectId));
+			if (!effect) return null;
+			const job = await txn.get<CoordinatorJob>(this.jobKey(effect.jobId));
+			if (!job) return null;
+			const leaseToken = crypto.randomUUID();
+			const claimed = claimCoordinatorEffect(job, effect, { now: Date.now(), leaseToken, leaseMs: COORDINATOR_LEASE_MS });
+			if (claimed.disposition === "terminal") {
+				await txn.put(this.outboxKey(effect.id), { ...effect, state: "failed", updatedAt: Date.now() });
+				return null;
+			}
+			if (claimed.disposition !== "claimed") return null;
+			await Promise.all([
+				txn.put(this.jobKey(job.id), claimed.job),
+				txn.put(this.outboxKey(effect.id), claimed.effect),
+			]);
+			return { job: claimed.job as CoordinatorJob, effect: claimed.effect as CoordinatorEffect, leaseToken };
+		});
+	}
+
+	private async processCoordinatorEffect(effectId: string): Promise<boolean> {
+		const claim = await this.claimEffect(effectId);
+		if (!claim) return false;
+		try {
+			switch (claim.effect.kind) {
+				case "create-issue": await this.processCreateIssue(claim); break;
+				case "plan-os": await this.processOsPlan(claim); break;
+				case "observe-main": await this.processMainObservation(claim); break;
+				case "run-os": await this.processOsRunner(claim); break;
+				case "dispatch-promotion": await this.processPromotionDispatch(claim); break;
+				case "dispatch-fallback": await this.processFallbackDispatch(claim); break;
+				case "github-status": await this.processGithubStatus(claim); break;
+				case "github-classification": await this.processGithubClassification(claim); break;
+				case "github-close": await this.processGithubClose(claim); break;
+				default: throw new Error(`Unsupported coordinator effect ${claim.effect.kind}.`);
+			}
+		} catch (error) {
+			await this.retryClaim(claim, error);
+		}
+		return true;
+	}
+
+	private async processCreateIssue(claim: { job: CoordinatorJob; effect: CoordinatorEffect; leaseToken: string }): Promise<void> {
+		const workflow = await this.getWorkflow(claim.job.id);
+		const workItem = await this.getWorkItem(claim.job.workItemId);
+		if (!workflow || !workItem) throw new Error("Coordinator issue handoff lost its durable work record.");
+		const policyApproved = claim.effect.payload.policyApproved === true;
+		const handoff = claim.effect.payload.handoff === "os-planning" ? "os-planning" : "fallback";
+		if (!workItem.githubIssue) {
+			const issue = await this.createGithubIssueHandoff(workItem, policyApproved, false, handoff);
+			workItem.githubIssue = { number: issue.issueNumber, url: issue.issueUrl };
+		}
+		this.transitionWorkItem(workItem, "triaged", handoff === "os-planning"
+			? `GitHub issue #${workItem.githubIssue.number} created by App Harness. Cloudflare OS bounded planning is durably queued.`
+			: `GitHub issue #${workItem.githubIssue.number} created by App Harness. Guarded fallback dispatch is durably queued.`);
+		const nextKind = claim.job.pipeline === "os-native-git" ? "plan-os" : "dispatch-fallback";
+		await this.completeClaim(claim, { workflow, workItem, nextKind, nextStage: "queued" });
+	}
+
+	private async processOsPlan(claim: { job: CoordinatorJob; effect: CoordinatorEffect; leaseToken: string }): Promise<void> {
+		const workflow = await this.getWorkflow(claim.job.id);
+		const workItem = await this.getWorkItem(claim.job.workItemId);
+		if (!workflow || !workItem?.githubIssue) throw new Error("Cloudflare OS planning lost its linked issue.");
+		if (!this.env.OS_AGENT_ORCHESTRATOR || !this.env.OS_AGENT_ORCHESTRATOR_SECRET || !this.env.OS_NATIVE_GIT_RUNNER || !this.env.OS_NATIVE_GIT_RUNNER_SECRET) {
+			await this.terminateClaim(claim, workflow, workItem, "requires_review", "Cloudflare OS provider is enabled but its private planning or runner binding is not configured. No model or native Git action was attempted.");
+			return;
+		}
+		const manifest = createOsPlanningManifest({ workItemId: workItem.id, issueUrl: workItem.githubIssue.url, request: workflow.request, target: workflow.target, room: "main" });
+		workItem.osNativeGit = { jobId: `os-${workItem.id}-g${manifest.stack.generation}`, state: "planning", runnerUrl: manifest.runnerUrl, stackId: manifest.stack.id, generation: manifest.stack.generation };
+		const response = await this.env.OS_AGENT_ORCHESTRATOR.fetch(new Request("https://os-agent.internal/v1/plans", {
 			method: "POST",
-			headers: {
-				Authorization: `Bearer ${this.env.OS_AGENT_ORCHESTRATOR_SECRET}`,
-				"Content-Type": "application/json",
-			},
+			headers: { Authorization: `Bearer ${this.env.OS_AGENT_ORCHESTRATOR_SECRET}`, "Content-Type": "application/json" },
 			body: JSON.stringify(manifest),
 		}));
-		let planningBody: unknown = null;
-		try { planningBody = await planningResponse.json(); } catch { /* handled as blocked below */ }
-		const agentPlan = acceptedOsAgentPlan(planningBody, workflow.request);
-		if (!agentPlan) {
-			workItem.osNativeGit.state = typeof planningBody === "object" && planningBody && "state" in planningBody && typeof (planningBody as { state?: unknown }).state === "string" ? (planningBody as { state: string }).state : "unknown";
-			const detail = osPlannerFailureDetail(planningResponse.status, planningBody);
-			this.transitionWorkItem(workItem, "needs_review", detail);
-			workflow.phase = "requires_review";
-			workflow.updatedAt = Date.now();
-			workflow.activity.push({ phase: workflow.phase, message: detail, at: workflow.updatedAt });
-			await Promise.all([this.ctx.storage.put(WORKFLOW_KEY, workflow), this.saveWorkItems(workItems)]);
-			await this.appendGitHubIssueStatus(workItem, detail);
-			this.broadcastWorkflow(workflow);
+		let body: unknown = null;
+		try { body = await response.json(); } catch { /* rejected below */ }
+		const plan = acceptedOsAgentPlan(body, workflow.request);
+		if (!plan) {
+			workItem.osNativeGit.state = typeof body === "object" && body && "state" in body && typeof body.state === "string" ? body.state : "unknown";
+			await this.terminateClaim(claim, workflow, workItem, "requires_review", osPlannerFailureDetail(response.status, body));
 			return;
 		}
 		workItem.osNativeGit.state = "planned";
-		workItem.osNativeGit.model = agentPlan.model;
-		workItem.osNativeGit.plan = agentPlan.plan;
-		workItem.osNativeGit.classification = agentPlan.classification;
-		await this.applyOsClassificationLabels(workItem, agentPlan.classification);
-		this.transitionWorkItem(workItem, "queued", `Cloudflare OS model ${agentPlan.model.model} produced a bounded candidate plan; native Git is queued durably.`);
+		workItem.osNativeGit.model = plan.model;
+		workItem.osNativeGit.plan = plan.plan;
+		workItem.osNativeGit.classification = plan.classification;
+		this.transitionWorkItem(workItem, "queued", `Cloudflare OS model ${plan.model.model} produced a bounded candidate plan; main observation is queued durably.`);
 		workflow.phase = "preparing_candidate";
 		workflow.updatedAt = Date.now();
-		workflow.activity.push({ phase: "preparing_candidate", message: `Cloudflare OS model plan recorded (${agentPlan.rationale}).`, at: Date.now() });
-		await Promise.all([this.ctx.storage.put(WORKFLOW_KEY, workflow), this.saveWorkItems(workItems)]);
-		await this.appendGitHubIssueStatus(workItem, `Cloudflare OS model plan recorded (${agentPlan.model.model}, ${agentPlan.model.id}); native Git is queued durably.`);
-		await this.ctx.storage.setAlarm(Date.now() + 50);
-		this.broadcastWorkflow(workflow);
+		workflow.activity.push({ phase: "preparing_candidate", message: `Cloudflare OS model plan recorded (${plan.rationale}).`, at: workflow.updatedAt });
+		if (await this.completeClaim(claim, { workflow, workItem, nextKind: "observe-main", nextStage: "queued" })) {
+			await this.applyOsClassificationLabels(workItem, plan.classification);
+			await this.appendGitHubIssueStatus(workItem, `Cloudflare OS model plan recorded (${plan.model.model}, ${plan.model.id}); native Git is queued durably.`);
+		}
 	}
 
-	private async schedulePendingOsRunner(): Promise<void> {
-		const workflow = await this.ctx.storage.get<WorkflowRecord>(WORKFLOW_KEY);
-		if (!workflow || TERMINAL_PHASES.has(workflow.phase)) return;
-		const workItem = await this.workItemForWorkflow(workflow);
-		if (!workItem?.osNativeGit?.plan) return;
-		const runner = workItem.osNativeGit;
-		if (runner.state === "planned" || (runner.state === "running" && (!runner.startedAt || Date.now() - runner.startedAt > OS_RUNNER_LEASE_MS))) await this.ctx.storage.setAlarm(Date.now() + 50);
+	private async processMainObservation(claim: { job: CoordinatorJob; effect: CoordinatorEffect; leaseToken: string }): Promise<void> {
+		const workflow = await this.getWorkflow(claim.job.id);
+		const workItem = await this.getWorkItem(claim.job.workItemId);
+		if (!workflow || !workItem?.githubIssue || !workItem.osNativeGit?.plan) throw new Error("Main observation lost its durable plan.");
+		const response = await fetch(`https://api.github.com/repos/${this.env.GITHUB_REPOSITORY}/git/ref/heads/main`, {
+			headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${this.env.GITHUB_AUTOMATION_TOKEN}`, "User-Agent": "app-harness-os", "X-GitHub-Api-Version": "2022-11-28" },
+		});
+		if (!response.ok) throw new Error(`GitHub main observation failed (${response.status}).`);
+		const body = await response.json() as { object?: { sha?: unknown } };
+		if (typeof body.object?.sha !== "string" || !SHA.test(body.object.sha)) throw new Error("GitHub main observation returned no full SHA.");
+		const ledger = createStackLedger({
+			id: workItem.osNativeGit.stackId,
+			repository: this.env.GITHUB_REPOSITORY,
+			lane: "room-main",
+			issue: workItem.githubIssue,
+			baseSha: body.object.sha,
+			nodes: [{ id: "root", intent: workflow.request, branchPrefix: `app-harness-os/${workItem.githubIssue.number}` }],
+		});
+		workItem.osNativeGit.baseSha = body.object.sha.toLowerCase();
+		await this.completeClaim(claim, { workflow, workItem, ledger, nextKind: "run-os", nextStage: "queued" });
 	}
 
-	private async resumeOsNativeGitRunner(): Promise<void> {
-		const workflow = await this.ctx.storage.get<WorkflowRecord>(WORKFLOW_KEY);
-		if (!workflow || TERMINAL_PHASES.has(workflow.phase)) return;
-		const workItems = await this.getWorkItems();
-		const workItem = workflow.workItemId ? workItems.find((item) => item.id === workflow.workItemId) : undefined;
-		if (!workItem?.githubIssue || !workItem.osNativeGit?.plan) return;
-		if (workItem.osNativeGit.state === "running" && workItem.osNativeGit.startedAt && Date.now() - workItem.osNativeGit.startedAt <= OS_RUNNER_LEASE_MS) {
-			await this.ctx.storage.setAlarm(workItem.osNativeGit.startedAt + OS_RUNNER_LEASE_MS + 50);
-			return;
+	private async processOsRunner(claim: { job: CoordinatorJob; effect: CoordinatorEffect; leaseToken: string }): Promise<void> {
+		const workflow = await this.getWorkflow(claim.job.id);
+		const workItem = await this.getWorkItem(claim.job.workItemId);
+		let ledger = await this.ctx.storage.get<StackLedger>(this.ledgerKey(claim.job.workItemId));
+		if (!workflow || !workItem?.githubIssue || !workItem.osNativeGit?.plan || !ledger || !this.env.OS_NATIVE_GIT_RUNNER || !this.env.OS_NATIVE_GIT_RUNNER_SECRET) throw new Error("Native Git runner lost its durable capability state.");
+		if (ledger.runner.stage === "running" && ledger.runner.attemptToken) {
+			ledger = applyStackEvent(ledger, { type: "runner-attempt-retryable", eventId: `runner-expired-${claim.effect.attempts - 1}`, generation: ledger.generation, attemptToken: ledger.runner.attemptToken }).ledger;
 		}
-		if (!["planned", "running"].includes(workItem.osNativeGit.state)) return;
-		if (!this.env.OS_NATIVE_GIT_RUNNER || !this.env.OS_NATIVE_GIT_RUNNER_SECRET) {
-			workItem.osNativeGit.state = "blocked";
-			this.transitionWorkItem(workItem, "needs_review", "Cloudflare OS runner binding is unavailable. The model plan is retained; no native Git action was attempted.");
-			workflow.phase = "requires_review";
-			await Promise.all([this.ctx.storage.put(WORKFLOW_KEY, workflow), this.saveWorkItems(workItems)]);
-			return;
-		}
-		const manifest = createOsPlanningManifest({ workItemId: workItem.id, issueUrl: workItem.githubIssue.url, request: workflow.request, target: workflow.target, room: "main", generation: workItem.osNativeGit.generation });
-		const job = createOsNativeGitJob({ manifest, plan: workItem.osNativeGit.plan });
+		const started = applyStackEvent(ledger, { type: "runner-attempt-started", eventId: `runner-start-${claim.effect.attempts}`, generation: ledger.generation, nodeId: "root", attemptToken: claim.leaseToken });
+		if (started.disposition !== "applied") throw new Error(`Runner lease could not start (${started.reason}).`);
+		ledger = started.ledger;
 		workItem.osNativeGit.state = "running";
 		workItem.osNativeGit.startedAt = Date.now();
-		workItem.osNativeGit.attempts = (workItem.osNativeGit.attempts ?? 0) + 1;
-		this.transitionWorkItem(workItem, "building", "Cloudflare OS isolated native Git runner started the durable candidate job.");
-		await Promise.all([this.ctx.storage.put(WORKFLOW_KEY, workflow), this.saveWorkItems(workItems)]);
-		// Schedule the watchdog before awaiting a cross-Worker call. If the
-		// invocation is interrupted after this durable write, the lease expires
-		// into a resumable planned job instead of becoming a zombie "running" job.
-		await this.ctx.storage.setAlarm(workItem.osNativeGit.startedAt + OS_RUNNER_LEASE_MS + 50);
-
-		let response: Response;
-		try {
-			response = await this.env.OS_NATIVE_GIT_RUNNER.fetch(new Request("https://runner.internal/v1/native-git/jobs", {
-				method: "POST",
-				headers: {
-					Authorization: `Bearer ${this.env.OS_NATIVE_GIT_RUNNER_SECRET}`,
-					"Content-Type": "application/json",
-				},
-				body: JSON.stringify(job),
-			}));
-		} catch {
-			const attempts = workItem.osNativeGit.attempts ?? 1;
-			if (attempts >= 3) {
-				workItem.osNativeGit.state = "blocked";
-				this.transitionWorkItem(workItem, "needs_review", "Cloudflare OS runner did not return after three durable attempts. The model plan is retained; no pull request or deployment is claimed.");
-				workflow.phase = "requires_review";
-			} else {
-				workItem.osNativeGit.state = "planned";
-				workItem.osNativeGit.startedAt = undefined;
-				this.transitionWorkItem(workItem, "queued", `Cloudflare OS runner attempt ${attempts} did not return. The durable job will retry.`);
-				workflow.phase = "preparing_candidate";
-				await this.ctx.storage.setAlarm(Date.now() + attempts * 5_000);
-			}
-			workflow.updatedAt = Date.now();
-			await Promise.all([this.ctx.storage.put(WORKFLOW_KEY, workflow), this.saveWorkItems(workItems)]);
-			this.broadcastWorkflow(workflow);
+		workItem.osNativeGit.attempts = claim.effect.attempts;
+		this.transitionWorkItem(workItem, "building", `Cloudflare OS isolated native Git runner started durable attempt ${claim.effect.attempts}.`);
+		await Promise.all([this.ctx.storage.put(this.ledgerKey(workItem.id), ledger), this.saveWorkItem(workItem)]);
+		const manifest = createOsPlanningManifest({ workItemId: workItem.id, issueUrl: workItem.githubIssue.url, request: workflow.request, target: workflow.target, room: "main", generation: ledger.generation });
+		const runnerJob = createOsNativeGitJob({ manifest, plan: workItem.osNativeGit.plan, parentBaseSha: ledger.generationBaseSha });
+		const response = await this.env.OS_NATIVE_GIT_RUNNER.fetch(new Request("https://runner.internal/v1/native-git/jobs", {
+			method: "POST",
+			headers: { Authorization: `Bearer ${this.env.OS_NATIVE_GIT_RUNNER_SECRET}`, "Content-Type": "application/json" },
+			body: JSON.stringify(runnerJob),
+		}));
+		let body: unknown = null;
+		try { body = await response.json(); } catch { /* classified below */ }
+		const value = body && typeof body === "object" ? body as Record<string, unknown> : {};
+		const agent = normalizeAgentProvenance(value.agent);
+		if (agent) workItem.osNativeGit.agent = agent;
+		const outcome = classifyOsRunnerResponse(body);
+		if (value.state !== "pull-request-opened" || typeof value.baseSha !== "string" || typeof value.headSha !== "string" || !value.pullRequest || typeof value.pullRequest !== "object") {
+			const failed = applyStackEvent(ledger, { type: "runner-attempt-failed", eventId: `runner-failed-${claim.effect.attempts}`, generation: ledger.generation, attemptToken: claim.leaseToken });
+			if (failed.disposition === "applied") ledger = failed.ledger;
+			await this.terminateClaim(claim, workflow, workItem, "requires_review", outcome.detail, ledger);
 			return;
 		}
-		let body: unknown = null;
-		try { body = await response.json(); } catch { /* handled as unrecognized below */ }
-		const outcome = classifyOsRunnerResponse(body);
-		workItem.osNativeGit.state = typeof body === "object" && body && "state" in body && typeof body.state === "string" ? body.state : "unknown";
-		if (typeof body === "object" && body && "baseSha" in body && typeof (body as { baseSha?: unknown }).baseSha === "string") workItem.osNativeGit.baseSha = (body as { baseSha: string }).baseSha;
-		if (typeof body === "object" && body && "headSha" in body && typeof (body as { headSha?: unknown }).headSha === "string") workItem.osNativeGit.headSha = (body as { headSha: string }).headSha;
-		if (typeof body === "object" && body && "pullRequest" in body) {
-			const pullRequest = (body as { pullRequest?: unknown }).pullRequest;
-			if (pullRequest && typeof pullRequest === "object" && typeof (pullRequest as { url?: unknown }).url === "string") workItem.githubPullRequestUrl = (pullRequest as { url: string }).url;
-		}
-		this.transitionWorkItem(workItem, outcome.phase, outcome.detail);
-		workflow.phase = outcome.terminal ? "requires_review" : workItem.githubPullRequestUrl ? "validating" : "preparing_candidate";
+		const pullRequest = value.pullRequest as Record<string, unknown>;
+		if (!Number.isInteger(pullRequest.number) || typeof pullRequest.url !== "string") throw new Error("Runner pull request provenance is invalid.");
+		const recorded = applyStackEvent(ledger, {
+			type: "runner-candidate-recorded",
+			eventId: `runner-candidate-${claim.effect.attempts}`,
+			generation: ledger.generation,
+			nodeId: "root",
+			attemptToken: claim.leaseToken,
+			parentBranch: "main",
+			parentBaseSha: value.baseSha,
+			headSha: value.headSha,
+			pullRequestNumber: pullRequest.number as number,
+			pullRequestUrl: pullRequest.url,
+		});
+		if (recorded.disposition !== "applied") throw new Error(`Runner candidate reconciliation failed (${recorded.reason}).`);
+		ledger = recorded.ledger;
+		workItem.osNativeGit.state = "pull-request-opened";
+		workItem.osNativeGit.baseSha = value.baseSha;
+		workItem.osNativeGit.headSha = value.headSha;
+		if (typeof pullRequest.url === "string") workItem.githubPullRequestUrl = pullRequest.url;
+		this.transitionWorkItem(workItem, "building", outcome.detail);
+		workflow.phase = "validating";
 		workflow.updatedAt = Date.now();
-		workflow.activity.push({ phase: workflow.phase, message: outcome.detail, at: workflow.updatedAt });
-		await Promise.all([this.ctx.storage.put(WORKFLOW_KEY, workflow), this.saveWorkItems(workItems)]);
-		await this.appendGitHubIssueStatus(workItem, outcome.detail);
-		if (workItem.githubPullRequestUrl && workItem.osNativeGit.baseSha && workItem.osNativeGit.headSha) await this.dispatchOsStackPromotion(workflow, workItem);
-		this.broadcastWorkflow(workflow);
+		workflow.activity.push({ phase: "validating", message: outcome.detail, at: workflow.updatedAt });
+		if (await this.completeClaim(claim, { workflow, workItem, ledger, nextKind: "dispatch-promotion", nextStage: "queued" })) {
+			await this.appendGitHubIssueStatus(workItem, outcome.detail);
+		}
 	}
 
-	private async dispatchOsStackPromotion(workflow: WorkflowRecord, workItem: HarnessWorkItem): Promise<void> {
-		const runner = workItem.osNativeGit;
-		const match = workItem.githubPullRequestUrl?.match(/\/pull\/(\d+)$/u);
-		if (!runner || !match || !workItem.githubIssue || !runner.baseSha || !runner.headSha) return;
+	private async processPromotionDispatch(claim: { job: CoordinatorJob; effect: CoordinatorEffect; leaseToken: string }): Promise<void> {
+		const workflow = await this.getWorkflow(claim.job.id);
+		const workItem = await this.getWorkItem(claim.job.workItemId);
+		const runner = workItem?.osNativeGit;
+		const match = workItem?.githubPullRequestUrl?.match(/\/pull\/(\d+)$/u);
+		if (!workflow || !workItem?.githubIssue || !runner || !match || !runner.baseSha || !runner.headSha) throw new Error("Promotion dispatch lost immutable candidate provenance.");
 		const response = await fetch(`https://api.github.com/repos/${this.env.GITHUB_REPOSITORY}/actions/workflows/os-stack-promote.yml/dispatches`, {
 			method: "POST",
 			headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${this.env.GITHUB_AUTOMATION_TOKEN}`, "Content-Type": "application/json", "User-Agent": "app-harness-os", "X-GitHub-Api-Version": "2022-11-28" },
 			body: JSON.stringify({ ref: "main", inputs: { pull_request: match[1], stack_id: runner.stackId, generation: String(runner.generation), issue_number: String(workItem.githubIssue.number), parent_branch: "main", head_sha: runner.headSha, room: "main", workflow_id: workflow.id, ci_profile: runner.classification?.ciProfile ?? "unsupported" } }),
 		});
-		if (!response.ok) {
-			this.transitionWorkItem(workItem, "needs_review", "Native candidate pull request exists, but the stack promotion gate could not be dispatched. No merge or deployment was attempted.");
-			workflow.phase = "requires_review";
-			await Promise.all([this.ctx.storage.put(WORKFLOW_KEY, workflow), this.saveWorkItems(await this.getWorkItems())]);
-			await this.appendGitHubIssueStatus(workItem, "Stack promotion dispatch failed after the native candidate PR opened; no merge or deployment was attempted.");
-			return;
+		if (!response.ok) throw new Error(`Stack promotion dispatch failed (${response.status}).`);
+		if (await this.completeClaim(claim, { workflow, workItem, nextKind: null, nextStage: "awaiting-callback" })) {
+			await this.appendGitHubIssueStatus(workItem, `Stack scheduled: ${runner.stackId} generation ${runner.generation}, root parent main, base ${runner.baseSha}. Candidate: ${workItem.githubPullRequestUrl}`);
 		}
-		await this.appendGitHubIssueStatus(workItem, `Stack scheduled: ${runner.stackId} generation ${runner.generation}, root parent main, base ${runner.baseSha}. Candidate: ${workItem.githubPullRequestUrl}`);
+	}
+
+	private async processFallbackDispatch(claim: { job: CoordinatorJob; effect: CoordinatorEffect; leaseToken: string }): Promise<void> {
+		const workflow = await this.getWorkflow(claim.job.id);
+		const workItem = await this.getWorkItem(claim.job.workItemId);
+		if (!workflow || !workItem?.githubIssue) throw new Error("Fallback dispatch lost its linked issue.");
+		const response = await fetch(`https://api.github.com/repos/${this.env.GITHUB_REPOSITORY}/actions/workflows/autonomous-change.yml/dispatches`, {
+			method: "POST",
+			headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${this.env.GITHUB_AUTOMATION_TOKEN}`, "Content-Type": "application/json", "User-Agent": "app-harness-autonomy", "X-GitHub-Api-Version": "2022-11-28" },
+			body: JSON.stringify({ ref: "main", inputs: { request_id: workflow.id, request: workflow.request, room: "main", issue_number: String(workItem.githubIssue.number) } }),
+		});
+		if (!response.ok) throw new Error(`GitHub fallback dispatch failed (${response.status}).`);
+		this.transitionWorkItem(workItem, "queued", "Guarded fallback workflow dispatched; no model-driven agent is involved.");
+		if (await this.completeClaim(claim, { workflow, workItem, nextKind: null, nextStage: "awaiting-callback" })) {
+			await this.appendGitHubIssueStatus(workItem, "Guarded fallback workflow dispatched; awaiting signed completion callbacks.");
+		}
 	}
 
 	private async applyOsClassificationLabels(workItem: HarnessWorkItem, classification: OsModelClassification): Promise<void> {
 		if (!workItem.githubIssue) return;
-		try {
-			await createGithubIdentityClient(this.env, { workItemId: workItem.id }).reconcileClassification({
-				issueNumber: workItem.githubIssue.number,
-				classification: "agent",
-				modelClassification: classification as GithubModelClassification,
-			});
-		} catch { /* labels improve discoverability but never alter execution authority */ }
+		await this.enqueueAuxEffect(workItem, "github-classification", {
+			issueNumber: workItem.githubIssue.number,
+			classification,
+		});
 	}
 
-	private async dispatchAutonomousRun(workflow: WorkflowRecord): Promise<void> {
-		const response = await fetch(
-			`https://api.github.com/repos/${this.env.GITHUB_REPOSITORY}/actions/workflows/autonomous-change.yml/dispatches`,
-			{
-				method: "POST",
-				headers: {
-					Accept: "application/vnd.github+json",
-					Authorization: `Bearer ${this.env.GITHUB_AUTOMATION_TOKEN}`,
-					"Content-Type": "application/json",
-					"User-Agent": "app-harness-autonomy",
-					"X-GitHub-Api-Version": "2022-11-28",
-				},
-				body: JSON.stringify({
-					ref: "main",
-					inputs: {
-						request_id: workflow.id,
-						request: workflow.request,
-						room: "main",
-						issue_number: String((await this.workItemForWorkflow(workflow))?.githubIssue?.number ?? ""),
-					},
-				}),
-			},
-		);
-
-		if (!response.ok) throw new Error(`GitHub dispatch failed (${response.status})`);
+	private async processGithubStatus(claim: CoordinatorClaim): Promise<void> {
+		const workItem = await this.getWorkItem(claim.job.workItemId);
+		const issueNumber = claim.effect.payload.issueNumber;
+		const body = claim.effect.payload.body;
+		if (!workItem || !Number.isInteger(issueNumber) || typeof body !== "string") throw new Error("GitHub status effect is invalid.");
+		await createGithubIdentityClient(this.env, { workItemId: workItem.id }).updateStatus({ issueNumber: issueNumber as number, body });
+		await this.completeAuxClaim(claim);
 	}
 
-	private async applyWorkflowCallback(callback: WorkflowCallback): Promise<void> {
-		if (
-			typeof callback.requestId !== "string" ||
-			typeof callback.phase !== "string" ||
-			!PHASES.has(callback.phase as WorkflowPhase) ||
-			typeof callback.message !== "string"
-		) {
-			return;
-		}
+	private async processGithubClassification(claim: CoordinatorClaim): Promise<void> {
+		const workItem = await this.getWorkItem(claim.job.workItemId);
+		const issueNumber = claim.effect.payload.issueNumber;
+		const classification = claim.effect.payload.classification as OsModelClassification | undefined;
+		if (!workItem || !Number.isInteger(issueNumber) || !classification) throw new Error("GitHub classification effect is invalid.");
+		await createGithubIdentityClient(this.env, { workItemId: workItem.id }).reconcileClassification({
+			issueNumber: issueNumber as number,
+			classification: "agent",
+			modelClassification: classification as GithubModelClassification,
+		});
+		await this.completeAuxClaim(claim);
+	}
 
-		const workflow = await this.ctx.storage.get<WorkflowRecord>(WORKFLOW_KEY);
-		// A verified promotion may finish after a temporary promotion callback
-		// recorded needs-review. A trusted completion callback can reconcile that
-		// specific recoverable state; every other terminal state stays immutable.
-		const recoverableCompletion = workflow?.phase === "requires_review" && callback.phase === "completed";
-		if (!workflow || workflow.id !== callback.requestId || (TERMINAL_PHASES.has(workflow.phase) && !recoverableCompletion)) return;
+	private async processGithubClose(claim: CoordinatorClaim): Promise<void> {
+		const workItem = await this.getWorkItem(claim.job.workItemId);
+		const issueNumber = claim.effect.payload.issueNumber;
+		const body = claim.effect.payload.body;
+		const deploymentUrl = claim.effect.payload.deploymentUrl;
+		if (!workItem || !Number.isInteger(issueNumber) || typeof body !== "string" || typeof deploymentUrl !== "string" || !/^https:\/\//u.test(deploymentUrl)) throw new Error("GitHub completion effect is invalid.");
+		await createGithubIdentityClient(this.env, { workItemId: workItem.id }).closeAfterDeployment({ issueNumber: issueNumber as number, body, deploymentUrl });
+		await this.completeAuxClaim(claim);
+	}
 
-		const phase = callback.phase as WorkflowPhase;
+	private async completeAuxClaim(claim: CoordinatorClaim): Promise<void> {
+		await this.ctx.storage.transaction(async (txn) => {
+			const job = await txn.get<CoordinatorJob>(this.jobKey(claim.job.id));
+			const effect = await txn.get<CoordinatorEffect>(this.outboxKey(claim.effect.id));
+			if (!job || !effect) return;
+			const completed = completeCoordinatorEffect(job, effect, { leaseToken: claim.leaseToken, now: Date.now(), nextEffectId: null, nextStage: job.stage });
+			if (completed.disposition !== "completed") return;
+			await Promise.all([txn.put(this.jobKey(job.id), completed.job), txn.put(this.outboxKey(effect.id), completed.effect)]);
+		});
+	}
+
+	private async completeClaim(
+		claim: CoordinatorClaim,
+		input: { workflow: WorkflowRecord; workItem: HarnessWorkItem; ledger?: StackLedger; nextKind: string | null; nextStage: string },
+	): Promise<boolean> {
+		const now = Date.now();
+		const nextEffectId = input.nextKind ? this.effectId(claim.job.id, input.nextKind) : null;
+		const didComplete = await this.ctx.storage.transaction(async (txn) => {
+			const job = await txn.get<CoordinatorJob>(this.jobKey(claim.job.id));
+			const effect = await txn.get<CoordinatorEffect>(this.outboxKey(claim.effect.id));
+			if (!job || !effect) return false;
+			const completed = completeCoordinatorEffect(job, effect, { leaseToken: claim.leaseToken, now, nextEffectId, nextStage: input.nextStage });
+			if (completed.disposition !== "completed") return false;
+			await Promise.all([
+				txn.put(this.jobKey(job.id), completed.job),
+				txn.put(this.outboxKey(effect.id), completed.effect),
+				txn.put(this.workflowKey(input.workflow.id), input.workflow),
+				txn.put(this.workItemKey(input.workItem.id), input.workItem),
+				...(input.ledger ? [txn.put(this.ledgerKey(input.workItem.id), input.ledger)] : []),
+			]);
+			if (input.nextKind && nextEffectId) {
+				await txn.put(this.outboxKey(nextEffectId), createCoordinatorEffect({ id: nextEffectId, jobId: job.id, workItemId: input.workItem.id, kind: input.nextKind, now }));
+			}
+			return true;
+		});
+		if (!didComplete) return false;
+		await Promise.all([this.saveWorkflow(input.workflow), this.saveWorkItem(input.workItem)]);
+		this.broadcastWorkflow(input.workflow);
+		await this.scheduleCoordinatorAlarm();
+		return true;
+	}
+
+	private async terminateClaim(claim: CoordinatorClaim, workflow: WorkflowRecord, workItem: HarnessWorkItem, phase: Extract<WorkflowPhase, "requires_review" | "rejected" | "failed">, message: string, ledger?: StackLedger): Promise<void> {
 		const now = Date.now();
 		workflow.phase = phase;
 		workflow.updatedAt = now;
-		workflow.activity.push({ phase, message: callback.message.slice(0, 280), at: now });
-		if (typeof callback.result === "string") workflow.result = callback.result.slice(0, 500);
-		const workItems = await this.getWorkItems();
-		const workItem = workflow.workItemId ? workItems.find((item) => item.id === workflow.workItemId) : undefined;
-		if (workItem) {
-			this.transitionWorkItem(workItem, workItemPhaseFor(workflow.phase), callback.message.slice(0, 280));
-			if (typeof callback.result === "string" && /^https:\/\/github\.com\/[^/]+\/[^/]+\/pull\/\d+$/i.test(callback.result)) {
-				workItem.githubPullRequestUrl = callback.result;
-			}
-		}
-		await Promise.all([this.ctx.storage.put(WORKFLOW_KEY, workflow), this.saveWorkItems(workItems)]);
-		if (workItem) await this.appendGitHubIssueStatus(workItem, callback.message.slice(0, 280), typeof callback.result === "string" ? callback.result : undefined);
+		workflow.result = message.slice(0, 500);
+		workflow.activity.push({ phase, message: message.slice(0, 280), at: now });
+		this.transitionWorkItem(workItem, workItemPhaseFor(phase), message);
+		const blocked = ledger ? blockCoordinatorStack(ledger) : undefined;
+		const didComplete = await this.ctx.storage.transaction(async (txn) => {
+			const job = await txn.get<CoordinatorJob>(this.jobKey(claim.job.id));
+			const effect = await txn.get<CoordinatorEffect>(this.outboxKey(claim.effect.id));
+			if (!job || !effect) return false;
+			const completed = completeCoordinatorEffect(job, effect, { leaseToken: claim.leaseToken, now, nextEffectId: null, nextStage: "awaiting-callback" });
+			if (completed.disposition !== "completed") return false;
+			const terminal = applyCoordinatorCallback(completed.job, { callbackKey: `terminal-${phase}`, phase, now });
+			await Promise.all([
+				txn.put(this.jobKey(job.id), terminal.job),
+				txn.put(this.outboxKey(effect.id), completed.effect),
+				txn.put(this.workflowKey(workflow.id), workflow),
+				txn.put(this.workItemKey(workItem.id), workItem),
+				...(blocked ? [txn.put(this.ledgerKey(workItem.id), blocked)] : []),
+			]);
+			return true;
+		});
+		if (!didComplete) return;
+		await Promise.all([this.saveWorkflow(workflow), this.saveWorkItem(workItem)]);
 		this.broadcastWorkflow(workflow);
+		await this.appendGitHubIssueStatus(workItem, message);
 	}
 
-	private async failWorkflow(workflow: WorkflowRecord, message: string): Promise<void> {
-		workflow.phase = "failed";
-		workflow.updatedAt = Date.now();
-		workflow.result = message;
-		workflow.activity.push({ phase: "failed", message, at: workflow.updatedAt });
-		const workItems = await this.getWorkItems();
-		const workItem = workflow.workItemId ? workItems.find((item) => item.id === workflow.workItemId) : undefined;
-		if (workItem) this.transitionWorkItem(workItem, "needs_review", message);
-		await Promise.all([this.ctx.storage.put(WORKFLOW_KEY, workflow), this.saveWorkItems(workItems)]);
-		if (workItem) await this.appendGitHubIssueStatus(workItem, message);
+	private async retryClaim(claim: CoordinatorClaim, error: unknown): Promise<void> {
+		const message = error instanceof Error ? error.message.slice(0, 180) : "unknown coordinator error";
+		const terminal = claim.effect.attempts >= COORDINATOR_MAX_ATTEMPTS;
+		const terminalWork = terminal && claim.effect.blocking;
+		const now = Date.now();
+		let changedWorkItem: HarnessWorkItem | undefined;
+		let changedWorkflow: WorkflowRecord | undefined;
+		await this.ctx.storage.transaction(async (txn) => {
+			const job = await txn.get<CoordinatorJob>(this.jobKey(claim.job.id));
+			const effect = await txn.get<CoordinatorEffect>(this.outboxKey(claim.effect.id));
+			if (!job || !effect) return;
+			const retried = retryCoordinatorEffect(job, effect, { leaseToken: claim.leaseToken, now, availableAt: now + effect.attempts * 5_000, terminal });
+			if (retried.disposition === "stale") return;
+			const workflow = await txn.get<WorkflowRecord>(this.workflowKey(job.id));
+			const workItem = await txn.get<HarnessWorkItem>(this.workItemKey(job.workItemId));
+			let ledger = await txn.get<StackLedger>(this.ledgerKey(job.workItemId));
+			if (ledger && effect.kind === "run-os" && ledger.runner.stage === "running" && ledger.runner.attemptToken === claim.leaseToken) {
+				const event = applyStackEvent(ledger, { type: terminalWork ? "runner-attempt-failed" : "runner-attempt-retryable", eventId: `runner-${terminalWork ? "failed" : "retry"}-${effect.attempts}`, generation: ledger.generation, attemptToken: claim.leaseToken });
+				if (event.disposition === "applied") ledger = event.ledger;
+			} else if (ledger && terminalWork) ledger = blockCoordinatorStack(ledger);
+			if (workflow && workItem) {
+				const detail = terminal
+					? terminalWork ? `Coordinator effect ${effect.kind} failed after ${effect.attempts} attempts (${message}).` : `GitHub App status effect ${effect.kind} could not be delivered after ${effect.attempts} attempts (${message}); workflow authority is unchanged.`
+					: `Coordinator effect ${effect.kind} attempt ${effect.attempts} did not complete (${message}); retry queued.`;
+				if (terminalWork) {
+					workflow.phase = "failed";
+					workflow.result = detail;
+				}
+				workflow.updatedAt = now;
+				workflow.activity.push({ phase: workflow.phase, message: detail.slice(0, 280), at: now });
+				this.transitionWorkItem(workItem, terminalWork ? "needs_review" : workItem.phase, detail);
+				changedWorkflow = workflow;
+				changedWorkItem = workItem;
+				await Promise.all([txn.put(this.workflowKey(workflow.id), workflow), txn.put(this.workItemKey(workItem.id), workItem)]);
+			}
+			await Promise.all([
+				txn.put(this.jobKey(job.id), retried.job),
+				txn.put(this.outboxKey(effect.id), retried.effect),
+				...(ledger ? [txn.put(this.ledgerKey(job.workItemId), ledger)] : []),
+			]);
+		});
+		if (changedWorkflow && changedWorkItem) {
+			await Promise.all([this.saveWorkflow(changedWorkflow), this.saveWorkItem(changedWorkItem)]);
+			this.broadcastWorkflow(changedWorkflow);
+			if (terminalWork && claim.effect.kind !== "github-status" && claim.effect.kind !== "github-close") await this.appendGitHubIssueStatus(changedWorkItem, changedWorkflow.result ?? message);
+		}
+		await this.scheduleCoordinatorAlarm();
+	}
+
+	private async enqueueAuxEffect(workItem: HarnessWorkItem, kind: "github-status" | "github-classification" | "github-close", payload: Record<string, unknown>): Promise<void> {
+		if (!workItem.workflowId) return;
+		const job = await this.ctx.storage.get<CoordinatorJob>(this.jobKey(workItem.workflowId));
+		if (!job) return;
+		const now = Date.now();
+		const effect = createCoordinatorEffect({
+			id: this.effectId(job.id, kind, crypto.randomUUID()),
+			jobId: job.id,
+			workItemId: workItem.id,
+			kind,
+			payload,
+			now,
+			blocking: false,
+		});
+		await this.ctx.storage.put(this.outboxKey(effect.id), effect);
+		await this.ctx.storage.setAlarm(now + 25);
+	}
+
+	private async applyWorkflowCallback(callback: WorkflowCallback): Promise<void> {
+		if (typeof callback.requestId !== "string" || !isUuid(callback.requestId) || typeof callback.phase !== "string" || !PHASES.has(callback.phase as WorkflowPhase) || typeof callback.message !== "string") return;
+		const workflow = await this.getWorkflow(callback.requestId);
+		if (!workflow?.workItemId) return;
+		const workItem = await this.getWorkItem(workflow.workItemId);
+		if (!workItem) return;
+		let job = await this.ctx.storage.get<CoordinatorJob>(this.jobKey(workflow.id));
+		if (!job) {
+			const legacy = createCoordinatorJob({ workflowId: workflow.id, workItemId: workItem.id, pipeline: workItem.osNativeGit ? "os-native-git" : "fallback", firstEffectId: this.effectId(workflow.id, "legacy"), now: workflow.createdAt });
+			job = { ...legacy, stage: "awaiting-callback", currentEffectId: null, lease: null };
+		}
+		if (!job) return;
+
+		let phase = callback.phase as WorkflowPhase;
+		let message = callback.message.slice(0, 280);
+		let ledger = await this.ctx.storage.get<StackLedger>(this.ledgerKey(workItem.id));
+		let deploymentUrl = typeof callback.deploymentUrl === "string" && /^https:\/\/[^\s]+$/u.test(callback.deploymentUrl) ? callback.deploymentUrl : undefined;
+		const runId = typeof callback.runId === "number" && Number.isSafeInteger(callback.runId) ? String(callback.runId) : typeof callback.runId === "string" && /^[A-Za-z0-9_-]{1,120}$/u.test(callback.runId) ? callback.runId : undefined;
+		if (phase === "completed" && job.pipeline === "os-native-git") {
+			const currentMainSha = typeof callback.currentMainSha === "string" && SHA.test(callback.currentMainSha) ? callback.currentMainSha.toLowerCase() : undefined;
+			const headSha = typeof callback.headSha === "string" && SHA.test(callback.headSha) ? callback.headSha.toLowerCase() : undefined;
+			const mergeSha = typeof callback.mergeSha === "string" && SHA.test(callback.mergeSha) ? callback.mergeSha.toLowerCase() : undefined;
+			if (!ledger || !currentMainSha || !headSha || !mergeSha || !deploymentUrl || !runId) {
+				phase = "requires_review";
+				message = "Completion callback lacked the immutable merge or deployment provenance required to claim success.";
+			} else {
+				try {
+					ledger = reconcileCompletedStack(ledger, { currentMainSha, headSha, mergeSha, deploymentUrl, runId });
+				} catch {
+					phase = "requires_review";
+					message = "Completion callback did not reconcile with the durable stack ledger; human review is required.";
+				}
+			}
+		}
+		if (phase === "completed" && !deploymentUrl) {
+			phase = "requires_review";
+			message = "Completion callback did not include an HTTPS deployment URL, so deployment success was not claimed.";
+		}
+		const callbackKey = `callback-${phase}-${runId ?? "legacy"}`;
+		const callbackBaseJob = job;
+		const applied = applyCoordinatorCallback(job, { callbackKey, phase, now: Date.now() });
+		if (applied.disposition !== "applied") return;
+		job = applied.job as CoordinatorJob;
+		const now = Date.now();
+		workflow.phase = phase;
+		workflow.updatedAt = now;
+		workflow.activity.push({ phase, message, at: now });
+		if (typeof callback.result === "string") workflow.result = callback.result.slice(0, 500);
+		this.transitionWorkItem(workItem, workItemPhaseFor(phase), message);
+		if (typeof callback.result === "string" && /^https:\/\/github\.com\/[^/]+\/[^/]+\/pull\/\d+$/iu.test(callback.result)) workItem.githubPullRequestUrl = callback.result;
+		if (TERMINAL_PHASES.has(phase) && phase !== "completed" && ledger) ledger = blockCoordinatorStack(ledger);
+		const committed = await this.ctx.storage.transaction(async (txn) => {
+			const currentJob = (await txn.get<CoordinatorJob>(this.jobKey(job.id))) ?? callbackBaseJob;
+			const current = applyCoordinatorCallback(currentJob, { callbackKey, phase, now });
+			if (current.disposition !== "applied") return false;
+			await Promise.all([
+				txn.put(this.jobKey(job.id), current.job),
+				txn.put(this.workflowKey(workflow.id), workflow),
+				txn.put(this.workItemKey(workItem.id), workItem),
+				...(ledger ? [txn.put(this.ledgerKey(workItem.id), ledger)] : []),
+			]);
+			return true;
+		});
+		if (!committed) return;
+		await Promise.all([this.saveWorkflow(workflow), this.saveWorkItem(workItem)]);
 		this.broadcastWorkflow(workflow);
+		if (phase === "completed" && deploymentUrl && workItem.githubIssue) {
+			await this.enqueueAuxEffect(workItem, "github-close", { issueNumber: workItem.githubIssue.number, body: formatGithubStatus(workItem, message, deploymentUrl), deploymentUrl });
+		} else {
+			await this.appendGitHubIssueStatus(workItem, message, typeof callback.result === "string" ? callback.result : undefined);
+		}
 	}
 
 	private createWorkItem(input: {
@@ -797,18 +1080,76 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 	}
 
 	private async getWorkItems(): Promise<HarnessWorkItem[]> {
-		return (await this.ctx.storage.get<HarnessWorkItem[]>(WORK_ITEMS_KEY)) ?? [];
+		const projection = (await this.ctx.storage.get<HarnessWorkItem[]>(WORK_ITEMS_KEY)) ?? [];
+		const individual = [...(await this.ctx.storage.list<HarnessWorkItem>({ prefix: WORK_ITEM_PREFIX })).values()];
+		const merged = new Map(projection.map((item) => [item.id, item]));
+		for (const item of individual) merged.set(item.id, item);
+		return [...merged.values()].sort((left, right) => right.createdAt - left.createdAt).slice(0, MAX_STORED_WORK_ITEMS);
 	}
 
 	private async saveWorkItems(workItems: HarnessWorkItem[]): Promise<void> {
-		const stored = workItems.slice(0, MAX_STORED_WORK_ITEMS);
-		await this.ctx.storage.put(WORK_ITEMS_KEY, stored);
+		const current = (await this.ctx.storage.get<HarnessWorkItem[]>(WORK_ITEMS_KEY)) ?? [];
+		const merged = new Map(current.map((item) => [item.id, item]));
+		for (const item of workItems) merged.set(item.id, item);
+		const stored = [...merged.values()].sort((left, right) => right.createdAt - left.createdAt).slice(0, MAX_STORED_WORK_ITEMS);
+		await Promise.all([
+			this.ctx.storage.put(WORK_ITEMS_KEY, stored),
+			...workItems.map((item) => this.ctx.storage.put(this.workItemKey(item.id), item)),
+		]);
 		this.broadcastWorkItems(stored);
+	}
+
+	private async saveWorkItem(workItem: HarnessWorkItem): Promise<void> {
+		await this.saveWorkItems([workItem]);
+	}
+
+	private async getWorkItem(id: string): Promise<HarnessWorkItem | undefined> {
+		const item = await this.ctx.storage.get<HarnessWorkItem>(this.workItemKey(id));
+		if (item) return item;
+		const legacy = ((await this.ctx.storage.get<HarnessWorkItem[]>(WORK_ITEMS_KEY)) ?? []).find((candidate) => candidate.id === id);
+		if (legacy) await this.ctx.storage.put(this.workItemKey(id), legacy);
+		return legacy;
+	}
+
+	private async getWorkflow(id: string): Promise<WorkflowRecord | undefined> {
+		const workflow = await this.ctx.storage.get<WorkflowRecord>(this.workflowKey(id));
+		if (workflow) return workflow;
+		const legacy = await this.ctx.storage.get<WorkflowRecord>(WORKFLOW_KEY);
+		if (legacy?.id === id) {
+			await this.ctx.storage.put(this.workflowKey(id), legacy);
+			return legacy;
+		}
+		return undefined;
+	}
+
+	private async saveWorkflow(workflow: WorkflowRecord): Promise<void> {
+		const latest = await this.ctx.storage.get<WorkflowRecord>(WORKFLOW_KEY);
+		await this.ctx.storage.put(this.workflowKey(workflow.id), workflow);
+		if (!latest || workflow.updatedAt >= latest.updatedAt) await this.ctx.storage.put(WORKFLOW_KEY, workflow);
+	}
+
+	private async latestWorkflow(): Promise<WorkflowRecord | undefined> {
+		const legacy = await this.ctx.storage.get<WorkflowRecord>(WORKFLOW_KEY);
+		const workflows = [...(await this.ctx.storage.list<WorkflowRecord>({ prefix: WORKFLOW_PREFIX })).values()];
+		return [...workflows, ...(legacy ? [legacy] : [])].sort((left, right) => right.updatedAt - left.updatedAt)[0];
+	}
+
+	private async migrateLegacyRecords(): Promise<void> {
+		const [items, workflow] = await Promise.all([
+			this.ctx.storage.get<HarnessWorkItem[]>(WORK_ITEMS_KEY),
+			this.ctx.storage.get<WorkflowRecord>(WORKFLOW_KEY),
+		]);
+		await Promise.all([
+			...(items ?? []).map(async (item) => {
+				if (!(await this.ctx.storage.get(this.workItemKey(item.id)))) await this.ctx.storage.put(this.workItemKey(item.id), item);
+			}),
+			...(workflow && !(await this.ctx.storage.get(this.workflowKey(workflow.id))) ? [this.ctx.storage.put(this.workflowKey(workflow.id), workflow)] : []),
+		]);
 	}
 
 	private async workItemForWorkflow(workflow: WorkflowRecord): Promise<HarnessWorkItem | undefined> {
 		if (!workflow.workItemId) return undefined;
-		return (await this.getWorkItems()).find((item) => item.id === workflow.workItemId);
+		return this.getWorkItem(workflow.workItemId);
 	}
 
 	private async backfillExternalHandoffs(): Promise<void> {
@@ -866,41 +1207,8 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		if (!workItem) return false;
 		if (workItem.githubIssue) return true;
 
-		const target = workItem.target;
-		const targetDetails = target
-			? [
-					"### Safe target envelope",
-					`- Target: \`${target.targetId}\``,
-					`- Selector: \`${target.selector}\``,
-					`- Element: \`${target.tag}${target.role ? ` (${target.role})` : ""}\``,
-					`- Label: ${target.label ?? target.text ?? "—"}`,
-					`- Room/page: \`${target.room}${target.page}\``,
-				].join("\n")
-			: "### Safe target envelope\nNo element target was supplied (freehand drawing feedback).";
-		const classification = handoff === "os-planning"
-			? "Queued for Cloudflare OS bounded planning. A model may approve only the explicitly allowlisted candidate shape; no native Git action exists until an approved plan is recorded."
-			: handoff === "fallback"
-				? "Eligible for the deterministic guarded fallback. This is not a model-driven coding-agent run."
-				: "Recorded as intake awaiting coding-agent triage. No candidate or model run has started.";
-		const body = [
-			"## App Harness intake",
-			`- Work item: \`${workItem.id}\``,
-			`- Kind: \`${workItem.kind}\``,
-			`- Live room: [open App Harness](${LIVE_APP_URL})`,
-			`- Policy classification: ${classification}`,
-			backfill ? "- Note: This issue backfills a request submitted before external handoff was enabled." : "",
-			"",
-			"### Request or feedback",
-			workItem.summary,
-			"",
-			targetDetails,
-		].filter(Boolean).join("\n");
 		try {
-			const issue = await createGithubIdentityClient(this.env, { workItemId: workItem.id }).createIssue({
-				title: `App Harness: ${workItem.summary.slice(0, 90)}`,
-				body,
-				classification: handoff === "triage" ? "triage" : "agent",
-			});
+			const issue = await this.createGithubIssueHandoff(workItem, policyApproved, backfill, handoff);
 			workItem.githubIssue = { number: issue.issueNumber, url: issue.issueUrl };
 			this.transitionWorkItem(
 				workItem,
@@ -921,16 +1229,49 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		}
 	}
 
+	private async createGithubIssueHandoff(workItem: HarnessWorkItem, _policyApproved: boolean, backfill: boolean, handoff: "os-planning" | "fallback" | "triage") {
+		const target = workItem.target;
+		const targetDetails = target
+			? [
+				"### Safe target envelope",
+				`- Target: \`${target.targetId}\``,
+				`- Selector: \`${target.selector}\``,
+				`- Element: \`${target.tag}${target.role ? ` (${target.role})` : ""}\``,
+				`- Label: ${target.label ?? target.text ?? "—"}`,
+				`- Room/page: \`${target.room}${target.page}\``,
+			].join("\n")
+			: "### Safe target envelope\nNo element target was supplied (freehand drawing feedback).";
+		const classification = handoff === "os-planning"
+			? "Queued for Cloudflare OS bounded planning. A model may approve only the explicitly allowlisted candidate shape; no native Git action exists until an approved plan is recorded."
+			: handoff === "fallback"
+				? "Eligible for the deterministic guarded fallback. This is not a model-driven coding-agent run."
+				: "Recorded as intake awaiting coding-agent triage. No candidate or model run has started.";
+		const body = [
+			"## App Harness intake",
+			`- Work item: \`${workItem.id}\``,
+			`- Kind: \`${workItem.kind}\``,
+			`- Live room: [open App Harness](${LIVE_APP_URL})`,
+			`- Policy classification: ${classification}`,
+			backfill ? "- Note: This issue backfills a request submitted before external handoff was enabled." : "",
+			"",
+			"### Request or feedback",
+			workItem.summary,
+			"",
+			targetDetails,
+		].filter(Boolean).join("\n");
+		return createGithubIdentityClient(this.env, { workItemId: workItem.id }).createIssue({
+			title: `App Harness: ${workItem.summary.slice(0, 90)}`,
+			body,
+			classification: handoff === "triage" ? "triage" : "agent",
+		});
+	}
+
 	private async appendGitHubIssueStatus(workItem: HarnessWorkItem, message: string, result?: string): Promise<void> {
 		if (!workItem.githubIssue) return;
-		try {
-			await createGithubIdentityClient(this.env, { workItemId: workItem.id }).updateStatus({
-				issueNumber: workItem.githubIssue.number,
-				body: formatGithubStatus(workItem, message, result),
-			});
-		} catch (error) {
-			console.error("GitHub issue status update failed", error);
-		}
+		await this.enqueueAuxEffect(workItem, "github-status", {
+			issueNumber: workItem.githubIssue.number,
+			body: formatGithubStatus(workItem, message, result),
+		});
 	}
 
 	private broadcast(payload: unknown): void {
@@ -973,6 +1314,10 @@ function formatGithubStatus(workItem: HarnessWorkItem, message: string, result?:
 		workItem.githubPullRequestUrl ? `[Pull request](${workItem.githubPullRequestUrl})` : null,
 		result && /^https:\/\//u.test(result) ? `[Latest evidence](${result})` : null,
 	].filter((value): value is string => Boolean(value));
+	const agent = workItem.osNativeGit?.agent;
+	const agentSummary = agent
+		? `model \`${agent.model}\` · responses: ${agent.responseIds.map((id) => `\`${id}\``).join(", ") || "none"} · tools: ${agent.tools.map((tool) => `\`${tool}\``).join(", ") || "none"}`
+		: "Not reported";
 	return [
 		"## App Harness · live status",
 		`**${githubPhaseLabel(workItem.phase)}** — ${message}`,
@@ -981,6 +1326,7 @@ function formatGithubStatus(workItem: HarnessWorkItem, message: string, result?:
 		"| --- | --- |",
 		`| Work item | \`${workItem.id}\` |`,
 		`| Execution | ${workItem.osNativeGit ? `Cloudflare OS · generation ${workItem.osNativeGit.generation}` : "Triage"} |`,
+		`| Agent audit | ${agentSummary} |`,
 		`| Artifacts | ${links.join(" · ") || "Pending"} |`,
 		"",
 		"### Progress",

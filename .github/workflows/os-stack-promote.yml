@@ -133,6 +133,7 @@ jobs:
           npm run test:stack
           npm run test:native-git-preflight
           npm run test:os-provider-bridge
+          npm run test:coordinator
           node scripts/test-os-stack-gate.mjs
           git diff --check
 
@@ -218,6 +219,7 @@ jobs:
           npm run test:stack
           npm run test:native-git-preflight
           npm run test:os-provider-bridge
+          npm run test:coordinator
           node scripts/test-os-stack-gate.mjs
           git diff --check
       - name: Deploy verified current main
@@ -244,6 +246,10 @@ jobs:
       STACK_ID: ${{ inputs.stack_id }}
       GENERATION: ${{ inputs.generation }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      CURRENT_MAIN_SHA: ${{ needs.prepare.outputs.candidate_base_sha }}
+      HEAD_SHA: ${{ needs.prepare.outputs.head_sha }}
+      MERGE_SHA: ${{ needs.prepare.outputs.merge_sha || needs.promote.outputs.deployment_sha }}
+      PROMOTION_RUN_ID: ${{ github.run_id }}
     steps:
       - name: Publish retried completion or review callback
         run: |
@@ -264,6 +270,10 @@ jobs:
             message,
             result: process.env.RUN_URL,
             deploymentUrl: completed ? "https://autonomous-live-chat.coda-a.workers.dev/" : undefined,
+            currentMainSha: completed ? process.env.CURRENT_MAIN_SHA : undefined,
+            headSha: completed ? process.env.HEAD_SHA : undefined,
+            mergeSha: completed ? process.env.MERGE_SHA : undefined,
+            runId: process.env.PROMOTION_RUN_ID,
           });
           let lastError;
           for (let attempt = 1; attempt <= 5; attempt += 1) {

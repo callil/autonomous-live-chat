@@ -3,6 +3,7 @@ const RUNNER_URL = "https://app-harness-os-native-git.coda-a.workers.dev";
 const ORCHESTRATOR_URL = "https://app-harness-os-orchestrator.coda-a.workers.dev";
 
 const WORK_ITEM_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/u;
+const SHA = /^[0-9a-f]{40}$/iu;
 const ISSUE_URL = new RegExp(`^https://github\\.com/${REPOSITORY}/issues/(\\d+)$`, "i");
 
 function safeWorkItemId(value) {
@@ -54,12 +55,14 @@ export function createOsPlanningManifest({ workItemId, issueUrl, request, target
 /**
  * Convert a model-approved, schema-validated plan into a runner job. No
  * original prose, prompt, source, or model response crosses this boundary.
+ * @param {{ manifest: any, plan: { kind: "documentation-task", request: string }, parentBaseSha?: string | null }} input
  */
-export function createOsNativeGitJob({ manifest, plan }) {
+export function createOsNativeGitJob({ manifest, plan, parentBaseSha = null }) {
 	if (!manifest || manifest.repository !== REPOSITORY || !Number.isInteger(manifest.issueNumber)) throw new Error("OS runner job needs a valid planning manifest.");
 	if (!plan || plan.kind !== "documentation-task" || typeof plan.request !== "string" || !plan.request.trim() || plan.request.length > 500) throw new Error("OS runner job needs an allowlisted documentation task.");
 	const workItemId = safeWorkItemId(manifest.workItemId);
 	const generation = safeGeneration(manifest.stack?.generation);
+	if (parentBaseSha !== null && (typeof parentBaseSha !== "string" || !SHA.test(parentBaseSha))) throw new Error("OS runner job parent base must be a full Git SHA.");
 	return {
 		jobId: `os-${workItemId}-g${generation}`,
 		repository: REPOSITORY,
@@ -71,7 +74,7 @@ export function createOsNativeGitJob({ manifest, plan }) {
 				nodeId: "root",
 				branch: `app-harness-os/${manifest.issueNumber}/g${generation}`,
 				parentBranch: "main",
-				parentBaseSha: null,
+				parentBaseSha: parentBaseSha?.toLowerCase() ?? null,
 				pullRequestBase: "main",
 				issueNumber: manifest.issueNumber,
 			},
