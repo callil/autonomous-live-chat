@@ -244,6 +244,19 @@ function eventMarker(eventId: string): string {
 	return `<!-- app-harness-event:${eventId} -->`;
 }
 
+function durableReferenceBody(eventId: string): string {
+	return `GitHub rejected the complete representation as unprocessable. The full text remains preserved in durable App Harness work item \`${eventId}\`.`;
+}
+
+async function withDurableReferenceFallback(
+	eventId: string,
+	body: string,
+	write: (body: string) => Promise<Response>,
+): Promise<Response> {
+	const result = await write(body);
+	return result.status === 422 ? write(durableReferenceBody(eventId)) : result;
+}
+
 async function upsertStatusComment(env: Env, token: string, issueNumber: number, eventId: string, body: string): Promise<Response> {
 	const marker = eventMarker(eventId);
 	const text = `${body}\n\n${marker}`;
@@ -306,7 +319,9 @@ async function handleIssueBridge(request: Request, env: Env, url: URL): Promise<
 		const token = await installationToken(env);
 		const existing = await findIssueByMarker(env, token, eventId);
 		if (existing) return json({ issueNumber: existing.number, issueUrl: existing.htmlUrl, existing: true });
-		const result = await fetch(`https://api.github.com/repos/${env.ALLOWED_REPOSITORY}/issues`, { method: "POST", headers: githubHeaders(token), body: JSON.stringify({ title, body: `${body}\n\n${eventMarker(eventId)}`, labels: CLASSIFICATION_LABELS[classification] }) });
+		const result = await withDurableReferenceFallback(eventId, body, (representation) =>
+			fetch(`https://api.github.com/repos/${env.ALLOWED_REPOSITORY}/issues`, { method: "POST", headers: githubHeaders(token), body: JSON.stringify({ title, body: `${representation}\n\n${eventMarker(eventId)}`, labels: CLASSIFICATION_LABELS[classification] }) }),
+		);
 		if (!result.ok) return new Response("GitHub write unavailable", { status: 503 });
 		const issue = await result.json() as { number?: unknown; html_url?: unknown };
 		return typeof issue.number === "number" && typeof issue.html_url === "string" ? json({ issueNumber: issue.number, issueUrl: issue.html_url }) : new Response("GitHub write unavailable", { status: 503 });
@@ -325,7 +340,7 @@ async function handleIssueBridge(request: Request, env: Env, url: URL): Promise<
 		const body = readText(input.body);
 		if (!body) return new Response("Not found", { status: 404 });
 		const token = await installationToken(env);
-		const result = await upsertStatusComment(env, token, issueNumber, eventId, body);
+		const result = await withDurableReferenceFallback(eventId, body, (representation) => upsertStatusComment(env, token, issueNumber, eventId, representation));
 		return result.ok ? json({ issueNumber, eventId }) : new Response("GitHub write unavailable", { status: 503 });
 	}
 	if (closePath) {
@@ -335,7 +350,7 @@ async function handleIssueBridge(request: Request, env: Env, url: URL): Promise<
 		const live = await fetch(deploymentUrl, { method: "GET", redirect: "follow", headers: { "user-agent": "app-harness-os-git-proxy-verifier" } });
 		if (!live.ok) return new Response("Deployment verification unavailable", { status: 503 });
 		const token = await installationToken(env);
-		const comment = await upsertStatusComment(env, token, issueNumber, eventId, `${body}\n\nVerified reachable deployment: ${deploymentUrl}`);
+		const comment = await withDurableReferenceFallback(eventId, `${body}\n\nVerified reachable deployment: ${deploymentUrl}`, (representation) => upsertStatusComment(env, token, issueNumber, eventId, representation));
 		if (!comment.ok) return new Response("GitHub write unavailable", { status: 503 });
 		const close = await fetch(`https://api.github.com/repos/${env.ALLOWED_REPOSITORY}/issues/${issueNumber}`, { method: "PATCH", headers: githubHeaders(token), body: JSON.stringify({ state: "closed" }) });
 		return close.ok ? json({ issueNumber, state: "closed", deploymentUrl }) : new Response("GitHub write unavailable", { status: 503 });

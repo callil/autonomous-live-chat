@@ -740,6 +740,23 @@ textarea::placeholder {
   font-size: var(--type-label);
 }
 
+.history-control {
+  justify-self: center;
+  margin: var(--space-2) auto;
+  padding: var(--space-1) var(--space-3);
+  border: var(--border-width) solid var(--color-border);
+  border-radius: var(--radius-control);
+  background: var(--color-surface);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  font-size: var(--type-caption);
+}
+
+.history-control:hover {
+  background: var(--color-surface-hover);
+  color: var(--color-text);
+}
+
 .annotation-clear:hover {
   background: var(--color-surface-hover);
 }

@@ -45,6 +45,6 @@ Infrastructure services have separate, explicit deployment workflows. Ordinary a
 
 ## What persists where
 
-The room does not impose product-level character or history-count caps. Messages and collaboration records are stored as individual Durable Object records rather than silently dropping older entries from a fixed-size array. Repository intent and progress remain in the Durable Object work ledger, Cloudflare OS workspace, GitHub issues and pull requests, commits, and checked-in documentation.
+The room does not impose product-level character or history-count caps. Messages and collaboration records are stored as individual Durable Object records rather than silently dropping older entries from a fixed-size array. Reconnects receive a bounded page plus live deltas, with earlier pages available on demand. Byte admission and batch sizes come from the documented platform contract in [platform policy](./docs/platform-policy.md), not scattered UI magic numbers. Repository intent and progress remain in the Durable Object work ledger, Cloudflare OS workspace, GitHub issues and pull requests, commits, and checked-in documentation.
 
 The end-to-end path, trust boundaries, stack behavior, and current limitations are described in [the architecture guide](./docs/architecture.md).

@@ -11,6 +11,8 @@ export type AppHarnessProps = {
   onRequest: (submission: AppHarnessSubmission) => Promise<void> | void;
   onOpenActivity?: () => void;
   activityCount?: number;
+  /** @deprecated Product-level request caps were removed. Retained as a no-op for source compatibility. */
+  requestLimit?: number;
 };
 
 const TARGET_SELECTOR = "[data-app-harness-id], [data-target-id]";

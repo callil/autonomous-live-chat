@@ -47,8 +47,12 @@ globalThis.fetch = async (input, init = {}) => {
 	const method = init.method ?? (typeof input === "string" ? "GET" : input.method);
 	calls.push({ url, method, body: init.body });
 	if (url.includes("/access_tokens")) return Response.json({ token: "installation-token" });
-	if (url.includes("/search/issues")) return Response.json(url.includes("event-markdown") ? { items: [] } : { items: [{ number: 42, html_url: "https://github.com/callil/autonomous-live-chat/issues/42" }] });
-	if (url.endsWith("/issues") && method === "POST") return Response.json({ number: 43, html_url: "https://github.com/callil/autonomous-live-chat/issues/43" });
+	if (url.includes("/search/issues")) return Response.json(url.includes("event-markdown") || url.includes("event-long") ? { items: [] } : { items: [{ number: 42, html_url: "https://github.com/callil/autonomous-live-chat/issues/42" }] });
+	if (url.endsWith("/issues") && method === "POST") {
+		const body = JSON.parse(init.body);
+		if (body.body.includes("oversized-full-representation")) return new Response("unprocessable", { status: 422 });
+		return Response.json({ number: 43, html_url: "https://github.com/callil/autonomous-live-chat/issues/43" });
+	}
 	if (url.endsWith("/issues/42") && method === "GET") return Response.json({ labels: [{ name: "human-label" }, { name: "triage" }, { name: "change-content" }, { name: "risk-high" }] });
 	if (url.endsWith("/issues/42") && method === "PATCH") return Response.json({ number: 42 });
 	throw new Error(`Unexpected fetch ${method} ${url}`);
@@ -61,7 +65,13 @@ try {
 	assert.deepEqual(await duplicate.json(), { issueNumber: 42, issueUrl: "https://github.com/callil/autonomous-live-chat/issues/42", existing: true }, "retries return the issue carrying the stable event marker");
 	assert.equal(calls.filter((call) => call.url.endsWith("/issues") && call.method === "POST").length, 0, "a duplicate event never creates another issue");
 	const markdown = await request("/v1/issues", { eventId: "event-markdown", title: "Targeted request", body: "Target: `message-input`\nSelector: `[data-target-id=\"message-input\"]`", classification: "agent" });
-	assert.deepEqual(await markdown.json(), { issueNumber: 43, issueUrl: "https://github.com/callil/autonomous-live-chat/issues/43" }, "bounded Markdown issue bodies are accepted");
+	assert.deepEqual(await markdown.json(), { issueNumber: 43, issueUrl: "https://github.com/callil/autonomous-live-chat/issues/43" }, "Markdown issue bodies are accepted");
+	const longBody = `oversized-full-representation ${"x".repeat(100_000)}`;
+	const represented = await request("/v1/issues", { eventId: "event-long", title: "Long durable request", body: longBody, classification: "agent" });
+	assert.equal(represented.status, 200, "oversized GitHub representations retain a transport-safe view");
+	const representedCalls = calls.filter((call) => call.url.endsWith("/issues") && call.method === "POST").slice(-2);
+	assert.match(JSON.parse(representedCalls[0].body).body, /oversized-full-representation/u, "the complete durable text is attempted first");
+	assert.match(JSON.parse(representedCalls[1].body).body, /full text remains preserved in durable App Harness work item `event-long`/u, "an explicit GitHub validation rejection falls back to a durable reference");
 	assert.equal((await request("/v1/issues/42/classification", { eventId: "event-2", classification: "triage", modelClassification: { changeType: "visual", scope: "localized", risk: "low", affectedSurface: "ui", reversible: true, executionEligibility: "eligible", ciProfile: "visual" } })).status, 200);
 	const labelPatch = calls.findLast((call) => call.url.endsWith("/issues/42") && call.method === "PATCH");
 	assert.deepEqual(JSON.parse(labelPatch.body).labels, ["human-label", "app-harness", "triage", "change-visual", "scope-localized", "risk-low", "surface-ui", "reversible-yes", "execution-eligible", "ci-visual"], "classification labels converge while unrelated labels remain");
