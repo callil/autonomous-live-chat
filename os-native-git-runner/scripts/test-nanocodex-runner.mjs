@@ -49,6 +49,7 @@ assert.match(source, /findAndAnnotatePullRequest/u);
 assert.match(source, /async function sandboxIdentity/u);
 assert.match(source, /base64Url\(digest\)\.slice\(0, 32\)/u);
 assert.ok(`ah-nc030-gs010-${"x".repeat(32)}`.length <= 63, "derived Cloudflare Sandbox identities stay within the platform limit");
+assert.match(source, /NANOCODEX_EXECUTION_TIMEOUT_MS = 720_000/u, "agent execution stays below Cloudflare's 15-minute alarm limit");
 for (const obsolete of ["DOC_AGENT_TOOLS", "safeDocumentationPatch", "runDocumentationAgent", "add -- README.md docs"]) assert.doesNotMatch(source, new RegExp(obsolete.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"));
 assert.match(planner, /plan: \{ change: \{ kind: "repository-task" \} \}/u);
 assert.doesNotMatch(planner, /documentation-only|outside README\.md and docs/u);

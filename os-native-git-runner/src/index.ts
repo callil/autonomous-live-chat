@@ -107,6 +107,7 @@ function classifySandboxFailure(error: unknown): "sandbox-capacity-exhausted" | 
 }
 
 const SANDBOX_CLEANUP_TIMEOUT_MS = 5_000;
+const NANOCODEX_EXECUTION_TIMEOUT_MS = 720_000;
 
 async function runBoundedSandboxCleanup(action: () => Promise<unknown>, classification: string): Promise<void> {
 	let timeout: ReturnType<typeof setTimeout> | undefined;
@@ -272,7 +273,7 @@ export default {
 		const checkoutDirectory = `/workspace/${sessionId}-repository`;
 		let session;
 		try {
-			session = await createSessionAfterRuntimeUpdate(sandbox, { id: sessionId, cwd: "/workspace", commandTimeoutMs: 1_200_000 });
+			session = await createSessionAfterRuntimeUpdate(sandbox, { id: sessionId, cwd: "/workspace", commandTimeoutMs: NANOCODEX_EXECUTION_TIMEOUT_MS });
 		} catch (error) {
 			await destroySandboxSafely(sandbox, sessionId);
 			return Response.json({ jobId: job.jobId, state: "runner-unavailable", classification: classifySandboxFailure(error) });
@@ -319,7 +320,7 @@ export default {
 			const execution = await session.exec(`node /opt/app-harness/agent-entrypoint.mjs < ${requestPath}`, {
 				cwd: checkoutDirectory,
 				env: agentEnv,
-				timeout: 1_200_000,
+				timeout: NANOCODEX_EXECUTION_TIMEOUT_MS,
 			});
 			const agent = parseAgent(execution.stdout, model);
 			if (!execution.success || !agent?.ok) return Response.json({ jobId: job.jobId, state: "candidate-failed", classification: agent?.classification ?? "nanocodex-output-invalid", agent: agent?.summary ?? { model, responseIds: [], tools: [] } });

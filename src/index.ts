@@ -195,6 +195,7 @@ const ANNOTATIONS_KEY = "harness-annotations";
 const WORK_ITEMS_KEY = "harness-work-items";
 const MAX_STORED_WORK_ITEMS = 100;
 const COORDINATOR_LEASE_MS = 180_000;
+const OS_RUNNER_LEASE_MS = 780_000;
 const COORDINATOR_MAX_ATTEMPTS = 3;
 const COORDINATOR_BATCH_SIZE = 8;
 const SHA = /^[0-9a-f]{40}$/iu;
@@ -587,7 +588,8 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 			const job = await txn.get<CoordinatorJob>(this.jobKey(effect.jobId));
 			if (!job) return null;
 			const leaseToken = crypto.randomUUID();
-			const claimed = claimCoordinatorEffect(job, effect, { now: Date.now(), leaseToken, leaseMs: COORDINATOR_LEASE_MS });
+			const leaseMs = effect.kind === "run-os" ? OS_RUNNER_LEASE_MS : COORDINATOR_LEASE_MS;
+			const claimed = claimCoordinatorEffect(job, effect, { now: Date.now(), leaseToken, leaseMs });
 			if (claimed.disposition === "terminal") {
 				await txn.put(this.outboxKey(effect.id), { ...effect, state: "failed", updatedAt: Date.now() });
 				return null;
@@ -1242,7 +1244,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 			].join("\n")
 			: "### Safe target envelope\nNo element target was supplied (freehand drawing feedback).";
 		const classification = handoff === "os-planning"
-			? "Queued for Cloudflare OS bounded planning. A model may approve only the explicitly allowlisted candidate shape; no native Git action exists until an approved plan is recorded."
+			? "Queued for Cloudflare OS planning. The model classifies the request and the autonomous repository agent may implement it with the available terminal, Git, stack, test, migration, and Cloudflare tools after a plan is recorded."
 			: handoff === "fallback"
 				? "Eligible for the deterministic guarded fallback. This is not a model-driven coding-agent run."
 				: "Recorded as intake awaiting coding-agent triage. No candidate or model run has started.";
