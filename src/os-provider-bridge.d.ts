@@ -24,4 +24,4 @@ export function validateOsExecutionRequest(input: { workItemId: string; issueNum
 export function osExecutionDisposition(input: { terminal: boolean; existingEffect: boolean; jobStage: string }): "terminal" | "duplicate" | "queue";
 export function osWorkspaceTurnDisposition(jobStage: string): "awaiting-action" | "delegated";
 export function createOsNativeGitJob(input: { workItemId: string; issue: DurableIssue; request: string; generation?: number; parentBaseSha?: string | null }): OsNativeGitJob;
-export function classifyOsRunnerResponse(value: unknown): { phase: "building" | "needs_review"; detail: string; terminal: boolean };
+export function classifyOsRunnerResponse(value: unknown): { phase: "building" | "needs_review"; detail: string; terminal: boolean; retryable: boolean };

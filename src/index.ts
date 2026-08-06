@@ -829,12 +829,14 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 			headers: { Authorization: `Bearer ${this.env.OS_NATIVE_GIT_RUNNER_SECRET}`, "Content-Type": "application/json" },
 			body: JSON.stringify(runnerJob),
 		}));
+		if (!response.ok) throw new Error(`Cloudflare OS native runner transport failed (${response.status}); retry queued.`);
 		let body: unknown = null;
-		try { body = await response.json(); } catch { /* classified below */ }
+		try { body = await response.json(); } catch { throw new Error("Cloudflare OS native runner returned no status; retry queued."); }
 		const value = body && typeof body === "object" ? body as Record<string, unknown> : {};
 		const agent = normalizeAgentProvenance(value.agent);
 		if (agent) workItem.osNativeGit.agent = agent;
 		const outcome = classifyOsRunnerResponse(body);
+		if (outcome.retryable) throw new Error(outcome.detail);
 		if (value.state !== "pull-request-opened" || typeof value.baseSha !== "string" || typeof value.headSha !== "string" || !value.pullRequest || typeof value.pullRequest !== "object") {
 			const failed = applyStackEvent(ledger, { type: "runner-attempt-failed", eventId: `runner-failed-${claim.effect.attempts}`, generation: ledger.generation, attemptToken: claim.leaseToken });
 			if (failed.disposition === "applied") ledger = failed.ledger;

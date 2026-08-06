@@ -69,6 +69,8 @@ assert.equal(pinnedJob.candidate.stack.parentBaseSha, "a".repeat(40));
 assert.equal(classifyOsRunnerResponse({ state: "checked-out" }).phase, "building");
 assert.equal(classifyOsRunnerResponse({ state: "credential-bridge-required" }).terminal, true);
 assert.equal(classifyOsRunnerResponse({ state: "pull-request-opened" }).terminal, false);
+assert.equal(classifyOsRunnerResponse({ state: "runner-unavailable", classification: "sandbox-runtime-interrupted" }).retryable, true);
+assert.equal(classifyOsRunnerResponse({ state: "candidate-failed", classification: "nanocodex-run-failed" }).retryable, false);
 assert.throws(() => createOsNativeGitJob({ workItemId, issue, request: "" }));
 assert.throws(() => createOsNativeGitJob({ workItemId, issue: { number: 42, url: "https://github.com/other/repo/issues/42" }, request: "Clarify README." }));
 assert.throws(() => createOsNativeGitJob({ workItemId, issue, request: "Clarify README.", parentBaseSha: "main" }));

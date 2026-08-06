@@ -111,7 +111,13 @@ const NANOCODEX_EXECUTION_TIMEOUT_MS = 720_000;
 const NANOCODEX_PROCESS_POLL_MS = 5_000;
 
 type SandboxSession = Awaited<ReturnType<ReturnType<typeof getSandbox>["createSession"]>>;
-type BackgroundExecution = { success: boolean; exitCode: number; stdout: string; stderr: string };
+type BackgroundExecution = {
+	success: boolean;
+	exitCode: number;
+	stdout: string;
+	stderr: string;
+	classification?: "sandbox-runtime-interrupted";
+};
 
 async function runNanocodexInBackground(
 	session: SandboxSession,
@@ -130,16 +136,22 @@ async function runNanocodexInBackground(
 	let polls = 0;
 	while (Date.now() - startedAt < NANOCODEX_EXECUTION_TIMEOUT_MS) {
 		const current = await session.getProcess(process.id);
-		if (!current) return { success: false, exitCode: 1, stdout: "", stderr: "NanoCodex background process disappeared." };
+		if (!current) return { success: false, exitCode: 1, stdout: "", stderr: "", classification: "sandbox-runtime-interrupted" };
 		const status = current.status;
 		if (["completed", "failed", "killed", "error"].includes(status)) {
 			const logs = await current.getLogs();
 			const exitCode = current.exitCode ?? 1;
+			const runtimeOutput = `${logs.stdout}\n${logs.stderr}`;
+			const interrupted = status !== "completed" && exitCode !== 0 && (
+				!runtimeOutput.trim()
+				|| /new version rollout|runtime signalled the container to exit|sandbox (?:process )?(?:disappeared|was restarted)/iu.test(runtimeOutput)
+			);
 			return {
 				success: status === "completed" && exitCode === 0,
 				exitCode,
 				stdout: logs.stdout,
 				stderr: logs.stderr,
+				...(interrupted ? { classification: "sandbox-runtime-interrupted" as const } : {}),
 			};
 		}
 		polls += 1;
@@ -372,6 +384,14 @@ export default {
 				{ cwd: checkoutDirectory, env: agentEnv, processId: `nanocodex-${sessionId}` },
 				{ jobId: job.jobId, generation: job.generation },
 			);
+			if (execution.classification) {
+				return Response.json({
+					jobId: job.jobId,
+					state: "runner-unavailable",
+					classification: execution.classification,
+					agent: { model, responseIds: [], tools: [] },
+				});
+			}
 			const agent = parseAgent(execution.stdout, model);
 			if (!execution.success || !agent?.ok) return Response.json({ jobId: job.jobId, state: "candidate-failed", classification: agent?.classification ?? "nanocodex-output-invalid", agent: agent?.summary ?? { model, responseIds: [], tools: [] } });
 
