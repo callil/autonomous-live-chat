@@ -249,12 +249,12 @@ async function createSessionAfterRuntimeUpdate(
 
 type ToolAudit = { name: string; ok: boolean };
 const DOC_AGENT_TOOLS = [
-	{ type: "function", name: "list_docs", description: "List the allowed documentation files.", parameters: { type: "object", additionalProperties: false, properties: {} } },
-	{ type: "function", name: "read_doc", description: "Read one allowed documentation file before editing it.", parameters: { type: "object", additionalProperties: false, required: ["path"], properties: { path: { type: "string", enum: ["README.md"] } } } },
-	{ type: "function", name: "apply_patch", description: "Apply a standard unified diff limited to the allowed docs. You must read every edited file first.", parameters: { type: "object", additionalProperties: false, required: ["patch"], properties: { patch: { type: "string", maxLength: 12000 } } } },
-	{ type: "function", name: "inspect_diff", description: "Inspect the current candidate diff.", parameters: { type: "object", additionalProperties: false, properties: {} } },
-	{ type: "function", name: "run_checks", description: "Run the fixed documentation checks.", parameters: { type: "object", additionalProperties: false, properties: {} } },
-	{ type: "function", name: "finish", description: "Finish only after checks pass and the diff is the intended small docs-only change.", parameters: { type: "object", additionalProperties: false, properties: {} } },
+	{ type: "function", name: "list_docs", strict: true, description: "List the allowed documentation files.", parameters: { type: "object", additionalProperties: false, properties: {} } },
+	{ type: "function", name: "read_doc", strict: true, description: "Read one allowed documentation file before editing it.", parameters: { type: "object", additionalProperties: false, required: ["path"], properties: { path: { type: "string", pattern: "^(README\\.md|docs/[A-Za-z0-9._-]+\\.md)$" } } } },
+	{ type: "function", name: "apply_patch", strict: true, description: "Apply a standard unified diff limited to the allowed docs. You must read every edited file first.", parameters: { type: "object", additionalProperties: false, required: ["patch"], properties: { patch: { type: "string", maxLength: 12000 } } } },
+	{ type: "function", name: "inspect_diff", strict: true, description: "Inspect the current candidate diff.", parameters: { type: "object", additionalProperties: false, properties: {} } },
+	{ type: "function", name: "run_checks", strict: true, description: "Run the fixed documentation checks.", parameters: { type: "object", additionalProperties: false, properties: {} } },
+	{ type: "function", name: "finish", strict: true, description: "Finish only after checks pass and the diff is the intended small docs-only change.", parameters: { type: "object", additionalProperties: false, properties: {} } },
 ] as const;
 
 function allowedDocPath(path: unknown): path is string {
@@ -266,13 +266,16 @@ async function runDocumentationAgent(session: Awaited<ReturnType<typeof createSe
 	if (!env.OPENAI_API_KEY || !env.MODEL_ID) return { ok: false, audit: [], classification: "agent-credential-unavailable" };
 	const audit: ToolAudit[] = [];
 	const read = new Set<string>();
+	let inspectedAfterWrite = false;
+	let checkedAfterWrite = false;
 	let input: unknown[] = [{ role: "user", content: [{ type: "input_text", text: `Update the repository documentation for this request: ${task}. First inspect real files. You may change README.md or docs/*.md only. Use tools; do not explain outside tools.` }] }];
 	for (let round = 0; round < 8; round += 1) {
 		let response: Response;
 		try { response = await fetch("https://api.openai.com/v1/responses", { method: "POST", headers: { Authorization: `Bearer ${env.OPENAI_API_KEY}`, "Content-Type": "application/json" }, body: JSON.stringify({ model: env.MODEL_ID, store: false, input, tools: DOC_AGENT_TOOLS, tool_choice: "required" }) }); } catch { return { ok: false, audit, classification: "agent-request-failed" }; }
 		if (!response.ok) return { ok: false, audit, classification: "agent-request-failed" };
 		const body = await response.json() as { output?: Array<Record<string, unknown>> };
-		const calls = body.output?.filter((item) => item.type === "function_call") ?? [];
+		const responseOutput = body.output ?? [];
+		const calls = responseOutput.filter((item) => item.type === "function_call");
 		if (!calls.length) return { ok: false, audit, classification: "agent-no-tool-call" };
 		const outputs: unknown[] = [];
 		for (const call of calls) {
@@ -286,16 +289,16 @@ async function runDocumentationAgent(session: Awaited<ReturnType<typeof createSe
 			} else if (name === "apply_patch" && typeof args.patch === "string" && safeDocumentationPatch(args.patch)) {
 				const paths = [...args.patch.matchAll(/^(?:--- a\/|\+\+\+ b\/)([^\n]+)$/gmu)].map((m) => m[1]);
 				if (!paths.every((path) => read.has(path))) value = { ok: false, error: "Read every edited path before writing." };
-				else { const write = await session.writeFile(`${checkout}/candidate.patch`, args.patch); const result = write.success ? await session.exec(`git -C ${checkout} apply --whitespace=error-all candidate.patch`, { timeout: 15_000 }) : null; value = { ok: Boolean(result?.success), error: result?.success ? undefined : "Patch did not apply; inspect the diff/files and retry." }; }
-			} else if (name === "inspect_diff") { const result = await session.exec(`git -C ${checkout} diff -- README.md docs`, { timeout: 15_000 }); value = { ok: result.success, diff: result.stdout.slice(0, 16000) };
-			} else if (name === "run_checks") { const check = await session.exec(`git -C ${checkout} diff --check && git -C ${checkout} diff --name-only | grep -E '^(README\\.md|docs/[^/]+\\.md)$'`, { timeout: 15_000 }); value = { ok: check.success, error: check.success ? undefined : "Docs-only diff check failed." };
-			} else if (name === "finish") { const check = await session.exec(`git -C ${checkout} diff --check && git -C ${checkout} diff --quiet -- README.md docs; test $? -eq 1`, { timeout: 15_000 }); value = { ok: check.success, finished: check.success };
+				else { const write = await session.writeFile(`${checkout}/candidate.patch`, args.patch); const result = write.success ? await session.exec(`git -C ${checkout} apply --whitespace=error-all candidate.patch`, { timeout: 15_000 }) : null; if (result?.success) { inspectedAfterWrite = false; checkedAfterWrite = false; } value = { ok: Boolean(result?.success), error: result?.success ? undefined : "Patch did not apply; inspect the diff/files and retry." }; }
+			} else if (name === "inspect_diff") { const result = await session.exec(`git -C ${checkout} diff -- README.md docs`, { timeout: 15_000 }); if (result.success) inspectedAfterWrite = true; value = { ok: result.success, diff: result.stdout.slice(0, 16000) };
+			} else if (name === "run_checks") { const check = await session.exec(`git -C ${checkout} diff --check && git -C ${checkout} diff --name-only | grep -E '^(README\\.md|docs/[^/]+\\.md)$`, { timeout: 15_000 }); if (check.success && inspectedAfterWrite) checkedAfterWrite = true; value = { ok: check.success && inspectedAfterWrite, error: inspectedAfterWrite ? (check.success ? undefined : "Docs-only diff check failed.") : "Inspect the diff after the latest write first." };
+			} else if (name === "finish") { const check = await session.exec(`git -C ${checkout} diff --check && git -C ${checkout} diff --quiet -- README.md docs; test $? -eq 1`, { timeout: 15_000 }); value = { ok: check.success && inspectedAfterWrite && checkedAfterWrite, finished: check.success && inspectedAfterWrite && checkedAfterWrite };
 			} else value = { ok: false, error: "Unknown or invalid tool call." };
 			audit.push({ name: typeof name === "string" ? name : "invalid", ok: value.ok === true });
 			outputs.push({ type: "function_call_output", call_id: call.call_id, output: JSON.stringify(value) });
 			if (name === "finish" && value.ok) return { ok: true, audit };
 		}
-		input = outputs;
+		input = [...input, ...responseOutput, ...outputs];
 	}
 	return { ok: false, audit, classification: "agent-round-limit" };
 }
