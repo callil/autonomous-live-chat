@@ -229,6 +229,7 @@ const COORDINATOR_BATCH_SIZE = 8;
 const SHA = /^[0-9a-f]{40}$/iu;
 const LIVE_APP_URL = "https://autonomous-live-chat.coda-a.workers.dev/?room=main";
 const AUTO_RESTACK_MESSAGE = "Cloudflare OS detected a changed parent base and marked the stack for a single root-led restack.";
+const LEGACY_RUNNER_RPC_MESSAGE = 'Coordinator effect run-os failed after 3 attempts (The RPC receiver does not implement the method "runJob".).';
 const OS_WORKSPACE_CALLER_EMAIL = "callil.capuozzo@gmail.com";
 const TERMINAL_PHASES: ReadonlySet<WorkflowPhase> = new Set([
 	"completed",
@@ -1110,15 +1111,15 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 	}
 
 	/**
-	 * Upgrade recovery for work stopped by the pre-auto-restack coordinator.
-	 * Only an open authority issue with the exact former restack terminal is
-	 * resumed. New runs take the normal in-band auto-restack path above.
+	 * Upgrade recovery for open work stopped by the former restack terminal or
+	 * removed synchronous runner RPC. Exact messages fence this migration;
+	 * new runs use the normal in-band restack and enqueue/poll paths above.
 	 */
 	private async recoverAutoRestackStops(): Promise<void> {
 		const workItems = (await this.ctx.storage.get<HarnessWorkItem[]>(WORK_ITEMS_KEY)) ?? [];
 		for (const stored of workItems) {
 			const last = stored.activity.at(-1);
-			if (stored.phase !== "needs_review" || last?.message !== AUTO_RESTACK_MESSAGE || !stored.workflowId || !stored.githubIssue || !stored.osNativeGit?.workspace) continue;
+			if (stored.phase !== "needs_review" || ![AUTO_RESTACK_MESSAGE, LEGACY_RUNNER_RPC_MESSAGE].includes(last?.message ?? "") || !stored.workflowId || !stored.githubIssue || !stored.osNativeGit?.workspace) continue;
 			const issueResponse = await fetch(`https://api.github.com/repos/${this.env.GITHUB_REPOSITORY}/issues/${stored.githubIssue.number}`, {
 				headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${this.env.GITHUB_AUTOMATION_TOKEN}`, "User-Agent": "app-harness-os", "X-GitHub-Api-Version": "2022-11-28" },
 			});
@@ -1134,7 +1135,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 			const workflow = await this.getWorkflow(stored.workflowId);
 			if (!workflow || workflow.phase !== "requires_review") continue;
 			const current = await this.getWorkItem(stored.id);
-			if (!current || current.phase !== "needs_review" || current.activity.at(-1)?.message !== AUTO_RESTACK_MESSAGE || !current.osNativeGit || !current.githubIssue) continue;
+			if (!current || current.phase !== "needs_review" || ![AUTO_RESTACK_MESSAGE, LEGACY_RUNNER_RPC_MESSAGE].includes(current.activity.at(-1)?.message ?? "") || !current.osNativeGit || !current.githubIssue) continue;
 			const now = Date.now();
 			const effectId = this.effectId(workflow.id, "run-os");
 			const ledger = createStackLedger({
@@ -1159,7 +1160,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 			this.transitionWorkItem(current, "queued", "Open root stack resumed automatically against the current main SHA.");
 			const resumed = await this.ctx.storage.transaction(async (txn) => {
 				const latest = await txn.get<HarnessWorkItem>(this.workItemKey(current.id));
-				if (!latest || latest.phase !== "needs_review" || latest.activity.at(-1)?.message !== AUTO_RESTACK_MESSAGE) return false;
+				if (!latest || latest.phase !== "needs_review" || ![AUTO_RESTACK_MESSAGE, LEGACY_RUNNER_RPC_MESSAGE].includes(latest.activity.at(-1)?.message ?? "")) return false;
 				await Promise.all([
 					txn.put(this.workflowKey(workflow.id), workflow),
 					txn.put(this.workItemKey(current.id), current),
