@@ -2,6 +2,7 @@ type Env = {
 	ALLOWED_REPOSITORY: string;
 	PRODUCTION_ORIGIN: string;
 	GIT_PROXY_ASSERTION_SECRET: string;
+	APP_HARNESS_IDENTITY_SECRET: string;
 	GITHUB_APP_ID: string;
 	GITHUB_APP_INSTALLATION_ID: string;
 	GITHUB_APP_PRIVATE_KEY: string;
@@ -15,7 +16,23 @@ type Assertion = {
 	exp: number;
 };
 
+type CoordinatorAssertion = {
+	iss: "app-harness-coordinator";
+	workItemId: string;
+	repository: string;
+	exp: number;
+};
+
 type Classification = "triage" | "agent" | "needs-review" | "rejected" | "deployed";
+type ModelClassification = {
+	changeType: "visual" | "content" | "data" | "behavior" | "infrastructure";
+	scope: "localized" | "bounded" | "broad";
+	risk: "low" | "medium" | "high";
+	affectedSurface: "ui" | "copy" | "data" | "behavior" | "infrastructure";
+	reversible: boolean;
+	executionEligibility: "eligible" | "needs_review";
+	ciProfile: "visual" | "content" | "behavior" | "data" | "infrastructure";
+};
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -33,7 +50,22 @@ const CLASSIFICATION_LABELS: Readonly<Record<Classification, readonly string[]>>
 	rejected: ["app-harness", "rejected"],
 	deployed: ["app-harness", "deployed"],
 };
-const MANAGED_CLASSIFICATION_LABELS = new Set(Object.values(CLASSIFICATION_LABELS).flat());
+const CHANGE_TYPES = ["visual", "content", "data", "behavior", "infrastructure"] as const;
+const SCOPES = ["localized", "bounded", "broad"] as const;
+const RISKS = ["low", "medium", "high"] as const;
+const SURFACES = ["ui", "copy", "data", "behavior", "infrastructure"] as const;
+const EXECUTIONS = ["eligible", "needs_review"] as const;
+const CI_PROFILES = ["visual", "content", "behavior", "data", "infrastructure"] as const;
+const MANAGED_CLASSIFICATION_LABELS = new Set([
+	...Object.values(CLASSIFICATION_LABELS).flat(),
+	...CHANGE_TYPES.map((value) => `change-${value}`),
+	...SCOPES.map((value) => `scope-${value}`),
+	...RISKS.map((value) => `risk-${value}`),
+	...SURFACES.map((value) => `surface-${value}`),
+	"reversible-yes", "reversible-no",
+	...EXECUTIONS.map((value) => `execution-${value}`),
+	...CI_PROFILES.map((value) => `ci-${value}`),
+]);
 
 function base64Url(bytes: Uint8Array): string {
 	let binary = "";
@@ -77,6 +109,25 @@ async function validateAssertion(request: Request, env: Env): Promise<Assertion 
 		if (payload.iss !== "app-harness-os-native-git" || payload.repository !== env.ALLOWED_REPOSITORY) return null;
 		if (!Number.isInteger(payload.generation) || !Number.isFinite(payload.exp) || payload.exp <= Math.floor(Date.now() / 1000)) return null;
 		if (typeof payload.jobId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/u.test(payload.jobId)) return null;
+		return payload;
+	} catch {
+		return null;
+	}
+}
+
+async function validateCoordinatorAssertion(request: Request, env: Env): Promise<CoordinatorAssertion | null> {
+	const header = request.headers.get("x-app-harness-coordinator-assertion");
+	if (!header) return null;
+	const [payloadPart, signaturePart, extra] = header.split(".");
+	if (!payloadPart || !signaturePart || extra) return null;
+	const payloadBytes = decodeBase64Url(payloadPart);
+	const signature = decodeBase64Url(signaturePart);
+	if (!payloadBytes || !signature || !equal(signature, await hmac(env.APP_HARNESS_IDENTITY_SECRET, payloadPart))) return null;
+	try {
+		const payload = JSON.parse(decoder.decode(payloadBytes)) as CoordinatorAssertion;
+		if (payload.iss !== "app-harness-coordinator" || payload.repository !== env.ALLOWED_REPOSITORY) return null;
+		if (!Number.isFinite(payload.exp) || payload.exp <= Math.floor(Date.now() / 1000)) return null;
+		if (typeof payload.workItemId !== "string" || !EVENT_ID.test(payload.workItemId)) return null;
 		return payload;
 	} catch {
 		return null;
@@ -137,6 +188,36 @@ function readClassification(value: unknown): Classification | null {
 	return typeof value === "string" && Object.hasOwn(CLASSIFICATION_LABELS, value) ? value as Classification : null;
 }
 
+function enumValue<T extends readonly string[]>(value: unknown, allowed: T): T[number] | null {
+	return typeof value === "string" && (allowed as readonly string[]).includes(value) ? value as T[number] : null;
+}
+
+function readModelClassification(value: unknown): ModelClassification | null {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+	const raw = value as Record<string, unknown>;
+	const changeType = enumValue(raw.changeType, CHANGE_TYPES);
+	const scope = enumValue(raw.scope, SCOPES);
+	const risk = enumValue(raw.risk, RISKS);
+	const affectedSurface = enumValue(raw.affectedSurface, SURFACES);
+	const executionEligibility = enumValue(raw.executionEligibility, EXECUTIONS);
+	const ciProfile = enumValue(raw.ciProfile, CI_PROFILES);
+	if (!changeType || !scope || !risk || !affectedSurface || typeof raw.reversible !== "boolean" || !executionEligibility || !ciProfile) return null;
+	return { changeType, scope, risk, affectedSurface, reversible: raw.reversible, executionEligibility, ciProfile };
+}
+
+function modelClassificationLabels(classification: ModelClassification | null): string[] {
+	if (!classification) return [];
+	return [
+		`change-${classification.changeType}`,
+		`scope-${classification.scope}`,
+		`risk-${classification.risk}`,
+		`surface-${classification.affectedSurface}`,
+		classification.reversible ? "reversible-yes" : "reversible-no",
+		`execution-${classification.executionEligibility}`,
+		`ci-${classification.ciProfile}`,
+	];
+}
+
 async function readJson(request: Request): Promise<Record<string, unknown> | null> {
 	if (!request.headers.get("content-type")?.toLowerCase().includes("application/json")) return null;
 	try {
@@ -174,13 +255,22 @@ async function upsertStatusComment(env: Env, token: string, issueNumber: number,
 	return fetch(`https://api.github.com/repos/${env.ALLOWED_REPOSITORY}/issues/${issueNumber}/comments`, { method: "POST", headers: githubHeaders(token), body: JSON.stringify({ body: text }) });
 }
 
-async function reconcileClassification(env: Env, token: string, issueNumber: number, classification: Classification): Promise<Response> {
+async function reconcileClassification(env: Env, token: string, issueNumber: number, classification: Classification, modelClassification: ModelClassification | null): Promise<Response> {
 	const current = await fetch(`https://api.github.com/repos/${env.ALLOWED_REPOSITORY}/issues/${issueNumber}`, { headers: githubHeaders(token) });
 	if (!current.ok) return current;
 	const issue = await current.json() as { labels?: Array<{ name?: unknown }> };
 	const labels = (issue.labels ?? []).flatMap((label) => typeof label.name === "string" ? [label.name] : []).filter((label) => !MANAGED_CLASSIFICATION_LABELS.has(label));
-	labels.push(...CLASSIFICATION_LABELS[classification]);
+	labels.push(...CLASSIFICATION_LABELS[classification], ...modelClassificationLabels(modelClassification));
 	return fetch(`https://api.github.com/repos/${env.ALLOWED_REPOSITORY}/issues/${issueNumber}`, { method: "PATCH", headers: githubHeaders(token), body: JSON.stringify({ labels }) });
+}
+
+async function findIssueByMarker(env: Env, token: string, eventId: string): Promise<{ number: number; htmlUrl: string } | null> {
+	const query = new URLSearchParams({ q: `repo:${env.ALLOWED_REPOSITORY} is:issue in:body "${eventMarker(eventId)}"`, per_page: "2" });
+	const response = await fetch(`https://api.github.com/search/issues?${query}`, { headers: githubHeaders(token) });
+	if (!response.ok) throw new Error(`GitHub issue search failed (${response.status}).`);
+	const body = await response.json() as { items?: Array<{ number?: unknown; html_url?: unknown }> };
+	const issue = body.items?.[0];
+	return typeof issue?.number === "number" && typeof issue.html_url === "string" ? { number: issue.number, htmlUrl: issue.html_url } : null;
 }
 
 function productionUrl(env: Env, value: unknown): string | null {
@@ -212,6 +302,8 @@ async function handleIssueBridge(request: Request, env: Env, url: URL): Promise<
 		const classification = readClassification(input.classification);
 		if (!title || !body || !classification) return new Response("Not found", { status: 404 });
 		const token = await installationToken(env);
+		const existing = await findIssueByMarker(env, token, eventId);
+		if (existing) return json({ issueNumber: existing.number, issueUrl: existing.htmlUrl, existing: true });
 		const result = await fetch(`https://api.github.com/repos/${env.ALLOWED_REPOSITORY}/issues`, { method: "POST", headers: githubHeaders(token), body: JSON.stringify({ title, body: `${body}\n\n${eventMarker(eventId)}`, labels: CLASSIFICATION_LABELS[classification] }) });
 		if (!result.ok) return new Response("GitHub write unavailable", { status: 503 });
 		const issue = await result.json() as { number?: unknown; html_url?: unknown };
@@ -221,10 +313,11 @@ async function handleIssueBridge(request: Request, env: Env, url: URL): Promise<
 	if (!issueNumber) return new Response("Not found", { status: 404 });
 	if (labelPath) {
 		const classification = readClassification(input.classification);
-		if (!classification) return new Response("Not found", { status: 404 });
+		const modelClassification = input.modelClassification === undefined ? null : readModelClassification(input.modelClassification);
+		if (!classification || (input.modelClassification !== undefined && !modelClassification)) return new Response("Not found", { status: 404 });
 		const token = await installationToken(env);
-		const result = await reconcileClassification(env, token, issueNumber, classification);
-		return result.ok ? json({ issueNumber, classification }) : new Response("GitHub write unavailable", { status: 503 });
+		const result = await reconcileClassification(env, token, issueNumber, classification, modelClassification);
+		return result.ok ? json({ issueNumber, classification, modelClassification: Boolean(modelClassification) }) : new Response("GitHub write unavailable", { status: 503 });
 	}
 	if (statusPath) {
 		const body = readText(input.body, 6_000);
@@ -251,22 +344,25 @@ async function handleIssueBridge(request: Request, env: Env, url: URL): Promise<
 export default {
 	async fetch(request: Request, env: Env): Promise<Response> {
 		if (request.method !== "GET" && request.method !== "POST") return new Response("Not found", { status: 404 });
-		const assertion = await validateAssertion(request, env);
-		if (!assertion) return new Response("Not found", { status: 404 });
 		const url = new URL(request.url);
-		try {
-			const issueResponse = await handleIssueBridge(request, env, url);
-			if (issueResponse) return issueResponse;
-		} catch (error) {
-			console.error("GitHub App identity bridge failure", { jobId: assertion.jobId, generation: assertion.generation, error: error instanceof Error ? error.message : "unknown" });
-			return new Response("GitHub write unavailable", { status: 503 });
-		}
-		const match = GIT_PATH.exec(url.pathname);
-		if (!match || `${match[1]}/${match[2]}`.toLowerCase() !== env.ALLOWED_REPOSITORY.toLowerCase()) {
+		const identityRoute = url.pathname === "/v1/issues" || ISSUE_PATH.test(url.pathname) || ISSUE_LABELS_PATH.test(url.pathname) || ISSUE_STATUS_PATH.test(url.pathname) || ISSUE_CLOSE_PATH.test(url.pathname);
+		if (identityRoute) {
+			const assertion = await validateCoordinatorAssertion(request, env);
+			if (!assertion) return new Response("Not found", { status: 404 });
+			try {
+				const issueResponse = await handleIssueBridge(request, env, url);
+				if (issueResponse) return issueResponse;
+			} catch (error) {
+				console.error("GitHub App identity bridge failure", { workItemId: assertion.workItemId, error: error instanceof Error ? error.message : "unknown" });
+				return new Response("GitHub write unavailable", { status: 503 });
+			}
 			return new Response("Not found", { status: 404 });
 		}
-
+		const assertion = await validateAssertion(request, env);
+		if (!assertion) return new Response("Not found", { status: 404 });
 		try {
+			const match = GIT_PATH.exec(url.pathname);
+			if (!match || `${match[1]}/${match[2]}`.toLowerCase() !== env.ALLOWED_REPOSITORY.toLowerCase()) return new Response("Not found", { status: 404 });
 			const headers = new Headers(request.headers);
 			headers.delete("authorization");
 			headers.delete("x-app-harness-assertion");

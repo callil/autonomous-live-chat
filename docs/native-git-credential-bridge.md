@@ -23,6 +23,7 @@ Disable webhooks. The app does not need an OAuth callback. Generate one private 
 - `APP_HARNESS_GITHUB_APP_INSTALLATION_ID`
 - `APP_HARNESS_GITHUB_APP_PRIVATE_KEY`
 - `GIT_PROXY_ASSERTION_SECRET` (one high-entropy secret shared only by runner and proxy)
+- `APP_HARNESS_IDENTITY_SECRET` (a different high-entropy secret shared only by the App Harness coordinator and proxy)
 
 The proxy deployment workflow maps those repository-secret names to its internal Worker secrets `GITHUB_APP_ID`, `GITHUB_APP_INSTALLATION_ID`, and `GITHUB_APP_PRIVATE_KEY`; they never appear in source or the Sandbox. The runner deployment workflow installs only `GIT_PROXY_ASSERTION_SECRET` in addition to its existing caller secret. After the proxy is deployed with those values, a reviewed configuration change may set `NATIVE_GIT_ENABLED` to `true`; until then no clone, branch, commit, push, PR, CI, or deploy action can run through this path.
 
@@ -34,17 +35,17 @@ App Harness records only bounded events: job prepared, capability requested, san
 
 The same proxy now has a second, deliberately narrow capability: authenticated issue/status writes for the exact allowlisted repository. The proxy mints the GitHub App installation token internally and never returns it, the App private key, or an authorization header.
 
-All requests require the existing short-lived `x-app-harness-assertion`; everything else is a 404. The supported contract is intentionally not a generic GitHub REST proxy:
+This is a separate trust boundary from native Git. Identity requests require a short-lived `x-app-harness-coordinator-assertion` signed with `APP_HARNESS_IDENTITY_SECRET`, whose payload has issuer `app-harness-coordinator`, the exact repository, bounded `workItemId`, and expiry. The existing `x-app-harness-assertion` / `app-harness-os-native-git` assertion remains native-Git-only and cannot call these endpoints. Everything else is a 404. The supported contract is intentionally not a generic GitHub REST proxy:
 
 | Endpoint | Allowed body | Result |
 | --- | --- | --- |
-| `POST /v1/issues` | `eventId`, bounded `title`, bounded `body`, one fixed `classification` | Creates an issue as the GitHub App bot. |
-| `POST /v1/issues/:number/classification` | `eventId`, fixed `classification` | Reconciles only App Harness-managed labels; all unrelated labels survive. |
+| `POST /v1/issues` | `eventId`, bounded `title`, bounded `body`, one fixed `classification` | Creates an issue as the GitHub App bot, or returns the existing bot-created issue carrying the same event marker. |
+| `POST /v1/issues/:number/classification` | `eventId`, fixed `classification`, optional enumerated `modelClassification` | Reconciles only App Harness-managed labels; all unrelated labels survive. |
 | `POST /v1/issues/:number/status` | `eventId`, bounded `body` | Creates or updates one bot-authored status comment, identified by `<!-- app-harness-event:<eventId> -->`. |
 | `POST /v1/issues/:number/close-after-deployment` | `eventId`, bounded `body`, production `deploymentUrl` | Fetches the configured production origin successfully, records that verified URL in the idempotent status comment, then closes the issue. |
 
-`classification` is one of `triage`, `agent`, `needs-review`, `rejected`, or `deployed`; callers cannot supply arbitrary labels, repositories, issue bodies with arbitrary binary data, GitHub paths, or a deployment host. The proxy checks the deployment URL's HTTPS origin against `PRODUCTION_ORIGIN`, then probes it from the Worker before closing. This proves reachability at the configured live origin; the caller must only use this endpoint after its CI/deploy provider has already recorded the matching successful deployment event.
+`classification` is one of `triage`, `agent`, `needs-review`, `rejected`, or `deployed`; callers cannot supply arbitrary labels, repositories, issue bodies with arbitrary binary data, GitHub paths, or a deployment host. The optional model object can only derive the same bounded labels used by the coordinator: `change-{visual|content|data|behavior|infrastructure}`, `scope-{localized|bounded|broad}`, `risk-{low|medium|high}`, `surface-{ui|copy|data|behavior|infrastructure}`, `reversible-{yes|no}`, `execution-{eligible|needs_review}`, and `ci-{visual|content|behavior|data|infrastructure}`. A reconciliation removes obsolete labels only from those managed families and preserves unrelated human labels. The proxy checks the deployment URL's HTTPS origin against `PRODUCTION_ORIGIN`, then probes it from the Worker before closing. This proves reachability at the configured live origin; the caller must only use this endpoint after its CI/deploy provider has already recorded the matching successful deployment event.
 
 ### App Harness integration contract (not enabled by this change)
 
-The Durable Object/application integration should sign its existing runner-style assertion with a new bounded work-item job ID and `repository: "callil/autonomous-live-chat"`, call these endpoints, and record the returned `issueNumber`/`issueUrl` or verified deployment URL in the durable ledger. It must only render lifecycle states after those calls succeed. It must never send browser-originated values to the proxy without server-side bounds and provenance sanitization. This package does not alter `src/index.ts`, existing workflows, deployment configuration, or the provider enablement switch.
+The Durable Object/application integration should create a coordinator assertion with `{ iss: "app-harness-coordinator", workItemId, repository: "callil/autonomous-live-chat", exp }`, HMAC-sign its base64url payload with `APP_HARNESS_IDENTITY_SECRET`, and send it only in `x-app-harness-coordinator-assertion`. It should record the returned `issueNumber`/`issueUrl` or verified deployment URL in the durable ledger, and only render lifecycle states after those calls succeed. It must never send browser-originated values to the proxy without server-side bounds and provenance sanitization. This package does not alter `src/index.ts`, existing workflows, deployment configuration, or the provider enablement switch.
