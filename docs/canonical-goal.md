@@ -8,7 +8,7 @@ The operator is a full autonomous software agent, not a color changer, documenta
 
 Safety is expressed through the agent's operating guidelines, public intent and action records, short-lived process-scoped credentials, isolated execution, CI, reversible releases, and truthful refusal. It is not implemented by artificially removing ordinary coding capabilities. The operator must preserve user data and secrets and refuse illegal, harmful, offensive, intentionally availability-destroying, or externally unsupported work; otherwise it should act autonomously and finish the loop.
 
-NanoCodex is the intended coding operator. Cloudflare OS and the Durable Object orchestrate work around it; they do not replace it with a narrower bespoke agent loop.
+Cloudflare OS is the persistent coding operator and keeps repository-level conversation and context. NanoCodex is its ephemeral implementation child inside the isolated Sandbox; it is spawned per bounded task and may use read-only parallel subagents for investigation, while its parent alone edits and owns the stack.
 
 ## Acceptance criteria
 
@@ -25,4 +25,4 @@ NanoCodex is the intended coding operator. Cloudflare OS and the Durable Object 
 
 Cloudflare OS is the preferred orchestration and governance provider. The Workshop uses Cloudflare Access with a native Cloudflare identity/account-member policy; GitHub is not required for Workshop sign-in. Its GitHub Gatekeeper separately introduces the repository resource, and a Sandbox workspace uses short-lived process-scoped credentials to run NanoCodex with the full repository terminal. The Durable Object is the authoritative App Harness ledger—not the coding agent—and receives bounded, secret-free audit events for agent progress and external artifacts.
 
-The existing deterministic GitHub Actions path remains a fallback only until the Cloudflare OS path has completed the same evidence chain.
+GitHub Actions remains the deterministic validation, promotion, and deployment gate. It is not a second planner or a fixed source transformer.

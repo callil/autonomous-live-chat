@@ -1,26 +1,29 @@
 const REPOSITORY = "callil/autonomous-live-chat";
 const RUNNER_URL = "https://app-harness-os-native-git.coda-a.workers.dev";
-const ORCHESTRATOR_URL = "https://app-harness-os-orchestrator.coda-a.workers.dev";
+const GADGET_KEY = REPOSITORY;
+const CHAT_KEY = "repository-main";
 
-const WORK_ITEM_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/u;
+const WORK_ITEM_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const SHA = /^[0-9a-f]{40}$/iu;
 const ISSUE_URL = new RegExp(`^https://github\\.com/${REPOSITORY}/issues/(\\d+)$`, "i");
 
 function safeWorkItemId(value) {
-	if (typeof value !== "string" || !WORK_ITEM_ID.test(value)) throw new Error("OS work needs a bounded durable work-item ID.");
+	if (typeof value !== "string" || !WORK_ITEM_ID.test(value)) throw new Error("OS work needs a durable UUID work-item ID.");
 	return value;
 }
 
-function issueNumber(issueUrl) {
-	if (typeof issueUrl !== "string") throw new Error("OS work needs the linked issue for the allowlisted repository.");
-	const match = issueUrl.match(ISSUE_URL);
-	if (!match) throw new Error("OS work needs the linked issue for the allowlisted repository.");
-	return Number(match[1]);
+function safeIssue(issue) {
+	if (!issue || !Number.isInteger(issue.number) || issue.number < 1 || typeof issue.url !== "string") {
+		throw new Error("OS work needs its durable GitHub issue.");
+	}
+	const match = issue.url.match(ISSUE_URL);
+	if (!match || Number(match[1]) !== issue.number) throw new Error("OS issue authority does not match the repository.");
+	return { number: issue.number, url: issue.url };
 }
 
-function safeRoom(value) {
-	if (typeof value !== "string" || !WORK_ITEM_ID.test(value)) throw new Error("OS work needs a bounded room ID.");
-	return value;
+function safeRequest(value) {
+	if (typeof value !== "string" || !value.trim() || value.length > 500) throw new Error("OS work needs a bounded durable request.");
+	return value.trim();
 }
 
 function safeGeneration(value) {
@@ -29,54 +32,83 @@ function safeGeneration(value) {
 }
 
 /**
- * The planning service receives a bounded work manifest, not a repository
- * credential or shell surface. The original request is deliberately omitted
- * from the later runner job.
+ * Build one idempotent message for the persistent repository workspace. The
+ * message may guide the agent, but it grants no repository authority: the
+ * capability bridge accepts only the durable work-item and issue identifiers.
  */
-export function createOsPlanningManifest({ workItemId, issueUrl, request, target, room = "main", generation = 1 }) {
+export function createOsWorkspaceSubmission({ workItemId, issue, request, target, responseTarget }) {
 	const id = safeWorkItemId(workItemId);
-	const issue = issueNumber(issueUrl);
-	const safeRoomName = safeRoom(room);
-	const safeGenerationNumber = safeGeneration(generation);
-	if (typeof request !== "string" || !request.trim() || request.length > 500) throw new Error("OS planning needs a bounded request.");
+	const linkedIssue = safeIssue(issue);
+	const durableRequest = safeRequest(request);
+	if (!responseTarget) throw new Error("OS workspace submission needs a persistent response target.");
+	const targetLine = target?.targetId && target?.page
+		? `Target context: ${String(target.targetId).slice(0, 64)} on ${String(target.page).slice(0, 160)}.`
+		: "No element target was supplied.";
 	return {
-		workItemId: id,
-		issueUrl,
-		repository: REPOSITORY,
-		request: request.trim(),
-		...(target?.targetId && target?.page ? { target: { targetId: target.targetId, page: target.page, ...(target.label ? { label: target.label } : {}) } } : {}),
-		stack: { id: `stack-${id}`, lane: `room-${safeRoomName}`, generation: safeGenerationNumber },
-		runnerUrl: RUNNER_URL,
-		orchestratorUrl: ORCHESTRATOR_URL,
-		issueNumber: issue,
+		gadgetKey: GADGET_KEY,
+		chatKey: CHAT_KEY,
+		messageKey: id,
+		gadgetTitle: "App Harness · autonomous-live-chat",
+		prompt: [
+			`A public App Harness request is ready in ${REPOSITORY}, issue #${linkedIssue.number}, work item ${id}.`,
+			`Request: ${durableRequest}`,
+			targetLine,
+			"Use the repository context and your safety guidelines to assess the request.",
+			`When you are ready to start implementation, call APP_HARNESS.enqueueRepositoryTask with exactly {\"workItemId\":\"${id}\",\"issueNumber\":${linkedIssue.number}}.`,
+			"The capability resolves the repository and original request from durable state; do not add repository names, source text, shell commands, or credentials to that call.",
+			"Report your concise decision and current status publicly when the turn ends.",
+		].join("\n"),
+		chatGatewayRpcTarget: responseTarget,
 	};
 }
 
+/** Validate a typed OS capability request against durable, server-owned state. */
+export function validateOsExecutionRequest(input, durable) {
+	const id = safeWorkItemId(input?.workItemId);
+	const issue = safeIssue(durable?.issue);
+	if (id !== durable?.workItemId || input?.issueNumber !== issue.number) {
+		throw new Error("Cloudflare OS execution request does not match its durable issue.");
+	}
+	return { workItemId: id, issueNumber: issue.number };
+}
+
 /**
- * Convert a model-approved, schema-validated plan into a runner job. No
- * original prose, prompt, source, or model response crosses this boundary.
- * @param {{ manifest: any, plan: { kind: "repository-task", request: string }, parentBaseSha?: string | null }} input
+ * Idempotency is owned by the durable outbox, not by agent output. Once the
+ * fixed observe-main effect exists (or the job is later in the pipeline), a
+ * repeated capability call is an acknowledgement only.
  */
-export function createOsNativeGitJob({ manifest, plan, parentBaseSha = null }) {
-	if (!manifest || manifest.repository !== REPOSITORY || !Number.isInteger(manifest.issueNumber)) throw new Error("OS runner job needs a valid planning manifest.");
-	if (!plan || plan.kind !== "repository-task" || typeof plan.request !== "string" || !plan.request.trim() || plan.request.length > 500) throw new Error("OS runner job needs a bounded repository task.");
-	const workItemId = safeWorkItemId(manifest.workItemId);
-	const generation = safeGeneration(manifest.stack?.generation);
+export function osExecutionDisposition({ terminal, existingEffect, jobStage }) {
+	if (terminal) return "terminal";
+	if (existingEffect || ["running", "awaiting-callback"].includes(jobStage)) return "duplicate";
+	return "queue";
+}
+
+/** A completed OS turn without the typed execution action is an explicit no-op. */
+export function osWorkspaceTurnDisposition(jobStage) {
+	return jobStage === "awaiting-os" ? "needs-review" : "delegated";
+}
+
+/** Create the runner job exclusively from original durable request data. */
+export function createOsNativeGitJob({ workItemId, issue, request, generation = 1, parentBaseSha = null }) {
+	const id = safeWorkItemId(workItemId);
+	const linkedIssue = safeIssue(issue);
+	const durableRequest = safeRequest(request);
+	const safeGenerationNumber = safeGeneration(generation);
 	if (parentBaseSha !== null && (typeof parentBaseSha !== "string" || !SHA.test(parentBaseSha))) throw new Error("OS runner job parent base must be a full Git SHA.");
 	return {
-		jobId: `os-${workItemId}-g${generation}`,
+		jobId: `os-${id}-g${safeGenerationNumber}`,
 		repository: REPOSITORY,
-		generation,
+		generation: safeGenerationNumber,
 		candidate: {
-			change: { kind: "repository-task", request: plan.request },
+			change: { kind: "repository-task", request: durableRequest },
 			stack: {
-				stackId: manifest.stack.id,
+				stackId: `stack-${id}`,
 				nodeId: "root",
-				branch: `app-harness-os/${manifest.issueNumber}/g${generation}`,
+				branch: `app-harness-os/${linkedIssue.number}/g${safeGenerationNumber}`,
 				parentBranch: "main",
 				parentBaseSha: parentBaseSha?.toLowerCase() ?? null,
 				pullRequestBase: "main",
-				issueNumber: manifest.issueNumber,
+				issueNumber: linkedIssue.number,
 			},
 		},
 	};
@@ -94,4 +126,4 @@ export function classifyOsRunnerResponse(value) {
 	return { phase: "needs_review", detail: "Cloudflare OS runner returned an unrecognized status. No native Git action is claimed.", terminal: true };
 }
 
-export { REPOSITORY as OS_NATIVE_GIT_REPOSITORY, RUNNER_URL as OS_NATIVE_GIT_RUNNER_URL, ORCHESTRATOR_URL as OS_AGENT_ORCHESTRATOR_URL };
+export { REPOSITORY as OS_NATIVE_GIT_REPOSITORY, RUNNER_URL as OS_NATIVE_GIT_RUNNER_URL };

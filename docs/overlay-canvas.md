@@ -7,7 +7,7 @@ App Harness puts its authoring controls **around** the host application without 
 The summoned menu has only three intentional tools:
 
 - **Target** selects an opted-in `data-target-id` and opens a request composer. It creates the existing change-request lifecycle.
-- **Comment** selects an opted-in element and saves a short feedback note as a durable annotation. It does not start the autonomous runner.
+- **Comment** selects an opted-in element and saves a short feedback note as a durable annotation, then submits that text through the same persistent OS request path.
 - **Draw** records bounded freehand screen-space points as a durable annotation. It does not start the autonomous runner.
 
 The per-room Durable Object persists the latest 100 annotation records and a matching durable activity record, then broadcasts both snapshots to every connected client. Comments include the same sanitized target envelope used by requests. Drawings include page/room context and up to 240 normalized screen-space points. The overlay never includes input values, message bodies, query strings, credentials, or secrets in target metadata.
@@ -20,7 +20,7 @@ The **Annotations** control opens a small manager only when needed. Each annotat
 
 The host sidebar, its navigation items, the floating launcher, and every meaningful open-menu control use human-readable `data-target-id` values and safe labels. In inspect mode they are highlighted and intercepted exactly like host content: selecting one opens the targeted composer instead of activating its normal action. Selecting the Target control first leaves inspect mode, which prevents a recursive toggle. This makes the App Harness authoring surface itself available for carefully scoped future change requests.
 
-Comments and drawing marks are an intake layer; they do not widen the deterministic fallback policy. A comment that exactly matches the documented fallback grammar (accent or empty-state copy) becomes a real guarded candidate request and can progress through GitHub candidate/CI/deploy. Any other comment, and every drawing, is visibly recorded as **awaiting coding-agent triage** with its GitHub issue. It does not silently build itself.
+Comments and drawing marks remain an overlay intake layer rather than permanent host UI. A text comment can enter the persistent OS workspace; every drawing is visibly recorded with its GitHub issue as visual context until a text implementation request names the intended change. Neither channel silently claims a runner, PR, or deployment.
 
 ## Tldraw adapter decision
 

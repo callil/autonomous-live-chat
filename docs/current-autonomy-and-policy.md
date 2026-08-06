@@ -1,21 +1,17 @@
 # Current autonomy and policy
 
-The deployed fallback is intentionally narrow. It maps exact natural-language sentences to fixed, parameterized edits in `public/index.html`:
+App Harness uses a full repository coding agent, not a fixed transform, file allowlist, or color-only agent. A normal text request enters the persistent Cloudflare OS workspace after its public GitHub issue exists. The workspace may autonomously delegate a bounded implementation job to the isolated Sandbox runner.
 
-- `set accent to blue`, `green`, `purple`, or `orange`
-- `set empty state to "Your short message"` — ordinary punctuation only, up to 80 characters
+Inside that Sandbox, NanoCodex has the checked-out repository and ordinary filesystem, terminal, Git, GitHub CLI, stack, package, test, migration, and Wrangler tools. It can change frontend, backend, data models, tests, workflows, and Cloudflare-platform configuration when the request requires them. CI—not an artificial command allowlist—is the merge and deployment authority.
 
-When the Cloudflare OS provider is enabled, every bounded text request instead creates an issue labelled `cloudflare-os-planning` and is sent as a bounded manifest to the model planner. The model may approve only the accent-color candidate shape above; all other requests become **needs review** with no native Git attempt. When that provider is disabled, non-matching requests create a real GitHub issue and become **awaiting coding-agent triage**. Raw request text is never turned into a shell command, package command, configuration write, or arbitrary source edit.
+Safety is layered:
 
-Target mode can make either kind of request more legible by attaching its bounded element envelope. It does not expand the allowlist or grant the fallback any ability to interpret an arbitrary target as permission to modify arbitrary code.
+- The persistent operator follows explicit guidelines to refuse illegal, harmful, offensive, credential-seeking, intentionally availability-destroying, destructive-data, or unsupported external-infrastructure requests.
+- The OS Gatekeeper exposes one typed App Harness capability. Agent prose cannot select another repository or replace the original durable request.
+- The GitHub App and short-lived installation credentials are repository-scoped and process-scoped. The Sandbox never receives the App private key.
+- Candidate code runs in unprivileged CI. Immutable base/head provenance, stack generation, merge checks, and signed deployment callbacks are required before completion is recorded.
+- Existing user data, credentials, and unrelated work must be preserved. Irreversible data deletion is a human boundary.
 
-Comments and drawings are durable intake, not a claim that freeform feedback is already self-executing. Every intake gets a linked GitHub issue and the Activity list records its actual external handoff and triage state. With Cloudflare OS enabled, text comments receive the same bounded planning pass; drawing-only feedback remains recorded intake. With the provider disabled, only a comment that exactly matches one of the fallback sentences is dispatched to the guarded candidate/CI/deploy loop.
+These are operating and capability boundaries, not a narrow catalog of permitted product changes. The agent is expected to act autonomously when it can complete the work safely and truthfully. If it cannot, it records the refusal or blocker publicly rather than inventing a branch, check, or deployment.
 
-Hard prohibitions apply even to future agents unless an explicit policy revision is reviewed and shipped:
-
-- destructive data changes or migrations;
-- secrets, credentials, authentication, authorization, and policy changes;
-- dependency, Worker configuration, or broad infrastructure changes;
-- unbounded command execution or edits outside the project repository.
-
-The candidate branch, pull request, checks, deployment, and durable room activity record form the audit trail. A successful fallback run is not evidence that the system can safely make arbitrary code changes.
+Target metadata improves situated understanding without widening authority. Inputs, chat bodies, query strings, secrets, and credentials are excluded from the target envelope. The original durable request and issue remain authoritative throughout execution.

@@ -60,6 +60,14 @@ function records(id, now = 1_000) {
 	assert.equal(reclaimed.effect.attempts, 2);
 }
 
+// A superseded blocking effect cannot resume and overwrite a later OS
+// capability handoff after asynchronous I/O interleaves.
+{
+	const initial = records("workflow-superseded");
+	const advancedJob = { ...initial.job, currentEffectId: "workflow-superseded-observe-main", stage: "queued", lease: null };
+	assert.equal(claimCoordinatorEffect(advancedJob, initial.effect, { now: 2_200, leaseToken: "stale-lease", leaseMs: 100 }).disposition, "stale");
+}
+
 // Exhausting an App-bot status retry records that delivery failure without falsifying core workflow authority.
 {
 	const initial = records("workflow-status");

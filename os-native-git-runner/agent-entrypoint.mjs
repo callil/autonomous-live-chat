@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 const RESPONSE_ID = /^[A-Za-z0-9_-]{1,120}$/u;
 const TOOL_NAME = /^[A-Za-z0-9_.:-]{1,80}$/u;
 const MODEL = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}$/u;
-const NANOCODEX_MODEL = "gpt-5.6-sol";
+const NANOCODEX_MODEL = "gpt-5.6-luna";
 const MAX_LINE_BYTES = 1_048_576;
 
 function emit(value) {
@@ -30,12 +30,13 @@ const binary = process.env.NANOCODEX_BINARY || "/usr/local/bin/nanocodex";
 const child = spawn(binary, [
 	"run",
 	"--cwd", request.cwd,
-	"--thinking", "high",
+	"--thinking", "low",
 	"--instructions", request.instructions,
 	"--rollouts", "false",
 	"--store-responses", "false",
-	"--web-search", "true",
+	"--web-search", "false",
 	"--image-generation", "false",
+	"--subagents", "true",
 	"--",
 	request.prompt,
 ], { env: process.env, stdio: ["ignore", "pipe", "ignore"] });
