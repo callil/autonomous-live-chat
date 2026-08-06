@@ -3,9 +3,16 @@ name: Validate App Harness OS stack node
 on:
   pull_request:
     types: [opened, reopened, synchronize, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      pull_request:
+        description: Existing App Harness OS pull request to validate
+        required: true
+        type: string
 
 permissions:
   contents: read
+  checks: write
   pull-requests: write
   issues: write
 
@@ -15,25 +22,31 @@ concurrency:
 
 jobs:
   validate-node:
-    if: startsWith(github.event.pull_request.head.ref, 'app-harness-os/')
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.event.pull_request.head.ref || '', 'app-harness-os/')
     runs-on: ubuntu-latest
+    env:
+      GH_REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ github.token }}
+      PR: ${{ inputs.pull_request || github.event.pull_request.number }}
     steps:
       - name: Verify orchestrator-owned stack relationship
         run: |
           # shellcheck disable=SC2016
           node -e '
             const fs = require("node:fs");
-            const pr = JSON.parse(fs.readFileSync(process.env.GITHUB_EVENT_PATH, "utf8")).pull_request;
+            const { execFileSync } = require("node:child_process");
+            const pr = JSON.parse(execFileSync("gh", ["api", `repos/${process.env.GH_REPO}/pulls/${process.env.PR}`], { encoding: "utf8" }));
             const headRefName = pr.head.ref;
             const baseRefName = pr.base.ref;
             const baseSha = pr.base.sha;
             if (!/^app-harness-os\/\d+\/g\d+$/.test(headRefName)) throw new Error("PR head is outside the OS stack namespace");
             if (!(baseRefName === "main" || /^app-harness-os\/\d+\/g\d+$/.test(baseRefName))) throw new Error("PR base is not main or an immediate OS stack parent");
             fs.appendFileSync(process.env.GITHUB_ENV, `APP_HARNESS_EXPECTED_BASE=${baseSha}\n`);
+            fs.appendFileSync(process.env.GITHUB_ENV, `APP_HARNESS_EXPECTED_HEAD=${pr.head.sha}\n`);
           '
       - uses: actions/checkout@v4
         with:
-          ref: refs/pull/${{ github.event.pull_request.number }}/merge
+          ref: refs/pull/${{ inputs.pull_request || github.event.pull_request.number }}/merge
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -50,9 +63,6 @@ jobs:
       - name: Visual CI profile (scoped static safeguard)
         run: node scripts/check-visual-candidate.mjs
       - name: Publish validation evidence
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR: ${{ github.event.pull_request.number }}
         run: |
           printf '%s\n' \
             '<!-- app-harness-os-ci:${{ github.run_id }} -->' \
@@ -60,3 +70,20 @@ jobs:
             'Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}' \
             > /tmp/app-harness-os-ci.md
           gh pr comment "$PR" --body-file /tmp/app-harness-os-ci.md
+      - name: Publish immutable manual validation check
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          node - <<'NODE'
+          const fs = require("node:fs");
+          fs.writeFileSync("/tmp/app-harness-os-check.json", JSON.stringify({
+            name: "validate-node",
+            head_sha: process.env.APP_HARNESS_EXPECTED_HEAD,
+            status: "completed",
+            conclusion: "success",
+            output: {
+              title: "App Harness OS stack-node validation passed",
+              summary: "The immutable candidate merge ref passed baseline and scoped visual safeguards.",
+            },
+          }));
+          NODE
+          gh api --method POST "repos/${GH_REPO}/check-runs" --input /tmp/app-harness-os-check.json > /tmp/app-harness-os-check-response.json
