@@ -20,7 +20,7 @@ The Worker serves the app and routes each room to a Durable Object. That object 
 
 Every text request first creates a real GitHub issue through the App Harness GitHub App. The Durable Object then submits one idempotent external message over a private service binding to the Cloudflare OS `ExternalMessageGateway`. The repository name selects one persistent workspace and `repository-main` selects one persistent chat; the work-item UUID is the message key. Repeating the handoff cannot create a second OS turn.
 
-Cloudflare OS owns the long-lived operator context. Its final text is delivered through a persistent exported callback target correlated to the original room and work item. That response is recorded publicly, but it is never parsed as authorization.
+Cloudflare OS owns the long-lived operator context. Its final text is delivered through a persistent `ctx.restore()` callback created by the original room and correlated to the work item. That response is recorded publicly, but it is never parsed as authorization.
 
 The operator can start implementation only through the typed ambient `APP_HARNESS.enqueueRepositoryTask({ workItemId, issueNumber })` capability. That capability carries no repository, prompt, source, shell command, or credential. The App Harness Worker checks the two identifiers against its original durable record, then idempotently queues the existing deterministic sequence: observe `main`, start the isolated native-Git runner, verify the branch/PR and immutable SHAs, dispatch CI/promotion, merge, deploy, and accept only signed completion evidence.
 

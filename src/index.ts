@@ -1,4 +1,7 @@
-import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
+// Wrangler's generated module declaration omits the runtime `restore` symbol.
+// Cloudflare OS uses this export directly for persistent RPC callbacks.
+// @ts-expect-error runtime export documented and exercised by Cloudflare OS
+import { DurableObject, restore, RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
 import {
 	applyCoordinatorCallback,
 	blockCoordinatorStack,
@@ -178,7 +181,6 @@ type RuntimeEnv = Omit<Env, "OS_NATIVE_GIT_RUNNER" | "OS_WORKSPACE"> & {
 	OS_NATIVE_GIT_RUNNER?: Fetcher;
 	OS_NATIVE_GIT_RUNNER_SECRET?: string;
 	OS_WORKSPACE?: unknown;
-	OS_RESPONSE_TARGETS: DurableObjectNamespace<OsWorkspaceResponseTarget>;
 	GITHUB_IDENTITY_BRIDGE?: Fetcher;
 	APP_HARNESS_IDENTITY_SECRET?: string;
 };
@@ -196,7 +198,7 @@ type OsWorkspaceGateway = {
 };
 
 type OsWorkspaceResponse = { text: string; idempotencyKey: string };
-type OsWorkspaceResponseTargetState = { room: string; workItemId: string };
+type OsWorkspaceResponseRestoreParams = { type: "os-workspace-response"; workItemId: string };
 type OsExecutionBridgeProps = { source: string };
 type OsExecutionRequest = { workItemId: string; issueNumber: number };
 
@@ -241,28 +243,22 @@ const PHASES: ReadonlySet<WorkflowPhase> = new Set([
 ]);
 
 
-/**
- * Persistent callback capability handed to Cloudflare OS. The OS workspace
- * stores this stub and invokes it after the agent turn finishes; the props bind
- * that response to one durable App Harness work item without parsing model
- * prose for identifiers.
- */
-export class OsWorkspaceResponseTarget extends DurableObject<RuntimeEnv> {
-	async arm(target: OsWorkspaceResponseTargetState): Promise<void> {
-		if (!/^[a-zA-Z0-9_-]{1,64}$/u.test(target.room) || !isUuid(target.workItemId)) {
-			throw new Error("Cloudflare OS response target is invalid.");
-		}
-		await this.ctx.storage.put("target", target);
+class OsWorkspaceResponseCallback extends RpcTarget {
+	#room: ChatRoom;
+	#workItemId: string;
+
+	constructor(room: ChatRoom, workItemId: string) {
+		super();
+		this.#room = room;
+		this.#workItemId = workItemId;
 	}
 
 	async onGadgetResponse(response: OsWorkspaceResponse): Promise<void> {
-		const target = await this.ctx.storage.get<OsWorkspaceResponseTargetState>("target");
-		if (!target) throw new Error("Cloudflare OS response target is not armed.");
-		const prefix = "app-harness:";
-		if (!response.idempotencyKey.startsWith(prefix)) throw new Error("Cloudflare OS response target source is invalid.");
-		const workItemId = response.idempotencyKey.slice(prefix.length);
-		if (!isUuid(workItemId) || workItemId !== target.workItemId) throw new Error("Cloudflare OS response target work item is invalid.");
-		await this.env.CHAT_ROOM.getByName(target.room).receiveOsWorkspaceResponse(workItemId, response);
+		const expectedKey = `app-harness:${this.#workItemId}`;
+		if (!response || response.idempotencyKey !== expectedKey) {
+			throw new Error("Cloudflare OS response target work item is invalid.");
+		}
+		await this.#room.receiveOsWorkspaceResponse(this.#workItemId, response);
 	}
 }
 
@@ -289,6 +285,16 @@ export class OsExecutionBridge extends WorkerEntrypoint<RuntimeEnv, OsExecutionB
 export class ChatRoom extends DurableObject<RuntimeEnv> {
 	constructor(ctx: DurableObjectState, env: RuntimeEnv) {
 		super(ctx, env);
+	}
+
+	[restore](params: unknown): RpcTarget {
+		if (!params || typeof params !== "object") throw new TypeError("Unknown App Harness restore target.");
+		const candidate = params as Partial<OsWorkspaceResponseRestoreParams>;
+		const workItemId = candidate.workItemId;
+		if (candidate.type !== "os-workspace-response" || typeof workItemId !== "string" || !isUuid(workItemId)) {
+			throw new TypeError("Unknown App Harness restore target.");
+		}
+		return new OsWorkspaceResponseCallback(this, workItemId);
 	}
 
 	async fetch(request: Request): Promise<Response> {
@@ -748,10 +754,13 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 			stackId: `stack-${workItem.id}`,
 			generation: 1,
 		};
-		// OS persists this callback for delivery retries, so use a named Durable
-		// Object stub: the smallest persistent RPC capability Cloudflare provides.
-		const responseTarget = this.env.OS_RESPONSE_TARGETS.getByName(workItem.id);
-		await responseTarget.arm({ room: "main", workItemId: workItem.id });
+		// Cloudflare OS stores this callback beyond the current RPC session. A
+		// ctx.restore() stub can be reconstructed by this room after either Worker
+		// restarts; ordinary RpcTarget and Durable Object stubs cannot.
+		const responseTarget = await this.ctx.restore({
+			type: "os-workspace-response",
+			workItemId: workItem.id,
+		} satisfies OsWorkspaceResponseRestoreParams);
 		const submission = createOsWorkspaceSubmission({
 			workItemId: workItem.id,
 			issue: workItem.githubIssue,

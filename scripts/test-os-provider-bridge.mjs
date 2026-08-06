@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import {
 	classifyOsRunnerResponse,
 	createOsNativeGitJob,
@@ -11,6 +12,16 @@ import {
 const workItemId = "11790e3b-58a1-4a8d-beb1-130bfe1bc099";
 const issue = { number: 42, url: "https://github.com/callil/autonomous-live-chat/issues/42" };
 const responseTarget = { capability: "test-only" };
+
+// OS stores the callback after the submission RPC returns. Guard the exact
+// runtime primitive: ordinary RpcTargets and Durable Object stubs are not
+// persistent across that boundary.
+const workerSource = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
+const workerConfig = await readFile(new URL("../wrangler.jsonc", import.meta.url), "utf8");
+assert.match(workerSource, /await this\.ctx\.restore\(/u);
+assert.match(workerSource, /\[restore\]\(params: unknown\)/u);
+assert.doesNotMatch(workerSource, /OS_RESPONSE_TARGETS/u);
+assert.match(workerConfig, /allow_irrevocable_stub_storage/u);
 
 // Every request reuses one repository workspace/chat. The durable work item is
 // both the message idempotency key and response-correlation key.
