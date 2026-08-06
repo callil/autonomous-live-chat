@@ -41,20 +41,26 @@ jobs:
           npm run cf-typegen
           npm run typecheck
 
-      # GitHub-hosted Ubuntu supplies Docker. Wrangler builds and pushes the
-      # image to Cloudflare's registry; no developer laptop participates.
-      - name: Build image and deploy runner to Cloudflare
-        run: npx wrangler deploy
-
       # Wrangler reads the value only from stdin. It is never written to the
       # repository, emitted into logs, or passed into the Sandbox container.
-      - name: Install runner bridge secret
+      # Do this before the image upload: each secret write creates a Worker
+      # version, and the final deploy must be the only version transition
+      # immediately before the live probe. That avoids interrupting a Sandbox
+      # Durable Object while the verification request is starting.
+      - name: Install runner bridge secrets before deployment
         shell: bash
         run: |
           test -n "$APP_HARNESS_RUNNER_SECRET"
           printf '%s' "$APP_HARNESS_RUNNER_SECRET" | npx wrangler secret put APP_HARNESS_RUNNER_SECRET --name app-harness-os-native-git
           test -n "$GIT_PROXY_ASSERTION_SECRET"
           printf '%s' "$GIT_PROXY_ASSERTION_SECRET" | npx wrangler secret put GIT_PROXY_ASSERTION_SECRET --name app-harness-os-native-git
+
+      # GitHub-hosted Ubuntu supplies Docker. Wrangler builds and pushes the
+      # image to Cloudflare's registry; no developer laptop participates.
+      # This is deliberately the final Worker version transition before the
+      # probe and native checkout verification.
+      - name: Build image and deploy runner to Cloudflare
+        run: npx wrangler deploy
 
       - name: Verify isolated Sandbox shell
         if: inputs.verify_sandbox
