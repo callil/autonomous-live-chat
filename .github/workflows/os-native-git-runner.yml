@@ -29,8 +29,7 @@ jobs:
       APP_HARNESS_GITHUB_APP_INSTALLATION_ID: ${{ secrets.APP_HARNESS_GITHUB_APP_INSTALLATION_ID }}
       APP_HARNESS_GITHUB_APP_PRIVATE_KEY: ${{ secrets.APP_HARNESS_GITHUB_APP_PRIVATE_KEY }}
       APP_HARNESS_OPENAI_API_KEY: ${{ secrets.APP_HARNESS_OPENAI_API_KEY }}
-      APP_HARNESS_SANDBOX_CLOUDFLARE_API_TOKEN: ${{ secrets.APP_HARNESS_SANDBOX_CLOUDFLARE_API_TOKEN }}
-      APP_HARNESS_SANDBOX_CLOUDFLARE_ACCOUNT_ID: ${{ secrets.APP_HARNESS_SANDBOX_CLOUDFLARE_ACCOUNT_ID }}
+      APP_HARNESS_SANDBOX_CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 
@@ -65,12 +64,8 @@ jobs:
           printf '%s' "$APP_HARNESS_GITHUB_APP_PRIVATE_KEY" | npx wrangler secret put GITHUB_APP_PRIVATE_KEY --name app-harness-os-native-git
           test -n "$APP_HARNESS_OPENAI_API_KEY"
           printf '%s' "$APP_HARNESS_OPENAI_API_KEY" | npx wrangler secret put OPENAI_API_KEY --name app-harness-os-native-git
-          if [ -n "$APP_HARNESS_SANDBOX_CLOUDFLARE_API_TOKEN" ]; then
-            printf '%s' "$APP_HARNESS_SANDBOX_CLOUDFLARE_API_TOKEN" | npx wrangler secret put SANDBOX_CLOUDFLARE_API_TOKEN --name app-harness-os-native-git
-          fi
-          if [ -n "$APP_HARNESS_SANDBOX_CLOUDFLARE_ACCOUNT_ID" ]; then
-            printf '%s' "$APP_HARNESS_SANDBOX_CLOUDFLARE_ACCOUNT_ID" | npx wrangler secret put SANDBOX_CLOUDFLARE_ACCOUNT_ID --name app-harness-os-native-git
-          fi
+          test -n "$APP_HARNESS_SANDBOX_CLOUDFLARE_API_TOKEN"
+          printf '%s' "$APP_HARNESS_SANDBOX_CLOUDFLARE_API_TOKEN" | npx wrangler secret put SANDBOX_CLOUDFLARE_API_TOKEN --name app-harness-os-native-git
 
       # GitHub-hosted Ubuntu supplies Docker. Wrangler builds and pushes the
       # image to Cloudflare's registry; no developer laptop participates.
