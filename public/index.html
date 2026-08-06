@@ -198,61 +198,78 @@
       .send:hover:not(:disabled) { background: #0f0f0e; }
       .send:disabled { background: #ecece9; color: #aaa; }
       .hint { width: min(100%, 760px); margin-top: 8px; color: var(--faint); font-size: 10px; }
-      .harness-launcher { width: 42px; height: 42px; bottom: 27px; right: 22px; border-radius: 50%; background: #262624; box-shadow: 0 0 0 1px rgba(0,0,0,.12), 0 4px 13px rgba(0,0,0,.18); transition-property: background-color, transform, box-shadow; transition-duration: 150ms; transition-timing-function: cubic-bezier(.23,1,.32,1); }
-      .harness-launcher svg { position: absolute; width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.65; stroke-linecap: round; stroke-linejoin: round; transition-property: opacity, transform, filter; transition-duration: 180ms; transition-timing-function: cubic-bezier(.2,0,0,1); }
+      /* The harness is an injected authoring layer, not host-app chrome. */
+      .harness-frame, .target-composer {
+        --harness-accent: #6155f5;
+        --harness-accent-strong: #5045e8;
+        --harness-accent-wash: #efedff;
+        --harness-ink: #26233a;
+        --harness-muted: #716d88;
+        --harness-line: rgba(78, 64, 184, .18);
+        font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      .harness-launcher { width: 48px; height: 48px; bottom: 24px; right: 20px; border: 1px solid rgba(69,57,178,.32); border-radius: 50%; background: linear-gradient(145deg, #7268ff 0%, #5146e7 100%); color: #fff; box-shadow: 0 0 0 4px rgba(97,85,245,.10), 0 12px 30px rgba(64,49,174,.26), 0 3px 8px rgba(21,18,56,.18); transition-property: background-color, transform, box-shadow; transition-duration: 150ms; transition-timing-function: cubic-bezier(.23,1,.32,1); }
+      .harness-launcher::before { content: ""; position: absolute; inset: 3px; border: 1px solid rgba(255,255,255,.26); border-radius: inherit; pointer-events: none; }
+      .harness-launcher svg { position: absolute; width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; transition-property: opacity, transform, filter; transition-duration: 180ms; transition-timing-function: cubic-bezier(.2,0,0,1); }
       .launcher-close-icon { opacity: 0; transform: scale(.25); filter: blur(4px); }
       .harness-launcher[aria-expanded="true"] .launcher-open-icon { opacity: 0; transform: scale(.25); filter: blur(4px); }
       .harness-launcher[aria-expanded="true"] .launcher-close-icon { opacity: 1; transform: scale(1); filter: blur(0); }
-      .launcher-badge { position: absolute; top: -4px; right: -4px; min-width: 16px; height: 16px; display: inline-flex; align-items: center; justify-content: center; padding: 0 4px; border: 2px solid #fff; border-radius: 999px; background: var(--attention); color: #fff; font: 700 8px/1 ui-monospace, SFMono-Regular, Menlo, monospace; font-variant-numeric: tabular-nums; }
+      .launcher-badge { position: absolute; top: -5px; right: -5px; min-width: 18px; height: 18px; display: inline-flex; align-items: center; justify-content: center; padding: 0 4px; border: 2px solid #fff; border-radius: 999px; background: #ff8d28; color: #fff; font: 700 8px/1 ui-monospace, SFMono-Regular, Menlo, monospace; font-variant-numeric: tabular-nums; box-shadow: 0 2px 7px rgba(121,64,13,.25); }
       .launcher-badge.needs_review, .launcher-badge.rejected { background: var(--danger); }
       .launcher-badge[hidden] { display: none; }
-      .harness-launcher:hover, .harness-launcher[aria-expanded="true"] { background: #141413; box-shadow: 0 0 0 1px rgba(0,0,0,.16), 0 6px 18px rgba(0,0,0,.20); }
+      .harness-launcher:hover, .harness-launcher[aria-expanded="true"] { background: linear-gradient(145deg, #7c72ff 0%, #4c41dc 100%); box-shadow: 0 0 0 5px rgba(97,85,245,.13), 0 14px 34px rgba(64,49,174,.30), 0 3px 8px rgba(21,18,56,.18); }
       .harness-launcher:active { scale: 1; transform: scale(.96); }
-      .authoring-popover { bottom: 27px; right: 22px; width: 304px; height: 42px; padding: 4px 89px 4px 5px; border: 0; border-radius: 22px; background: #1b1b1a; box-shadow: 0 0 0 1px rgba(0,0,0,.13), 0 4px 15px rgba(0,0,0,.19); transform-origin: calc(100% - 21px) 50%; animation: toolbar-expand .18s cubic-bezier(.23,1,.32,1); }
-      .authoring-heading { display: none; }
-      .authoring-tools { height: 34px; grid-template-columns: repeat(3, 1fr); gap: 2px; }
-      .harness-tool { height: 34px; padding: 0 7px; gap: 6px; border-radius: 17px; background: transparent; color: rgba(255,255,255,.72); font-size: 10px; transition-property: background-color, color, transform; transition-duration: 140ms; transition-timing-function: cubic-bezier(.23,1,.32,1); }
-      .harness-tool:hover { background: rgba(255,255,255,.10); color: #fff; }
-      .harness-tool[aria-pressed="true"] { background: rgba(255,255,255,.14); box-shadow: none; color: #fff; }
-      .harness-tool svg { width: 14px; height: 14px; }
-      .annotation-toggle { position: absolute; top: 4px; right: 48px; width: 36px; height: 34px; margin: 0; padding: 0; align-items: center; justify-content: center; color: rgba(255,255,255,.72); border: 0; border-radius: 17px; font-size: 0; transition-property: background-color, color, transform; transition-duration: 140ms; }
-      .annotation-toggle:hover { background: rgba(255,255,255,.10); color: #fff; }
-      .activity-count-badge { min-width: 18px; height: 18px; display: inline-flex; align-items: center; justify-content: center; padding: 0 5px; border-radius: 9px; background: rgba(255,255,255,.12); color: rgba(255,255,255,.86); font: 600 9px/1 ui-monospace, SFMono-Regular, Menlo, monospace; font-variant-numeric: tabular-nums; }
-      .authoring-notice { position: absolute; right: 0; bottom: 50px; width: 254px; margin: 0; padding: 8px 10px; border-radius: 9px; background: rgba(31,31,29,.96); color: white; box-shadow: 0 7px 24px rgba(0,0,0,.16); font-size: 10.5px; }
+      .authoring-popover { bottom: 20px; right: 16px; width: min(372px, calc(100vw - 24px)); height: 56px; padding: 6px 105px 6px 76px; border: 1px solid var(--harness-line); border-radius: 18px; background: rgba(252,251,255,.97); color: var(--harness-ink); box-shadow: 0 0 0 4px rgba(97,85,245,.07), 0 20px 48px rgba(37,29,92,.20), 0 4px 12px rgba(37,29,92,.12); backdrop-filter: blur(14px) saturate(1.1); transform-origin: calc(100% - 28px) 50%; animation: toolbar-expand .2s cubic-bezier(.23,1,.32,1); }
+      .authoring-popover::before { content: ""; position: absolute; inset: 3px; border: 1px solid rgba(255,255,255,.9); border-radius: 14px; pointer-events: none; }
+      .authoring-heading { position: absolute; left: 10px; top: 8px; width: 58px; height: 40px; display: flex; align-items: center; justify-content: center; padding: 0 9px 0 0; border-right: 1px solid var(--harness-line); color: var(--harness-accent-strong); font: 700 8.5px/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .09em; text-transform: uppercase; }
+      .authoring-heading span::before { content: "✦"; display: block; margin-bottom: 3px; font-size: 10px; text-align: center; }
+      .authoring-heading .harness-dismiss { display: none; }
+      .authoring-tools { position: relative; height: 44px; grid-template-columns: repeat(3, 1fr); gap: 3px; }
+      .harness-tool { height: 44px; padding: 0 7px; gap: 5px; border: 1px solid transparent; border-radius: 11px; background: transparent; color: #5d5872; font-size: 9.5px; font-weight: 610; transition-property: background-color, border-color, color, transform, box-shadow; transition-duration: 140ms; transition-timing-function: cubic-bezier(.23,1,.32,1); }
+      .harness-tool:hover { border-color: rgba(97,85,245,.14); background: var(--harness-accent-wash); color: var(--harness-accent-strong); }
+      .harness-tool[aria-pressed="true"] { border-color: rgba(97,85,245,.22); background: var(--harness-accent); box-shadow: 0 4px 11px rgba(75,62,207,.23); color: #fff; }
+      .harness-tool svg { width: 15px; height: 15px; stroke-width: 1.8; }
+      .annotation-toggle { position: absolute; top: 8px; right: 56px; width: 40px; height: 40px; margin: 0; padding: 0; align-items: center; justify-content: center; color: var(--harness-accent-strong); border: 1px solid rgba(97,85,245,.14); border-radius: 12px; background: var(--harness-accent-wash); font-size: 0; transition-property: background-color, border-color, color, transform; transition-duration: 140ms; }
+      .annotation-toggle:hover { border-color: rgba(97,85,245,.25); background: #e7e3ff; color: #4035d4; }
+      .activity-count-badge { min-width: 19px; height: 19px; display: inline-flex; align-items: center; justify-content: center; padding: 0 5px; border-radius: 7px; background: #fff; color: var(--harness-accent-strong); box-shadow: 0 1px 3px rgba(65,52,169,.14); font: 700 9px/1 ui-monospace, SFMono-Regular, Menlo, monospace; font-variant-numeric: tabular-nums; }
+      .authoring-notice { position: absolute; right: 0; bottom: 67px; width: 266px; margin: 0; padding: 9px 11px; border: 1px solid var(--harness-line); border-radius: 11px; background: rgba(252,251,255,.98); color: var(--harness-ink); box-shadow: 0 13px 34px rgba(37,29,92,.18); font-size: 10.5px; }
       .harness-dismiss { width: 28px; height: 28px; border-radius: 7px; font-size: 15px; transition-property: background-color, color, transform; transition-duration: 140ms; }
-      .annotation-panel { bottom: 80px; right: 22px; width: min(382px, calc(100vw - 24px)); max-height: min(590px, calc(100dvh - 120px)); padding: 11px; overflow: hidden; border: 0; border-radius: 14px; background: rgba(255,255,255,.99); box-shadow: 0 0 0 1px rgba(24,24,22,.10), 0 14px 42px rgba(24,24,22,.16), 0 2px 7px rgba(24,24,22,.07); transform-origin: calc(100% - 21px) calc(100% + 17px); animation: harness-pop .16s cubic-bezier(.23,1,.32,1); }
-      .annotation-panel-header { min-height: 29px; margin-bottom: 4px; font-size: 11.5px; }
-      .annotation-close, .annotation-remove { background: transparent; color: var(--muted); transition-property: background-color, color, transform; transition-duration: 140ms; }
-      .annotation-close:hover, .annotation-remove:hover { background: var(--hover); color: var(--ink); }
+      .annotation-panel { bottom: 84px; right: 20px; width: min(382px, calc(100vw - 24px)); max-height: min(590px, calc(100dvh - 120px)); padding: 13px; overflow: hidden; border: 1px solid var(--harness-line); border-radius: 16px; background: rgba(252,251,255,.985); color: var(--harness-ink); box-shadow: 0 0 0 4px rgba(97,85,245,.065), 0 22px 52px rgba(37,29,92,.20), 0 4px 12px rgba(37,29,92,.09); backdrop-filter: blur(16px) saturate(1.1); transform-origin: calc(100% - 24px) calc(100% + 20px); animation: harness-pop .18s cubic-bezier(.23,1,.32,1); }
+      .annotation-panel::before { content: "APP HARNESS"; display: inline-flex; align-items: center; min-height: 18px; margin: 0 0 8px; padding: 0 7px; border-radius: 6px; background: var(--harness-accent-wash); color: var(--harness-accent-strong); font: 700 8px/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .1em; }
+      .annotation-panel-header { min-height: 29px; margin-bottom: 4px; color: var(--harness-ink); font-size: 11.5px; }
+      .annotation-close, .annotation-remove { background: transparent; color: var(--harness-muted); transition-property: background-color, color, transform; transition-duration: 140ms; }
+      .annotation-close:hover, .annotation-remove:hover { background: var(--harness-accent-wash); color: var(--harness-accent-strong); }
       .annotation-list, .work-item-list { gap: 0; max-height: 205px; scrollbar-width: thin; }
-      .work-item { gap: 4px; padding: 10px 4px; border-color: var(--hairline); }
-      .work-item-summary { color: var(--ink); font-size: 11.5px; }
-      .work-item-phase { color: var(--attention); font: 600 9px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .025em; }
+      .work-item { gap: 4px; padding: 10px 4px; border-color: var(--harness-line); }
+      .work-item-summary { color: var(--harness-ink); font-size: 11.5px; }
+      .work-item-phase { color: #bd610c; font: 650 9px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .025em; }
       .work-item-phase.completed { color: var(--success); }
       .work-item-phase.needs_review, .work-item-phase.rejected { color: var(--danger); }
-      .work-item-note { color: var(--muted); font-size: 10.5px; }
+      .work-item-note { color: var(--harness-muted); font-size: 10.5px; }
       .work-item-links { gap: 10px; font-size: 10.5px; }
-      .work-item-links a { color: var(--ink); text-decoration-color: rgba(0,0,0,.25); }
-      .annotation-item { min-height: 34px; padding: 7px 4px; border-color: var(--hairline); color: var(--muted); font-size: 10.5px; }
-      .activity-divider { border-color: var(--hairline); }
-      .annotation-clear { min-height: 32px; margin-top: 8px; padding: 0 10px; border-radius: 8px; background: #262624; font-size: 10.5px; transition-property: background-color, transform; transition-duration: 140ms; }
-      .annotation-clear:hover { background: #111; }
-      .submission-toast { right: 22px; bottom: 80px; padding: 9px 11px; border-radius: 9px; background: rgba(31,31,29,.96); font-size: 10.5px; box-shadow: 0 7px 24px rgba(0,0,0,.16); }
-      .target-composer { bottom: 92px; width: min(460px, calc(100vw - 32px)); padding: 11px; border: 0; border-radius: 14px; background: rgba(255,255,255,.99); box-shadow: 0 0 0 1px rgba(24,24,22,.11), 0 14px 42px rgba(24,24,22,.16), 0 2px 7px rgba(24,24,22,.07); animation: none; }
-      .target-context { margin: 0 2px 8px; color: var(--muted); font-size: 10.5px; }
-      .target-composer .request-input { min-height: 84px; padding: 9px; border: 1px solid rgba(24,24,22,.14); border-radius: 9px; font-size: 12.5px; }
+      .work-item-links a { color: var(--harness-accent-strong); text-decoration-color: rgba(97,85,245,.28); }
+      .annotation-item { min-height: 34px; padding: 7px 4px; border-color: var(--harness-line); color: var(--harness-muted); font-size: 10.5px; }
+      .activity-divider { border-color: var(--harness-line); }
+      .annotation-clear { min-height: 32px; margin-top: 8px; padding: 0 10px; border: 1px solid rgba(97,85,245,.20); border-radius: 9px; background: var(--harness-accent-wash); color: var(--harness-accent-strong); font-size: 10.5px; font-weight: 620; transition-property: background-color, transform; transition-duration: 140ms; }
+      .annotation-clear:hover { background: #e6e2ff; }
+      .submission-toast { right: 20px; bottom: 84px; padding: 9px 11px; border: 1px solid var(--harness-line); border-radius: 11px; background: rgba(252,251,255,.98); color: var(--harness-ink); font-size: 10.5px; box-shadow: 0 13px 34px rgba(37,29,92,.18); }
+      .target-composer { bottom: 98px; width: min(460px, calc(100vw - 32px)); padding: 13px; border: 1px solid var(--harness-line); border-radius: 16px; background: rgba(252,251,255,.985); color: var(--harness-ink); box-shadow: 0 0 0 4px rgba(97,85,245,.065), 0 22px 52px rgba(37,29,92,.20), 0 4px 12px rgba(37,29,92,.09); backdrop-filter: blur(16px) saturate(1.1); animation: none; }
+      .target-composer::before { content: "APP HARNESS · TARGETED CHANGE"; display: inline-flex; min-height: 18px; align-items: center; margin: 0 0 9px; padding: 0 7px; border-radius: 6px; background: var(--harness-accent-wash); color: var(--harness-accent-strong); font: 700 8px/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .09em; }
+      .target-composer[data-kind="comment"]::before { content: "APP HARNESS · COMMENT"; }
+      .target-context { margin: 0 2px 8px; color: var(--harness-muted); font-size: 10.5px; }
+      .target-composer .request-input { min-height: 84px; padding: 9px; border: 1px solid var(--harness-line); border-radius: 10px; background: #fff; color: var(--harness-ink); font-size: 12.5px; box-shadow: inset 0 1px 2px rgba(37,29,92,.04); }
       .dialog-actions { margin-top: 8px; }
       .secondary, .primary { min-height: 32px; padding: 0 11px; border-radius: 8px; font-size: 10.5px; transition-property: background-color, transform; transition-duration: 140ms; }
-      .secondary { background: #efefec; }
-      .secondary:hover { background: #e6e6e1; }
-      .primary { background: #262624; }
-      .primary:hover { background: #111; }
+      .secondary { background: #f1effc; color: var(--harness-muted); }
+      .secondary:hover { background: #e8e5f8; color: var(--harness-ink); }
+      .primary { background: var(--harness-accent); box-shadow: 0 4px 11px rgba(75,62,207,.20); }
+      .primary:hover { background: var(--harness-accent-strong); }
       .request-error { margin: 7px 2px 0; min-height: 15px; color: var(--danger); font-size: 10.5px; }
-      .request-error.acknowledged { color: var(--muted); }
-      .target-hovered { outline: 1px solid color-mix(in srgb, var(--accent) 65%, #222); outline-offset: 3px; border-radius: 2px; }
-      .target-selected { outline: 2px solid var(--accent); outline-offset: 3px; }
-      .drawing-path { stroke: var(--accent); stroke-width: 2.25; }
-      .comment-pin { width: 20px; height: 20px; border-width: 2px; background: var(--accent); font-size: 9px; box-shadow: 0 0 0 1px rgba(0,0,0,.11), 0 2px 8px rgba(0,0,0,.20); }
+      .request-error.acknowledged { color: var(--harness-muted); }
+      .target-hovered { outline: 2px solid rgba(97,85,245,.72); outline-offset: 3px; border-radius: 3px; box-shadow: 0 0 0 5px rgba(97,85,245,.08); }
+      .target-selected { outline: 2px solid var(--harness-accent); outline-offset: 3px; box-shadow: 0 0 0 5px rgba(97,85,245,.10); }
+      .drawing-path { stroke: var(--harness-accent); stroke-width: 2.5; filter: drop-shadow(0 1px 2px rgba(68,53,190,.22)); }
+      .comment-pin { width: 22px; height: 22px; border-width: 2px; background: var(--harness-accent); font-size: 9px; box-shadow: 0 0 0 3px rgba(97,85,245,.13), 0 4px 11px rgba(56,43,160,.28); }
       @keyframes harness-pop { from { opacity: 0; transform: translateY(5px) scale(.97); } to { opacity: 1; transform: translateY(0) scale(1); } }
       @keyframes toolbar-expand { from { opacity: 0; transform: scaleX(.18); } to { opacity: 1; transform: scaleX(1); } }
       @media (prefers-reduced-motion: reduce) { .authoring-popover, .annotation-panel { animation: none; } * { scroll-behavior: auto !important; } }
@@ -275,11 +292,19 @@
         .room-meta { display: none; }
         .room-intro { grid-template-columns: 30px minmax(0, 1fr); gap: 10px; }
         .room-intro-mark { width: 30px; height: 30px; border-radius: 9px; }
-        .harness-launcher { right: 12px; bottom: 92px; }
-        .authoring-popover { right: 12px; bottom: 92px; width: min(304px, calc(100vw - 24px)); }
-        .annotation-panel { right: 12px; bottom: 142px; }
-        .submission-toast { right: 12px; bottom: 142px; }
-        .target-composer { bottom: 103px; }
+        .harness-launcher { right: 12px; bottom: 88px; }
+        .authoring-popover { right: 8px; bottom: 82px; width: min(372px, calc(100vw - 16px)); }
+        .annotation-panel { right: 12px; bottom: 148px; }
+        .submission-toast { right: 12px; bottom: 148px; }
+        .target-composer { bottom: 105px; }
+      }
+      @media (max-width: 390px) {
+        .authoring-popover { padding-left: 59px; padding-right: 101px; }
+        .authoring-heading { left: 8px; width: 44px; padding-right: 7px; }
+        .authoring-heading span { font-size: 0; }
+        .authoring-heading span::before { margin: 0; font-size: 15px; }
+        .harness-tool { padding-inline: 8px; }
+        .harness-tool span { display: none; }
       }
     </style>
   </head>
@@ -384,7 +409,7 @@
       function safeVisibleText(element) { return element.hasAttribute('data-target-text') ? element.textContent.trim().replace(/\s+/g, ' ').slice(0, 120) : undefined; }
       function envelopeFor(element) { const rect = element.getBoundingClientRect(); const targetId = element.dataset.targetId; const role = element.getAttribute('role') || (element.tagName === 'BUTTON' ? 'button' : element.tagName === 'TEXTAREA' ? 'textbox' : undefined); return { targetId, selector: `[data-target-id="${targetId}"]`, tag: element.tagName.toLowerCase(), role, label: element.dataset.targetLabel || element.getAttribute('aria-label') || undefined, text: safeVisibleText(element), page: location.pathname, room: 'main', rect: { x: Math.round(rect.x * 100) / 100, y: Math.round(rect.y * 100) / 100, width: Math.round(rect.width * 100) / 100, height: Math.round(rect.height * 100) / 100 } }; }
       function positionTargetComposer() { targetComposer.style.removeProperty('left'); targetComposer.style.removeProperty('top'); }
-      function selectTarget(element, kind) { hoveredTarget?.classList.remove('target-hovered'); selectedTarget?.classList.remove('target-selected'); selectedTarget = element; selectedEnvelope = envelopeFor(element); selectedTarget.classList.add('target-selected'); composerKind = kind; overlayOpen = false; document.body.classList.remove('authoring-open'); authoringPopover.hidden = true; annotationPanel.hidden = true; harnessLauncher.setAttribute('aria-expanded', 'false'); harnessLauncher.setAttribute('aria-label', 'Open App Harness annotation tools'); harnessLauncher.title = 'Annotate'; targetContext.textContent = `${kind === 'comment' ? 'Comment on' : 'Target'}: ${targetName(selectedEnvelope)}`; targetRequestInput.placeholder = kind === 'comment' ? 'Leave feedback for the agent' : 'Describe the change'; targetComposer.setAttribute('aria-label', kind === 'comment' ? 'Comment on selected element' : 'Targeted change request'); targetRequestError.textContent = ''; targetSubmit.hidden = false; targetSubmit.disabled = false; targetSubmit.textContent = kind === 'comment' ? 'Record' : 'Start'; targetDone.hidden = true; targetComposer.hidden = false; positionTargetComposer(); setTargetMode(false); setCommentMode(false); setTimeout(() => selectedTarget?.classList.remove('target-selected'), 180); targetRequestInput.focus(); }
+      function selectTarget(element, kind) { hoveredTarget?.classList.remove('target-hovered'); selectedTarget?.classList.remove('target-selected'); selectedTarget = element; selectedEnvelope = envelopeFor(element); selectedTarget.classList.add('target-selected'); composerKind = kind; targetComposer.dataset.kind = kind; overlayOpen = false; document.body.classList.remove('authoring-open'); authoringPopover.hidden = true; annotationPanel.hidden = true; harnessLauncher.setAttribute('aria-expanded', 'false'); harnessLauncher.setAttribute('aria-label', 'Open App Harness annotation tools'); harnessLauncher.title = 'Annotate'; targetContext.textContent = `${kind === 'comment' ? 'Comment on' : 'Target'}: ${targetName(selectedEnvelope)}`; targetRequestInput.placeholder = kind === 'comment' ? 'Leave feedback for the agent' : 'Describe the change'; targetComposer.setAttribute('aria-label', kind === 'comment' ? 'Comment on selected element' : 'Targeted change request'); targetRequestError.textContent = ''; targetSubmit.hidden = false; targetSubmit.disabled = false; targetSubmit.textContent = kind === 'comment' ? 'Record' : 'Start'; targetDone.hidden = true; targetComposer.hidden = false; positionTargetComposer(); setTargetMode(false); setCommentMode(false); setTimeout(() => selectedTarget?.classList.remove('target-selected'), 180); targetRequestInput.focus(); }
       function candidateFor(node) { return node instanceof Element ? node.closest('[data-target-id]') : null; }
       document.addEventListener('pointerover', event => { if (!targetMode && !commentMode) return; const candidate = candidateFor(event.target); if (candidate === hoveredTarget) return; hoveredTarget?.classList.remove('target-hovered'); hoveredTarget = candidate; hoveredTarget?.classList.add('target-hovered'); }, true);
       document.addEventListener('click', event => { if (!targetMode && !commentMode) return; const candidate = candidateFor(event.target); if (!candidate) return; event.preventDefault(); event.stopImmediatePropagation(); selectTarget(candidate, commentMode ? 'comment' : 'request'); }, true);
