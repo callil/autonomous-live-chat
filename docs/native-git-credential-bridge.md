@@ -18,12 +18,12 @@ Create a new GitHub App under **GitHub → Settings → Developer settings → G
 
 Disable webhooks. The app does not need an OAuth callback. Generate one private key and record the App ID and installation ID. Store only these GitHub repository secrets—never in source, Worker vars, or the Sandbox:
 
-- `GITHUB_APP_ID`
-- `GITHUB_APP_INSTALLATION_ID`
-- `GITHUB_APP_PRIVATE_KEY`
+- `APP_HARNESS_GITHUB_APP_ID`
+- `APP_HARNESS_GITHUB_APP_INSTALLATION_ID`
+- `APP_HARNESS_GITHUB_APP_PRIVATE_KEY`
 - `GIT_PROXY_ASSERTION_SECRET` (one high-entropy secret shared only by runner and proxy)
 
-The proxy deployment workflow installs all four as Worker secrets. The runner deployment workflow installs only `GIT_PROXY_ASSERTION_SECRET` in addition to its existing caller secret. After the proxy is deployed with those values, a reviewed configuration change may set `NATIVE_GIT_ENABLED` to `true`; until then no clone, branch, commit, push, PR, CI, or deploy action can run through this path.
+The proxy deployment workflow maps those repository-secret names to its internal Worker secrets `GITHUB_APP_ID`, `GITHUB_APP_INSTALLATION_ID`, and `GITHUB_APP_PRIVATE_KEY`; they never appear in source or the Sandbox. The runner deployment workflow installs only `GIT_PROXY_ASSERTION_SECRET` in addition to its existing caller secret. After the proxy is deployed with those values, a reviewed configuration change may set `NATIVE_GIT_ENABLED` to `true`; until then no clone, branch, commit, push, PR, CI, or deploy action can run through this path.
 
 ## Durable audit contract
 
