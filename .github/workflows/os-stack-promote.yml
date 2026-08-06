@@ -58,8 +58,8 @@ jobs:
             const alreadyMerged = expected && pr.state === "closed" && Boolean(pr.merged_at) && typeof pr.merge_commit_sha === "string";
             if (!(expected && (pr.state === "open" || alreadyMerged))) throw new Error("stale or invalid stack provenance");
             if (alreadyMerged) {
-              fs.appendFileSync(process.env.GITHUB_ENV, "ALREADY_MERGED=true\\n");
-              fs.appendFileSync(process.env.GITHUB_ENV, `MERGED_SHA=${pr.merge_commit_sha}\\n`);
+              fs.appendFileSync(process.env.GITHUB_ENV, "ALREADY_MERGED=true\n");
+              fs.appendFileSync(process.env.GITHUB_ENV, `MERGED_SHA=${pr.merge_commit_sha}\n`);
             }
           '
       - name: Require the supported effective CI profile
