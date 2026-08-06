@@ -87,6 +87,24 @@ function validatedPlan(value: unknown): { decision: "approved"; color: AccentCol
 	return null;
 }
 
+function responseText(value: unknown): string | null {
+	if (!value || typeof value !== "object") return null;
+	const response = value as Record<string, unknown>;
+	if (typeof response.output_text === "string") return response.output_text;
+	if (!Array.isArray(response.output)) return null;
+	for (const item of response.output) {
+		if (!item || typeof item !== "object") continue;
+		const content = (item as Record<string, unknown>).content;
+		if (!Array.isArray(content)) continue;
+		for (const part of content) {
+			if (!part || typeof part !== "object") continue;
+			const record = part as Record<string, unknown>;
+			if (record.type === "output_text" && typeof record.text === "string") return record.text;
+		}
+	}
+	return null;
+}
+
 async function askModel(manifest: SafeManifest, env: Env): Promise<Response> {
 	const instructions = [
 		"You are the App Harness Cloudflare OS planning agent.",
@@ -114,8 +132,12 @@ async function askModel(manifest: SafeManifest, env: Env): Promise<Response> {
 			}),
 		});
 		if (!response.ok) return Response.json({ state: "agent-unavailable", classification: "model-request-failed" }, { status: 502 });
-		const result = await response.json() as { id?: unknown; output_text?: unknown };
-		const plan = typeof result.output_text === "string" ? validatedPlan(JSON.parse(result.output_text)) : null;
+		const result = await response.json() as { id?: unknown; output_text?: unknown; output?: unknown };
+		let plan = null;
+		try {
+			const text = responseText(result);
+			plan = text ? validatedPlan(JSON.parse(text)) : null;
+		} catch { /* invalid structured content remains fail-closed */ }
 		if (typeof result.id !== "string" || !plan) return Response.json({ state: "agent-unavailable", classification: "model-plan-invalid" }, { status: 502 });
 		if (plan.decision === "needs_review") {
 			return Response.json({ state: "needs-review", model: { id: result.id, model: env.MODEL_ID }, rationale: plan.rationale });
