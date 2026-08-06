@@ -108,12 +108,26 @@ export default {
 			const sessionId = `candidate-${job.generation}`;
 			const session = await sandbox.createSession({ id: sessionId, cwd: "/workspace", commandTimeoutMs: 120_000 });
 			try {
-				await session.setEnvVars({ GIT_PROXY_ASSERTION: await signedProxyAssertion(job, env.GIT_PROXY_ASSERTION_SECRET) });
+				// Configure Git directly rather than interpolating a shell variable into
+				// the command. The short-lived assertion reaches only this session's
+				// environment, never a command string, stderr, audit event, or response.
+				await session.setEnvVars({
+					GIT_CONFIG_COUNT: "1",
+					GIT_CONFIG_KEY_0: "http.extraHeader",
+					GIT_CONFIG_VALUE_0: `Authorization: Bearer ${await signedProxyAssertion(job, env.GIT_PROXY_ASSERTION_SECRET)}`,
+				});
 				const clone = await session.exec(
-					'git -c http.extraHeader="Authorization: Bearer $GIT_PROXY_ASSERTION" clone --depth 1 https://app-harness-os-git-proxy.coda-a.workers.dev/callil/autonomous-live-chat.git /workspace/repository',
+					"git clone --depth 1 https://app-harness-os-git-proxy.coda-a.workers.dev/callil/autonomous-live-chat.git /workspace/repository",
 					{ timeout: 120_000 },
 				);
-				if (!clone.success) return Response.json({ jobId: job.jobId, state: "checkout-failed", exitCode: clone.exitCode });
+				if (!clone.success) {
+					return Response.json({
+						jobId: job.jobId,
+						state: "checkout-failed",
+						exitCode: clone.exitCode,
+						classification: "git-transport-failed",
+					});
+				}
 				const head = await session.exec("git -C /workspace/repository rev-parse HEAD", { timeout: 15_000 });
 				return Response.json({ jobId: job.jobId, state: "checked-out", head: head.stdout.trim().slice(0, 64) });
 			} finally {
