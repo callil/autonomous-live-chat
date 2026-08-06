@@ -73,9 +73,23 @@ jobs:
       - name: Verify repository-scoped native checkout
         if: inputs.verify_sandbox
         run: |
-          curl --fail --silent --show-error \
+          response="$(curl --fail --silent --show-error \
             --request POST \
             --header "Authorization: Bearer ${APP_HARNESS_RUNNER_SECRET}" \
             --header "Content-Type: application/json" \
             --data '{"jobId":"bridge-verification-g1","repository":"callil/autonomous-live-chat","generation":1}' \
-            https://app-harness-os-native-git.coda-a.workers.dev/v1/native-git/jobs
+            https://app-harness-os-native-git.coda-a.workers.dev/v1/native-git/jobs)"
+          node -e '
+            const value = JSON.parse(process.argv[1]);
+            const validHead = typeof value.head === "string" && /^[0-9a-f]{40}$/i.test(value.head);
+            if (value.state !== "checked-out" || !validHead) {
+              const safe = {
+                state: typeof value.state === "string" ? value.state : "invalid-response",
+                exitCode: Number.isInteger(value.exitCode) ? value.exitCode : null,
+                classification: "repository-checkout-not-verified",
+              };
+              console.error(JSON.stringify(safe));
+              process.exit(1);
+            }
+            console.log(JSON.stringify({ state: value.state, head: value.head, classification: "repository-checkout-verified" }));
+          ' "$response"
