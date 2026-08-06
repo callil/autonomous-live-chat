@@ -4,7 +4,8 @@
   "type": "module",
   "scripts": {
     "cf-typegen": "wrangler types",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:identity-bridge": "node scripts/test-github-app-identity-bridge.mjs"
   },
   "devDependencies": {
     "typescript": "^5.9.3",

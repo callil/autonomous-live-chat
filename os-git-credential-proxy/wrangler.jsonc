@@ -6,6 +6,7 @@
   "compatibility_flags": ["nodejs_compat"],
   "observability": { "enabled": true },
   "vars": {
-    "ALLOWED_REPOSITORY": "callil/autonomous-live-chat"
+    "ALLOWED_REPOSITORY": "callil/autonomous-live-chat",
+    "PRODUCTION_ORIGIN": "https://autonomous-live-chat.coda-a.workers.dev"
   }
 }
