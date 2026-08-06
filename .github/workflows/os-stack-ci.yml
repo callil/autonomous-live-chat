@@ -1,8 +1,8 @@
-name: Validate App Harness OS stack node
+name: Validate App Harness OS candidate
 
 on:
   pull_request:
-    types: [opened, reopened, synchronize, ready_for_review]
+    types: [opened, reopened, synchronize, ready_for_review, edited]
   workflow_dispatch:
     inputs:
       pull_request:
@@ -10,52 +10,79 @@ on:
         required: true
         type: string
 
-permissions:
-  contents: read
-  statuses: write
-  pull-requests: write
-  issues: write
+permissions: {}
 
 concurrency:
-  group: app-harness-stack-${{ github.event.pull_request.head.ref }}
+  group: app-harness-candidate-${{ inputs.pull_request || github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
-  validate-node:
+  provenance:
     if: github.event_name == 'workflow_dispatch' || startsWith(github.event.pull_request.head.ref || '', 'app-harness-os/')
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+      statuses: write
+    outputs:
+      pull_request: ${{ steps.candidate.outputs.pull_request }}
+      head_sha: ${{ steps.candidate.outputs.head_sha }}
+      candidate_base_sha: ${{ steps.candidate.outputs.candidate_base_sha }}
     env:
       GH_REPO: ${{ github.repository }}
       GH_TOKEN: ${{ github.token }}
       PR: ${{ inputs.pull_request || github.event.pull_request.number }}
     steps:
-      - name: Verify orchestrator-owned stack relationship
-        run: |
-          # shellcheck disable=SC2016
-          node -e '
-            const fs = require("node:fs");
-            const { execFileSync } = require("node:child_process");
-            const pr = JSON.parse(execFileSync("gh", ["api", `repos/${process.env.GH_REPO}/pulls/${process.env.PR}`], { encoding: "utf8" }));
-            const headRefName = pr.head.ref;
-            const baseRefName = pr.base.ref;
-            const baseSha = pr.base.sha;
-            if (!/^app-harness-os\/\d+\/g\d+$/.test(headRefName)) throw new Error("PR head is outside the OS stack namespace");
-            if (!(baseRefName === "main" || /^app-harness-os\/\d+\/g\d+$/.test(baseRefName))) throw new Error("PR base is not main or an immediate OS stack parent");
-            fs.appendFileSync(process.env.GITHUB_ENV, `APP_HARNESS_EXPECTED_BASE=${baseSha}\n`);
-            fs.appendFileSync(process.env.GITHUB_ENV, `APP_HARNESS_EXPECTED_HEAD=${pr.head.sha}\n`);
-          '
-      - uses: actions/checkout@v4
+      - name: Check out trusted verifier from main
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          # Node validation is against the candidate itself. Promotion later
-          # validates the synthetic merge ref as the current stack tip.
-          ref: refs/pull/${{ inputs.pull_request || github.event.pull_request.number }}/head
+          ref: main
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Verify trusted one-node candidate provenance and scope
+        id: candidate
+        env:
+          EXPECTED_PARENT: main
+        run: node scripts/os-stack-gate.mjs verify-pr
+      - name: Publish signed pending status before candidate execution
+        env:
+          ATTESTATION_SECRET: ${{ secrets.AUTONOMY_CALLBACK_SECRET }}
+          EXPECTED_BASE: ${{ steps.candidate.outputs.candidate_base_sha }}
+          EXPECTED_HEAD: ${{ steps.candidate.outputs.head_sha }}
+          PR: ${{ steps.candidate.outputs.pull_request }}
+          VALIDATION_STATE: pending
+        run: node scripts/os-stack-gate.mjs publish-status
+
+  validate_candidate:
+    name: validate-candidate
+    needs: provenance
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      APP_HARNESS_EXPECTED_BASE: ${{ needs.provenance.outputs.candidate_base_sha }}
+      APP_HARNESS_EXPECTED_HEAD: ${{ needs.provenance.outputs.head_sha }}
+    steps:
+      - name: Check out the exact candidate without persisted credentials
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.provenance.outputs.head_sha }}
           fetch-depth: 0
-      - uses: actions/setup-node@v4
+          persist-credentials: false
+      - name: Confirm immutable checkout and credential isolation
+        run: |
+          test "$(git rev-parse HEAD)" = "$APP_HARNESS_EXPECTED_HEAD"
+          if git config --local --get-regexp '^http\..*\.extraheader$'; then
+            echo 'Checkout credentials remained available to candidate code.'
+            exit 1
+          fi
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           cache: npm
-      - run: npm ci
-      - name: Mandatory baseline
+      - name: Install candidate dependencies without privileged secrets
+        run: npm ci
+      - name: Run mandatory candidate baseline
         run: |
           npm run cf-typegen
           npx tsc --noEmit
@@ -63,40 +90,43 @@ jobs:
           npm run test:native-git-preflight
           npm run test:os-provider-bridge
           git diff --check
-      - name: Visual CI profile (scoped static safeguard)
-        run: |
-          test "$(git rev-parse HEAD)" = "$APP_HARNESS_EXPECTED_HEAD"
-          node scripts/check-visual-candidate.mjs
-      - name: Publish validation evidence
+      - name: Recheck the scoped visual contract
+        run: node scripts/check-visual-candidate.mjs
+
+  publish_validation:
+    name: publish-validation
+    needs: [provenance, validate_candidate]
+    if: always() && needs.provenance.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      statuses: write
+    env:
+      GH_REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ github.token }}
+      PR: ${{ needs.provenance.outputs.pull_request }}
+      EXPECTED_BASE: ${{ needs.provenance.outputs.candidate_base_sha }}
+      EXPECTED_HEAD: ${{ needs.provenance.outputs.head_sha }}
+      ATTESTATION_SECRET: ${{ secrets.AUTONOMY_CALLBACK_SECRET }}
+    steps:
+      - name: Check out trusted publisher from main
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: main
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Publish signed immutable validation result
+        env:
+          VALIDATION_STATE: ${{ needs.validate_candidate.result == 'success' && 'success' || 'failure' }}
+        run: node scripts/os-stack-gate.mjs publish-status
+      - name: Comment with successful validation evidence
+        if: needs.validate_candidate.result == 'success'
+        continue-on-error: true
         run: |
           printf '%s\n' \
             '<!-- app-harness-os-ci:${{ github.run_id }} -->' \
-            'App Harness OS stack-node validation passed: the repository baseline gates plus the scoped visual-token/reduced-motion static check.' \
+            "App Harness OS one-node candidate validation passed for ${{ needs.provenance.outputs.head_sha }}." \
             'Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}' \
             > /tmp/app-harness-os-ci.md
           gh pr comment "$PR" --body-file /tmp/app-harness-os-ci.md
-      - name: Publish immutable candidate validation status
-        run: |
-          node - <<'NODE'
-          const fs = require("node:fs");
-          fs.writeFileSync("/tmp/app-harness-os-status.json", JSON.stringify({
-            state: "success",
-            context: "app-harness-os/validate-node",
-            description: "Baseline and scoped visual safeguards passed.",
-            target_url: `${process.env.GITHUB_SERVER_URL}/${process.env.GH_REPO}/actions/runs/${process.env.GITHUB_RUN_ID}`,
-          }));
-          NODE
-          gh api --method POST "repos/${GH_REPO}/statuses/${APP_HARNESS_EXPECTED_HEAD}" --input /tmp/app-harness-os-status.json > /tmp/app-harness-os-status-response.json
-      - name: Publish failed immutable candidate validation status
-        if: failure() && env.APP_HARNESS_EXPECTED_HEAD != ''
-        run: |
-          node - <<'NODE'
-          const fs = require("node:fs");
-          fs.writeFileSync("/tmp/app-harness-os-status.json", JSON.stringify({
-            state: "failure",
-            context: "app-harness-os/validate-node",
-            description: "Validation failed; promotion remains blocked.",
-            target_url: `${process.env.GITHUB_SERVER_URL}/${process.env.GH_REPO}/actions/runs/${process.env.GITHUB_RUN_ID}`,
-          }));
-          NODE
-          gh api --method POST "repos/${GH_REPO}/statuses/${APP_HARNESS_EXPECTED_HEAD}" --input /tmp/app-harness-os-status.json > /tmp/app-harness-os-status-response.json

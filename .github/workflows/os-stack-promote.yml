@@ -1,4 +1,4 @@
-name: Promote App Harness OS stack node
+name: Promote App Harness OS candidate
 
 on:
   workflow_dispatch:
@@ -13,128 +13,273 @@ on:
       workflow_id: { required: true, type: string }
       ci_profile: { required: true, type: string }
 
-permissions:
-  contents: write
-  pull-requests: write
-  issues: write
+permissions: {}
 
+# Every main mutation and production deployment shares one lock. Input values
+# cannot create parallel promotion lanes or permit an older deployment to win.
 concurrency:
-  group: app-harness-stack-${{ inputs.stack_id }}-generation-${{ inputs.generation }}
+  group: app-harness-main-promotion-and-deploy
   cancel-in-progress: false
 
 jobs:
-  promote-root:
+  prepare:
     runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+      statuses: read
+    outputs:
+      pull_request: ${{ steps.candidate.outputs.pull_request }}
+      head_sha: ${{ steps.candidate.outputs.head_sha }}
+      candidate_base_sha: ${{ steps.candidate.outputs.candidate_base_sha }}
+      already_merged: ${{ steps.candidate.outputs.already_merged }}
+      merge_sha: ${{ steps.candidate.outputs.merge_sha }}
+      current_main_sha: ${{ steps.main.outputs.sha }}
+      validation_run_id: ${{ steps.validation.outputs.validation_run_id }}
     env:
       GH_REPO: ${{ github.repository }}
-      GH_TOKEN: ${{ secrets.AUTONOMY_GITHUB_TOKEN }}
+      GH_TOKEN: ${{ github.token }}
       PR: ${{ inputs.pull_request }}
-      STACK_ID: ${{ inputs.stack_id }}
-      GENERATION: ${{ inputs.generation }}
-      ISSUE: ${{ inputs.issue_number }}
       EXPECTED_PARENT: ${{ inputs.parent_branch }}
       EXPECTED_HEAD: ${{ inputs.head_sha }}
-      AUTONOMY_REQUEST_ID: ${{ inputs.workflow_id }}
-      AUTONOMY_ROOM: ${{ inputs.room }}
-      AUTONOMY_CALLBACK_URL: ${{ secrets.AUTONOMY_CALLBACK_URL }}
-      AUTONOMY_GITHUB_TOKEN: ${{ secrets.AUTONOMY_GITHUB_TOKEN }}
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-      CI_PROFILE: ${{ inputs.ci_profile }}
+      EXPECTED_ISSUE: ${{ inputs.issue_number }}
+      EXPECTED_GENERATION: ${{ inputs.generation }}
+      EXPECTED_STACK: ${{ inputs.stack_id }}
     steps:
-      # This must precede provenance and the failure callback: both use
-      # repository files, and provenance must be independent of a runner's
-      # implicit checkout state.
-      - uses: actions/checkout@v4
+      - name: Require the supported one-node policy
+        env:
+          CI_PROFILE: ${{ inputs.ci_profile }}
+        run: |
+          test "$EXPECTED_PARENT" = main
+          test "$EXPECTED_GENERATION" = 1
+          test "$CI_PROFILE" = visual
+      - name: Check out trusted promotion verifier from main
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: main
           fetch-depth: 0
-      - name: Verify immutable root stack provenance
+          persist-credentials: false
+      - name: Capture fresh current main
+        id: main
         run: |
-          # shellcheck disable=SC2016
-          node -e '
-            const fs = require("node:fs");
-            const { execFileSync } = require("node:child_process");
-            const pr = JSON.parse(execFileSync("gh", ["api", `repos/${process.env.GH_REPO}/pulls/${process.env.PR}`], { encoding: "utf8" }));
-            const expected = pr.base.ref === process.env.EXPECTED_PARENT && pr.head.sha === process.env.EXPECTED_HEAD && /^app-harness-os\/\d+\/g\d+$/.test(pr.head.ref);
-            const alreadyMerged = expected && pr.state === "closed" && Boolean(pr.merged_at) && typeof pr.merge_commit_sha === "string";
-            if (!(expected && (pr.state === "open" || alreadyMerged))) throw new Error("stale or invalid stack provenance");
-            if (alreadyMerged) {
-              fs.appendFileSync(process.env.GITHUB_ENV, "ALREADY_MERGED=true\n");
-              fs.appendFileSync(process.env.GITHUB_ENV, `MERGED_SHA=${pr.merge_commit_sha}\n`);
-            }
-          '
-      - name: Require the supported effective CI profile
-        run: test "$CI_PROFILE" = visual
-      - name: Wait for the immutable stack-node validation status
+          local_sha="$(git rev-parse HEAD)"
+          remote_sha="$(gh api "repos/${GH_REPO}/git/ref/heads/main" --jq '.object.sha')"
+          test "$local_sha" = "$remote_sha"
+          printf 'sha=%s\n' "$local_sha" >> "$GITHUB_OUTPUT"
+      - name: Verify immutable one-node provenance and scope from trusted main
+        id: candidate
+        env:
+          ALLOW_MERGED: true
+        run: node scripts/os-stack-gate.mjs verify-pr
+      - name: Wait for newest signed validation bound to this PR, head, and base
+        id: validation
+        env:
+          ATTESTATION_SECRET: ${{ secrets.AUTONOMY_CALLBACK_SECRET }}
+          EXPECTED_BASE: ${{ steps.candidate.outputs.candidate_base_sha }}
+          EXPECTED_HEAD: ${{ steps.candidate.outputs.head_sha }}
+          PR: ${{ steps.candidate.outputs.pull_request }}
+        run: node scripts/os-stack-gate.mjs wait-status
+
+  integrate:
+    needs: prepare
+    if: needs.prepare.outputs.already_merged != 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      integration_tree: ${{ steps.merge.outputs.tree }}
+    env:
+      CURRENT_MAIN: ${{ needs.prepare.outputs.current_main_sha }}
+      EXPECTED_HEAD: ${{ needs.prepare.outputs.head_sha }}
+      PR: ${{ needs.prepare.outputs.pull_request }}
+    steps:
+      - name: Check out captured current main
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.prepare.outputs.current_main_sha }}
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Fetch immutable candidate, remove credentials, and synthesize integration
+        id: merge
         run: |
-          attempt=1
-          while [ "$attempt" -le 36 ]; do
-            # GitHub returns status history newest-first. Use the newest
-            # matching immutable validation result, never a stale earlier run.
-            result="$(gh api "repos/${GH_REPO}/commits/${EXPECTED_HEAD}/status" --jq '.statuses[] | select(.context == "app-harness-os/validate-node") | .state' | head -n 1)"
-            if [ "$result" = success ]; then exit 0; fi
-            if [ -n "$result" ] && [ "$result" != null ]; then echo "validate-node concluded: $result"; exit 1; fi
-            sleep 5
-            attempt=$((attempt + 1))
-          done
-          echo "validate-node did not register for the immutable candidate head"; exit 1
-      - name: Check out the immutable stack tip
-        run: |
-          if [ "$ALREADY_MERGED" = true ]; then
-            git fetch origin main
-            git checkout --detach "$MERGED_SHA"
-          else
-            git fetch origin "pull/${PR}/merge:refs/remotes/origin/app-harness-os-merge-${PR}"
-            git checkout --detach "origin/app-harness-os-merge-${PR}"
+          git fetch --no-tags origin "refs/pull/${PR}/head"
+          test "$(git rev-parse FETCH_HEAD)" = "$EXPECTED_HEAD"
+          git config --local --unset-all http.https://github.com/.extraheader || true
+          if git config --local --get-regexp '^http\..*\.extraheader$'; then
+            echo 'Checkout credentials remained available to candidate code.'
+            exit 1
           fi
-      - uses: actions/setup-node@v4
+          test "$(git rev-parse HEAD)" = "$CURRENT_MAIN"
+          git config user.name 'App Harness OS integration gate'
+          git config user.email 'app-harness-os@users.noreply.github.com'
+          git merge --no-commit --no-ff "$EXPECTED_HEAD"
+          if git diff --cached --quiet; then
+            echo 'Candidate is empty against current main.'
+            exit 1
+          fi
+          git diff --cached --check
+          printf 'tree=%s\n' "$(git write-tree)" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           cache: npm
-      - run: npm ci
-      - name: Current stack-tip integration gate
+      - name: Install exact integration dependencies without privileged secrets
+        run: npm ci
+      - name: Test exact current-main integration without privileged secrets
         run: |
-          test "$(git rev-parse HEAD)" != ""
           npm run cf-typegen
           npx tsc --noEmit
           npm run test:stack
           npm run test:native-git-preflight
           npm run test:os-provider-bridge
+          node scripts/test-os-stack-gate.mjs
           git diff --check
-          node scripts/check-visual-candidate.mjs
-      - name: Merge the validated current generation
+
+  promote:
+    needs: [prepare, integrate]
+    if: always() && needs.prepare.result == 'success' && (needs.prepare.outputs.already_merged == 'true' || needs.integrate.result == 'success')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      deployment_sha: ${{ steps.verify_merge.outputs.deployment_sha }}
+    env:
+      GH_REPO: ${{ github.repository }}
+      PR: ${{ needs.prepare.outputs.pull_request }}
+      EXPECTED_PARENT: ${{ inputs.parent_branch }}
+      EXPECTED_HEAD: ${{ needs.prepare.outputs.head_sha }}
+      EXPECTED_ISSUE: ${{ inputs.issue_number }}
+      EXPECTED_GENERATION: ${{ inputs.generation }}
+      EXPECTED_STACK: ${{ inputs.stack_id }}
+      CURRENT_MAIN: ${{ needs.prepare.outputs.current_main_sha }}
+      ALREADY_MERGED: ${{ needs.prepare.outputs.already_merged }}
+      RECORDED_MERGE_SHA: ${{ needs.prepare.outputs.merge_sha }}
+      EXPECTED_TREE: ${{ needs.integrate.outputs.integration_tree }}
+    steps:
+      - name: Check out trusted captured main
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.prepare.outputs.current_main_sha }}
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Reverify immutable provenance immediately before mutation
+        env:
+          ALLOW_MERGED: true
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/os-stack-gate.mjs verify-pr
+      - name: Merge only the tested immutable head
         if: env.ALREADY_MERGED != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          cat > /tmp/app-harness-promoting.md <<'EOF'
-          Stack promotion started after the current node and stack-tip gates passed.
-          EOF
-          gh issue comment "$ISSUE" --body-file /tmp/app-harness-promoting.md
-          gh pr merge "$PR" --squash --delete-branch
-      - name: Fetch and verify merged main before deployment
+          remote_main="$(gh api "repos/${GH_REPO}/git/ref/heads/main" --jq '.object.sha')"
+          test "$remote_main" = "$CURRENT_MAIN"
+          gh pr merge "$PR" --repo "$GH_REPO" --squash --delete-branch --match-head-commit "$EXPECTED_HEAD"
+      - name: Verify exact merged tree and select deployment SHA
+        id: verify_merge
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           git fetch origin main
-          git checkout --detach origin/main
-          merge_sha="${MERGED_SHA:-$(gh pr view "$PR" --json mergeCommit --jq '.mergeCommit.oid')}"
-          test -n "$merge_sha"
+          remote_main="$(git rev-parse origin/main)"
           if [ "$ALREADY_MERGED" = true ]; then
-            git merge-base --is-ancestor "$merge_sha" HEAD
+            test -n "$RECORDED_MERGE_SHA"
+            git merge-base --is-ancestor "$RECORDED_MERGE_SHA" "$remote_main"
+            deployment_sha="$remote_main"
           else
-            test "$(git rev-parse HEAD)" = "$merge_sha"
+            merge_sha="$(gh api "repos/${GH_REPO}/pulls/${PR}" --jq '.merge_commit_sha')"
+            test -n "$merge_sha"
+            test "$remote_main" = "$merge_sha"
+            test "$(git rev-list --parents -n 1 "$merge_sha" | wc -w | tr -d ' ')" = 2
+            test "$(git rev-parse "${merge_sha}^")" = "$CURRENT_MAIN"
+            test "$(git rev-parse "${merge_sha}^{tree}")" = "$EXPECTED_TREE"
+            deployment_sha="$merge_sha"
           fi
-      - name: Deploy verified merged main
-        if: env.ALREADY_MERGED != 'true'
-        run: npx wrangler deploy
-      - name: Mark the public issue completed
-        run: |
-          gh label create 'status:completed' --color 1f883d --description 'App Harness completed' --force
-          gh issue edit "$ISSUE" --add-label 'status:completed'
-      - name: Publish durable completion callback
-        run: |
-          if [ "$ALREADY_MERGED" = true ]; then
-            node scripts/autonomy-callback.mjs completed "Cloudflare OS stack ${STACK_ID} generation ${GENERATION} reconciled a previously verified merge and deployment." "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          else
-            node scripts/autonomy-callback.mjs completed "Cloudflare OS stack ${STACK_ID} generation ${GENERATION} validated, merged, and deployed." "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          git checkout --detach "$deployment_sha"
+          git config --local --unset-all http.https://github.com/.extraheader || true
+          if git config --local --get-regexp '^http\..*\.extraheader$'; then
+            echo 'Checkout credentials remained available before repository scripts.'
+            exit 1
           fi
-      - name: Publish safe failure callback
-        if: failure()
-        run: node scripts/autonomy-callback.mjs requires_review "Cloudflare OS stack promotion did not pass immutable provenance, CI, merge, or deployment gates. Review the linked GitHub Actions run; no success is claimed." "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          printf 'deployment_sha=%s\n' "$deployment_sha" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install verified merged-main dependencies without deployment credentials
+        run: npm ci
+      - name: Revalidate current main during already-merged recovery
+        if: env.ALREADY_MERGED == 'true'
+        run: |
+          npm run cf-typegen
+          npx tsc --noEmit
+          npm run test:stack
+          npm run test:native-git-preflight
+          npm run test:os-provider-bridge
+          node scripts/test-os-stack-gate.mjs
+          git diff --check
+      - name: Deploy verified current main
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          remote_main="$(gh api "repos/${GH_REPO}/git/ref/heads/main" --jq '.object.sha')"
+          test "$remote_main" = "${{ steps.verify_merge.outputs.deployment_sha }}"
+          npx wrangler deploy
+  callback:
+    needs: [prepare, integrate, promote]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions: {}
+    env:
+      AUTONOMY_CALLBACK_URL: ${{ secrets.AUTONOMY_CALLBACK_URL }}
+      AUTONOMY_CALLBACK_TOKEN: ${{ secrets.AUTONOMY_CALLBACK_SECRET }}
+      AUTONOMY_REQUEST_ID: ${{ inputs.workflow_id }}
+      AUTONOMY_ROOM: ${{ inputs.room }}
+      PROMOTION_RESULT: ${{ needs.promote.result }}
+      ALREADY_MERGED: ${{ needs.prepare.outputs.already_merged }}
+      STACK_ID: ${{ inputs.stack_id }}
+      GENERATION: ${{ inputs.generation }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: Publish retried completion or review callback
+        run: |
+          node - <<'NODE'
+          const url = process.env.AUTONOMY_CALLBACK_URL;
+          const token = process.env.AUTONOMY_CALLBACK_TOKEN;
+          if (!url || !token) throw new Error("Autonomy callback configuration is missing.");
+          const completed = process.env.PROMOTION_RESULT === "success";
+          const reconciled = process.env.ALREADY_MERGED === "true";
+          const phase = completed ? "completed" : "requires_review";
+          const message = completed
+            ? `Cloudflare OS candidate ${process.env.STACK_ID} generation ${process.env.GENERATION} ${reconciled ? "reconciled its merge and redeployed verified current main" : "validated, merged at its exact tested tree, and deployed"}.`
+            : "Cloudflare OS candidate promotion requires review. Merge or deployment may be partial; inspect the linked Actions run and no deployment success is claimed.";
+          const body = JSON.stringify({
+            room: process.env.AUTONOMY_ROOM,
+            requestId: process.env.AUTONOMY_REQUEST_ID,
+            phase,
+            message,
+            result: process.env.RUN_URL,
+            deploymentUrl: completed ? "https://autonomous-live-chat.coda-a.workers.dev/" : undefined,
+          });
+          let lastError;
+          for (let attempt = 1; attempt <= 5; attempt += 1) {
+            try {
+              const response = await fetch(url, {
+                method: "POST",
+                headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+                body,
+                signal: AbortSignal.timeout(10_000),
+              });
+              if (response.ok) process.exit(0);
+              lastError = new Error(`Callback failed (${response.status}).`);
+            } catch (error) {
+              lastError = error;
+            }
+            if (attempt < 5) await new Promise((resolve) => setTimeout(resolve, attempt * 2_000));
+          }
+          throw lastError ?? new Error("Callback failed.");
+          NODE
