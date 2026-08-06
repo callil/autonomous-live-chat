@@ -130,7 +130,10 @@ export default {
 			}
 
 			const sandbox = getSandbox(env.Sandbox, `app-harness-${job.jobId}-g${job.generation}`, { enableDefaultSession: false });
-			const sessionId = `candidate-${job.generation}`;
+			// A retried HTTP request must not collide with an interrupted prior
+			// attempt. The session ID is opaque and short lived; the durable job ID
+			// remains the audit identity.
+			const sessionId = `candidate-${job.generation}-${crypto.randomUUID().replaceAll("-", "").slice(0, 16)}`;
 			let session;
 			try {
 				session = await createSessionAfterRuntimeUpdate(sandbox, { id: sessionId, cwd: "/workspace", commandTimeoutMs: 120_000 });
