@@ -129,7 +129,7 @@ export function classifyOsRunnerResponse(value) {
 	}
 	if (state === "checked-out") return { phase: "building", detail: "Cloudflare OS isolated workspace checked out the allowed repository.", terminal: false, retryable: false };
 	if (state === "pull-request-opened") return { phase: "building", detail: "Cloudflare OS native Git candidate branch was pushed and its pull request was opened.", terminal: false, retryable: false };
-	if (state === "needs-restack") return { phase: "needs_review", detail: "Cloudflare OS detected a changed parent base and marked the stack for a single root-led restack.", terminal: true, retryable: false };
+	if (state === "needs-restack") return { phase: "building", detail: "Cloudflare OS detected a changed parent base; the coordinator must advance the root stack generation.", terminal: false, retryable: false };
 	if (state === "credential-bridge-required") return { phase: "needs_review", detail: "Cloudflare OS runner is reachable, but native Git is blocked until the repository credential bridge is enabled.", terminal: true, retryable: false };
 	if (state === "checkout-failed" || state === "candidate-failed") return { phase: "needs_review", detail: `Cloudflare OS native candidate execution failed${classification ? ` (${classification})` : ""}. No deployment was created.`, terminal: true, retryable: false };
 	return { phase: "needs_review", detail: "Cloudflare OS runner returned an unrecognized status. No native Git action is claimed.", terminal: true, retryable: false };

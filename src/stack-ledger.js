@@ -293,7 +293,11 @@ export function applyStackEvent(ledger, event) {
 		case "main-observed": {
 			const observed = sha(event.mainSha, "Observed main");
 			if (observed === ledger.currentBaseSha) return result(ledger, "stale", "main-unchanged");
-			if (ledger.mode === "single-fast") {
+			// A completed single-node candidate is immutable. A main advance only
+			// invalidates its integration proof; CI will validate the same head
+			// against the new main. Before a candidate exists, however, the root
+			// must advance once just like the root of a larger stack.
+			if (ledger.mode === "single-fast" && ledger.nodes[0].headSha) {
 				return apply(ledger, event, (current) => ({
 					...current,
 					currentBaseSha: observed,
@@ -315,7 +319,7 @@ export function applyStackEvent(ledger, event) {
 		}
 
 		case "restack-started": {
-			if (ledger.mode !== "multi-restack" || ledger.status !== "needs-restack") throw new Error("Only a multi-node stack needing restack can begin a new generation.");
+			if (ledger.status !== "needs-restack") throw new Error("Only a stack needing restack can begin a new generation.");
 			const generation = ledger.generation + 1;
 			const firstActiveIndex = ledger.nodes.findIndex((node) => node.state !== "merged");
 			if (firstActiveIndex < 0) throw new Error("A fully merged stack cannot restack.");
@@ -340,7 +344,9 @@ export function applyStackEvent(ledger, event) {
 					generation,
 					generationBaseSha: current.currentBaseSha,
 					status: "restacking",
-					nativeStack: { ...current.nativeStack, generation, order: nodes.filter((node) => node.state !== "merged").map((node) => node.id), stage: "pending", attempt: 0, attemptToken: null },
+					nativeStack: current.mode === "multi-restack"
+						? { ...current.nativeStack, generation, order: nodes.filter((node) => node.state !== "merged").map((node) => node.id), stage: "pending", attempt: 0, attemptToken: null }
+						: null,
 					nodes,
 					runner: { stage: "pending", attempt: 0, nodeId: nodes[firstActiveIndex].id, attemptToken: null },
 					promotion: { stage: "idle", nodeId: null, dispatchKey: null, runId: null, headSha: null, mergeSha: null },
