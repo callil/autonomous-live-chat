@@ -25,9 +25,10 @@ jobs:
         run: |
           node -e '
             const { execFileSync } = require("node:child_process");
-            const pr = JSON.parse(execFileSync("gh", ["pr", "view", process.env.PR, "--json", "headRefName,baseRefName"], { encoding: "utf8" }));
+            const pr = JSON.parse(execFileSync("gh", ["pr", "view", process.env.PR, "--json", "headRefName,baseRefName,baseRefOid"], { encoding: "utf8" }));
             if (!/^app-harness-os\/\d+\/g\d+$/.test(pr.headRefName)) throw new Error("PR head is outside the OS stack namespace");
             if (!(pr.baseRefName === "main" || /^app-harness-os\/\d+\/g\d+$/.test(pr.baseRefName))) throw new Error("PR base is not main or an immediate OS stack parent");
+            require("node:fs").appendFileSync(process.env.GITHUB_ENV, `APP_HARNESS_EXPECTED_BASE=${pr.baseRefOid}\n`);
           '
       - uses: actions/checkout@v4
         with:
@@ -38,12 +39,18 @@ jobs:
           cache: npm
       - run: npm ci
       - name: Mandatory baseline
-        run: npx tsc --noEmit
-      - name: Visual CI profile (actual static visual safeguard)
+        run: |
+          npm run cf-typegen
+          npx tsc --noEmit
+          npm run test:stack
+          npm run test:native-git-preflight
+          npm run test:os-provider-bridge
+          git diff --check
+      - name: Visual CI profile (scoped static safeguard)
         run: node scripts/check-visual-candidate.mjs
       - name: Publish validation evidence
         env:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
         run: gh pr comment "$PR" --body "<!-- app-harness-os-ci:${{ github.run_id }} -->
-          App Harness OS stack-node validation passed: baseline TypeScript plus the actual visual-token/reduced-motion static check. Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          App Harness OS stack-node validation passed: the repository baseline gates plus the scoped visual-token/reduced-motion static check. Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"

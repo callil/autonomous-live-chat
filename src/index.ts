@@ -657,7 +657,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		const response = await fetch(`https://api.github.com/repos/${this.env.GITHUB_REPOSITORY}/actions/workflows/os-stack-promote.yml/dispatches`, {
 			method: "POST",
 			headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${this.env.GITHUB_AUTOMATION_TOKEN}`, "Content-Type": "application/json", "User-Agent": "app-harness-os", "X-GitHub-Api-Version": "2022-11-28" },
-			body: JSON.stringify({ ref: "main", inputs: { pull_request: match[1], stack_id: runner.stackId, generation: String(runner.generation), issue_number: String(workItem.githubIssue.number), parent_branch: "main", head_sha: runner.headSha, room: "main", workflow_id: workflow.id } }),
+			body: JSON.stringify({ ref: "main", inputs: { pull_request: match[1], stack_id: runner.stackId, generation: String(runner.generation), issue_number: String(workItem.githubIssue.number), parent_branch: "main", head_sha: runner.headSha, room: "main", workflow_id: workflow.id, ci_profile: runner.classification?.ciProfile ?? "unsupported" } }),
 		});
 		if (!response.ok) {
 			this.transitionWorkItem(workItem, "needs_review", "Native candidate pull request exists, but the stack promotion gate could not be dispatched. No merge or deployment was attempted.");

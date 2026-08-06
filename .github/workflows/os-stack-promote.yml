@@ -11,6 +11,7 @@ on:
       head_sha: { required: true, type: string }
       room: { required: true, type: string }
       workflow_id: { required: true, type: string }
+      ci_profile: { required: true, type: string }
 
 permissions:
   contents: write
@@ -37,6 +38,7 @@ jobs:
       AUTONOMY_CALLBACK_URL: ${{ secrets.AUTONOMY_CALLBACK_URL }}
       AUTONOMY_GITHUB_TOKEN: ${{ secrets.AUTONOMY_GITHUB_TOKEN }}
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CI_PROFILE: ${{ inputs.ci_profile }}
     steps:
       - name: Verify immutable root stack provenance
         run: |
@@ -45,11 +47,20 @@ jobs:
             const pr = JSON.parse(execFileSync("gh", ["pr", "view", process.env.PR, "--json", "headRefName,baseRefName,headRefOid,state"], { encoding: "utf8" }));
             if (pr.state !== "OPEN" || pr.baseRefName !== process.env.EXPECTED_PARENT || pr.headRefOid !== process.env.EXPECTED_HEAD || !/^app-harness-os\/\d+\/g\d+$/.test(pr.headRefName)) throw new Error("stale or invalid stack provenance");
           '
-      - name: Wait for current stack-node CI
-        run: gh pr checks "$PR" --watch --required
+      - name: Require the supported effective CI profile
+        run: test "$CI_PROFILE" = visual
+      - name: Wait for the immutable stack-node validation check
+        run: |
+          for attempt in $(seq 1 36); do
+            result="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${EXPECTED_HEAD}/check-runs" --jq '.check_runs[] | select(.name == "validate-node") | .conclusion' | tail -n 1)"
+            if [ "$result" = success ]; then exit 0; fi
+            if [ -n "$result" ] && [ "$result" != null ]; then echo "validate-node concluded: $result"; exit 1; fi
+            sleep 5
+          done
+          echo "validate-node did not register for the immutable candidate head"; exit 1
       - uses: actions/checkout@v4
         with:
-          ref: main
+          ref: refs/pull/${{ inputs.pull_request }}/merge
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -57,14 +68,32 @@ jobs:
       - run: npm ci
       - name: Current stack-tip integration gate
         run: |
+          test "$(git rev-parse HEAD)" != ""
+          npm run cf-typegen
           npx tsc --noEmit
+          npm run test:stack
+          npm run test:native-git-preflight
+          npm run test:os-provider-bridge
+          git diff --check
           node scripts/check-visual-candidate.mjs
       - name: Merge the validated current generation
         run: |
-          gh issue comment "$ISSUE" --body "<!-- app-harness-os-stack-${STACK_ID}-g${GENERATION}-promoting -->
-          Stack `${STACK_ID}` generation ${GENERATION} passed its node and stack-tip gates. Promoting PR #${PR}."
+          cat > /tmp/app-harness-promoting.md <<'EOF'
+          Stack promotion started after the current node and stack-tip gates passed.
+          EOF
+          gh issue comment "$ISSUE" --body-file /tmp/app-harness-promoting.md
           gh pr merge "$PR" --squash --delete-branch
-      - name: Deploy merged main
+      - name: Fetch and verify merged main before deployment
+        run: |
+          git fetch origin main
+          git checkout --detach origin/main
+          merge_sha="$(gh pr view "$PR" --json mergeCommit --jq '.mergeCommit.oid')"
+          test -n "$merge_sha"
+          test "$(git rev-parse HEAD)" = "$merge_sha"
+      - name: Deploy verified merged main
         run: npx wrangler deploy
       - name: Publish durable completion callback
         run: node scripts/autonomy-callback.mjs completed "Cloudflare OS stack ${STACK_ID} generation ${GENERATION} validated, merged, and deployed." "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+      - name: Publish safe failure callback
+        if: failure()
+        run: node scripts/autonomy-callback.mjs requires_review "Cloudflare OS stack promotion did not pass immutable provenance, CI, merge, or deployment gates. Review the linked GitHub Actions run; no success is claimed." "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
