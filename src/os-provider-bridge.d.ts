@@ -22,6 +22,6 @@ export type OsNativeGitJob = {
 export function createOsWorkspaceSubmission(input: { workItemId: string; issue: DurableIssue; request: string; target?: { targetId?: string; page?: string }; responseTarget: unknown }): OsWorkspaceSubmission;
 export function validateOsExecutionRequest(input: { workItemId: string; issueNumber: number }, durable: { workItemId: string; issue: DurableIssue }): { workItemId: string; issueNumber: number };
 export function osExecutionDisposition(input: { terminal: boolean; existingEffect: boolean; jobStage: string }): "terminal" | "duplicate" | "queue";
-export function osWorkspaceTurnDisposition(jobStage: string): "needs-review" | "delegated";
+export function osWorkspaceTurnDisposition(jobStage: string): "awaiting-action" | "delegated";
 export function createOsNativeGitJob(input: { workItemId: string; issue: DurableIssue; request: string; generation?: number; parentBaseSha?: string | null }): OsNativeGitJob;
 export function classifyOsRunnerResponse(value: unknown): { phase: "building" | "needs_review"; detail: string; terminal: boolean };

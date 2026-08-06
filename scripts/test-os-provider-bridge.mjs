@@ -54,7 +54,7 @@ assert.throws(() => validateOsExecutionRequest({ workItemId: "21790e3b-58a1-4a8d
 assert.equal(osExecutionDisposition({ terminal: false, existingEffect: false, jobStage: "awaiting-os" }), "queue");
 assert.equal(osExecutionDisposition({ terminal: false, existingEffect: true, jobStage: "queued" }), "duplicate");
 assert.equal(osExecutionDisposition({ terminal: true, existingEffect: false, jobStage: "terminal" }), "terminal");
-assert.equal(osWorkspaceTurnDisposition("awaiting-os"), "needs-review");
+assert.equal(osWorkspaceTurnDisposition("awaiting-os"), "awaiting-action");
 assert.equal(osWorkspaceTurnDisposition("queued"), "delegated");
 
 // The runner receives only the original durable request and fixed repository.

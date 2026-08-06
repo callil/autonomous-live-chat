@@ -22,7 +22,7 @@ The custom OS Gatekeeper introduces one ambient capability:
 APP_HARNESS.enqueueRepositoryTask({ workItemId, issueNumber })
 ```
 
-It invokes the App Harness Worker’s exported `OsExecutionBridge` over a service binding. The bridge has no HTTP route and accepts no repository name, request text, source, command, token, or model output. It resolves the original work item and issue from the ChatRoom Durable Object, rejects mismatches, and creates one idempotent `observe-main` outbox effect.
+It invokes the App Harness Worker’s exported `OsExecutionBridge` over a service binding. The bridge has no HTTP route and accepts no repository name, request text, source, command, token, or model output. It resolves the original work item and issue from the ChatRoom Durable Object, rejects mismatches, and creates one idempotent `observe-main` outbox effect. OS action approval is asynchronous: the agent response is public commentary, but it does not close the durable job while that action may still be awaiting a decision.
 
 From there deterministic code owns the state machine: observe the current base, create the durable stack ledger, run the isolated Cloudflare Sandbox child, verify the pushed branch and PR, dispatch CI/promotion, merge, deploy, and reconcile signed callbacks.
 
