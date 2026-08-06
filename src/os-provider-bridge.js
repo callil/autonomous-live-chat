@@ -57,8 +57,7 @@ export function createOsPlanningManifest({ workItemId, issueUrl, request, target
  */
 export function createOsNativeGitJob({ manifest, plan }) {
 	if (!manifest || manifest.repository !== REPOSITORY || !Number.isInteger(manifest.issueNumber)) throw new Error("OS runner job needs a valid planning manifest.");
-	const paths = typeof plan?.patch === "string" ? [...plan.patch.matchAll(/^(?:--- a\/|\+\+\+ b\/)([^\n]+)$/gmu)].map((match) => match[1]) : [];
-	if (!plan || plan.kind !== "documentation-patch" || typeof plan.patch !== "string" || !plan.patch.startsWith("--- a/") || plan.patch.length > 12000 || paths.length < 2 || paths.some((path) => !(path === "README.md" || (path.startsWith("docs/") && path.endsWith(".md"))))) throw new Error("OS runner job needs an allowlisted documentation plan.");
+	if (!plan || plan.kind !== "documentation-task" || typeof plan.request !== "string" || !plan.request.trim() || plan.request.length > 500) throw new Error("OS runner job needs an allowlisted documentation task.");
 	const workItemId = safeWorkItemId(manifest.workItemId);
 	const generation = safeGeneration(manifest.stack?.generation);
 	return {
@@ -66,7 +65,7 @@ export function createOsNativeGitJob({ manifest, plan }) {
 		repository: REPOSITORY,
 		generation,
 		candidate: {
-			change: { kind: "documentation-patch", patch: plan.patch },
+			change: { kind: "documentation-task", request: plan.request },
 			stack: {
 				stackId: manifest.stack.id,
 				nodeId: "root",

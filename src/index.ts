@@ -116,7 +116,7 @@ type HarnessWorkItem = {
 		generation: number;
 		model?: { id: string; model: string };
 		classification?: OsModelClassification;
-		plan?: { kind: "documentation-patch"; patch: string };
+		plan?: { kind: "documentation-task"; request: string };
 		attempts?: number;
 		startedAt?: number;
 		baseSha?: string;
@@ -197,7 +197,7 @@ type OsModelClassification = {
 	ciProfile: "visual" | "content" | "behavior" | "data" | "infrastructure";
 };
 
-function acceptedOsAgentPlan(value: unknown): { model: { id: string; model: string }; plan: { kind: "documentation-patch"; patch: string }; rationale: string; classification: OsModelClassification } | null {
+function acceptedOsAgentPlan(value: unknown, request: string): { model: { id: string; model: string }; plan: { kind: "documentation-task"; request: string }; rationale: string; classification: OsModelClassification } | null {
 	if (!value || typeof value !== "object") return null;
 	const response = value as OsAgentPlanResponse;
 	if (response.state !== "planned" || !response.model || typeof response.model !== "object" || !response.plan || typeof response.plan !== "object" || typeof response.rationale !== "string") return null;
@@ -207,10 +207,10 @@ function acceptedOsAgentPlan(value: unknown): { model: { id: string; model: stri
 	const classification = response.classification as Record<string, unknown> | null;
 	if (!change || typeof change !== "object") return null;
 	const candidate = change as Record<string, unknown>;
-	if (!classification || typeof model.id !== "string" || typeof model.model !== "string" || candidate.kind !== "documentation-patch" || typeof candidate.patch !== "string" || !candidate.patch.startsWith("--- a/") || candidate.patch.length > 12000 || !["visual", "content", "data", "behavior", "infrastructure"].includes(classification.changeType as string) || classification.changeType !== "content" || classification.scope !== "localized" || classification.risk !== "low" || !["ui", "copy"].includes(classification.affectedSurface as string) || classification.reversible !== true || classification.executionEligibility !== "eligible" || classification.ciProfile !== "content") return null;
+	if (!classification || typeof model.id !== "string" || typeof model.model !== "string" || candidate.kind !== "documentation-patch" || !["visual", "content", "data", "behavior", "infrastructure"].includes(classification.changeType as string) || classification.changeType !== "content" || classification.scope !== "localized" || classification.risk !== "low" || !["ui", "copy"].includes(classification.affectedSurface as string) || classification.reversible !== true || classification.executionEligibility !== "eligible" || classification.ciProfile !== "content") return null;
 	return {
 		model: { id: model.id, model: model.model },
-		plan: { kind: "documentation-patch", patch: candidate.patch },
+		plan: { kind: "documentation-task", request: request.slice(0, 500) },
 		rationale: response.rationale.slice(0, 240),
 		classification: classification as unknown as OsModelClassification,
 	};
@@ -544,7 +544,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		}));
 		let planningBody: unknown = null;
 		try { planningBody = await planningResponse.json(); } catch { /* handled as blocked below */ }
-		const agentPlan = acceptedOsAgentPlan(planningBody);
+		const agentPlan = acceptedOsAgentPlan(planningBody, workflow.request);
 		if (!agentPlan) {
 			workItem.osNativeGit.state = typeof planningBody === "object" && planningBody && "state" in planningBody && typeof (planningBody as { state?: unknown }).state === "string" ? (planningBody as { state: string }).state : "unknown";
 			const detail = osPlannerFailureDetail(planningResponse.status, planningBody);

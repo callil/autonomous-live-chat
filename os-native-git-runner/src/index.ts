@@ -10,6 +10,8 @@ type Env = {
 	GITHUB_APP_INSTALLATION_ID: string;
 	GITHUB_APP_PRIVATE_KEY: string;
 	NATIVE_GIT_ENABLED: string;
+	OPENAI_API_KEY: string;
+	MODEL_ID: string;
 };
 
 type NativeGitJob = {
@@ -20,7 +22,7 @@ type NativeGitJob = {
 };
 
 type CandidatePlan = {
-	change: { kind: "documentation-patch"; patch: string };
+	change: { kind: "documentation-task"; request: string };
 	stack: {
 		stackId: string;
 		nodeId: string;
@@ -68,7 +70,7 @@ function safeCandidate(input: unknown): CandidatePlan | null {
 	if (!change || typeof change !== "object" || !stack || typeof stack !== "object") return null;
 	const rawChange = change as Record<string, unknown>;
 	const rawStack = stack as Record<string, unknown>;
-	if (rawChange.kind !== "documentation-patch" || typeof rawChange.patch !== "string" || !safeDocumentationPatch(rawChange.patch)) return null;
+	if (rawChange.kind !== "documentation-task" || typeof rawChange.request !== "string" || rawChange.request.length > 500 || !rawChange.request.trim()) return null;
 	const stackId = typeof rawStack.stackId === "string" && JOB_ID.test(rawStack.stackId) ? rawStack.stackId : null;
 	const nodeId = typeof rawStack.nodeId === "string" && JOB_ID.test(rawStack.nodeId) ? rawStack.nodeId : null;
 	const branch = safeBranch(rawStack.branch);
@@ -81,7 +83,7 @@ function safeCandidate(input: unknown): CandidatePlan | null {
 	// exception: it is based on main and receives its base SHA from checkout.
 	if (pullRequestBase !== parentBranch || (parentBranch !== "main" && parentBaseSha === null)) return null;
 	return {
-		change: { kind: "documentation-patch", patch: rawChange.patch },
+		change: { kind: "documentation-task", request: rawChange.request.trim() },
 		stack: { stackId, nodeId, branch, parentBranch, parentBaseSha, pullRequestBase, issueNumber },
 	};
 }
@@ -245,6 +247,59 @@ async function createSessionAfterRuntimeUpdate(
 	throw new Error("Sandbox session retry exhausted.");
 }
 
+type ToolAudit = { name: string; ok: boolean };
+const DOC_AGENT_TOOLS = [
+	{ type: "function", name: "list_docs", description: "List the allowed documentation files.", parameters: { type: "object", additionalProperties: false, properties: {} } },
+	{ type: "function", name: "read_doc", description: "Read one allowed documentation file before editing it.", parameters: { type: "object", additionalProperties: false, required: ["path"], properties: { path: { type: "string", enum: ["README.md"] } } } },
+	{ type: "function", name: "apply_patch", description: "Apply a standard unified diff limited to the allowed docs. You must read every edited file first.", parameters: { type: "object", additionalProperties: false, required: ["patch"], properties: { patch: { type: "string", maxLength: 12000 } } } },
+	{ type: "function", name: "inspect_diff", description: "Inspect the current candidate diff.", parameters: { type: "object", additionalProperties: false, properties: {} } },
+	{ type: "function", name: "run_checks", description: "Run the fixed documentation checks.", parameters: { type: "object", additionalProperties: false, properties: {} } },
+	{ type: "function", name: "finish", description: "Finish only after checks pass and the diff is the intended small docs-only change.", parameters: { type: "object", additionalProperties: false, properties: {} } },
+] as const;
+
+function allowedDocPath(path: unknown): path is string {
+	return path === "README.md" || (typeof path === "string" && /^docs\/[A-Za-z0-9._-]+\.md$/u.test(path));
+}
+
+/** Model gets no shell/network tool. It can only call this fixed repository tool set. */
+async function runDocumentationAgent(session: Awaited<ReturnType<typeof createSessionAfterRuntimeUpdate>>, checkout: string, task: string, env: Env): Promise<{ ok: boolean; audit: ToolAudit[]; classification?: string }> {
+	if (!env.OPENAI_API_KEY || !env.MODEL_ID) return { ok: false, audit: [], classification: "agent-credential-unavailable" };
+	const audit: ToolAudit[] = [];
+	const read = new Set<string>();
+	let input: unknown[] = [{ role: "user", content: [{ type: "input_text", text: `Update the repository documentation for this request: ${task}. First inspect real files. You may change README.md or docs/*.md only. Use tools; do not explain outside tools.` }] }];
+	for (let round = 0; round < 8; round += 1) {
+		let response: Response;
+		try { response = await fetch("https://api.openai.com/v1/responses", { method: "POST", headers: { Authorization: `Bearer ${env.OPENAI_API_KEY}`, "Content-Type": "application/json" }, body: JSON.stringify({ model: env.MODEL_ID, store: false, input, tools: DOC_AGENT_TOOLS, tool_choice: "required" }) }); } catch { return { ok: false, audit, classification: "agent-request-failed" }; }
+		if (!response.ok) return { ok: false, audit, classification: "agent-request-failed" };
+		const body = await response.json() as { output?: Array<Record<string, unknown>> };
+		const calls = body.output?.filter((item) => item.type === "function_call") ?? [];
+		if (!calls.length) return { ok: false, audit, classification: "agent-no-tool-call" };
+		const outputs: unknown[] = [];
+		for (const call of calls) {
+			const name = call.name; let args: Record<string, unknown> = {}; try { args = JSON.parse(String(call.arguments ?? "{}")) as Record<string, unknown>; } catch { /* rejected below */ }
+			let value: Record<string, unknown>;
+			if (name === "list_docs") {
+				const result = await session.exec(`find ${checkout} -maxdepth 2 -type f \\( -name README.md -o -path '${checkout}/docs/*.md' \\) -print | sed 's#${checkout}/##' | sort`, { timeout: 15_000 });
+				value = { ok: result.success, files: result.success ? result.stdout.trim().split("\n").filter(Boolean) : [] };
+			} else if (name === "read_doc" && allowedDocPath(args.path)) {
+				const result = await session.readFile(`${checkout}/${args.path}`); if (result.success) read.add(args.path); value = { ok: result.success, content: result.success ? result.content.slice(0, 16000) : "read failed" };
+			} else if (name === "apply_patch" && typeof args.patch === "string" && safeDocumentationPatch(args.patch)) {
+				const paths = [...args.patch.matchAll(/^(?:--- a\/|\+\+\+ b\/)([^\n]+)$/gmu)].map((m) => m[1]);
+				if (!paths.every((path) => read.has(path))) value = { ok: false, error: "Read every edited path before writing." };
+				else { const write = await session.writeFile(`${checkout}/candidate.patch`, args.patch); const result = write.success ? await session.exec(`git -C ${checkout} apply --whitespace=error-all candidate.patch`, { timeout: 15_000 }) : null; value = { ok: Boolean(result?.success), error: result?.success ? undefined : "Patch did not apply; inspect the diff/files and retry." }; }
+			} else if (name === "inspect_diff") { const result = await session.exec(`git -C ${checkout} diff -- README.md docs`, { timeout: 15_000 }); value = { ok: result.success, diff: result.stdout.slice(0, 16000) };
+			} else if (name === "run_checks") { const check = await session.exec(`git -C ${checkout} diff --check && git -C ${checkout} diff --name-only | grep -E '^(README\\.md|docs/[^/]+\\.md)$'`, { timeout: 15_000 }); value = { ok: check.success, error: check.success ? undefined : "Docs-only diff check failed." };
+			} else if (name === "finish") { const check = await session.exec(`git -C ${checkout} diff --check && git -C ${checkout} diff --quiet -- README.md docs; test $? -eq 1`, { timeout: 15_000 }); value = { ok: check.success, finished: check.success };
+			} else value = { ok: false, error: "Unknown or invalid tool call." };
+			audit.push({ name: typeof name === "string" ? name : "invalid", ok: value.ok === true });
+			outputs.push({ type: "function_call_output", call_id: call.call_id, output: JSON.stringify(value) });
+			if (name === "finish" && value.ok) return { ok: true, audit };
+		}
+		input = outputs;
+	}
+	return { ok: false, audit, classification: "agent-round-limit" };
+}
+
 /**
  * A deliberately tiny production Sandbox runner. The only currently live
 	 * operation is a fixed command probe, used to verify isolated shell execution.
@@ -355,15 +410,13 @@ export default {
 					});
 				}
 
-				const patchPath = `${checkoutDirectory}/candidate.patch`;
-				const patchWrite = await session.writeFile(patchPath, candidate.change.patch);
-				if (!patchWrite.success) return Response.json({ jobId: job.jobId, state: "candidate-failed", classification: "candidate-patch-write-failed" });
+				const agent = await runDocumentationAgent(session, checkoutDirectory, candidate.change.request, env);
+				if (!agent.ok) return Response.json({ jobId: job.jobId, state: "candidate-failed", classification: agent.classification ?? "agent-tool-loop-failed", toolAudit: agent.audit });
 
 				const commandStages: Array<[string, string, Record<string, string> | undefined]> = [
 					["branch", `git -C ${checkoutDirectory} checkout -b ${candidate.stack.branch}`, undefined],
 					["identity", `git -C ${checkoutDirectory} config user.name \"App Harness OS\"`, undefined],
 					["identity", `git -C ${checkoutDirectory} config user.email \"app-harness-os@users.noreply.github.com\"`, undefined],
-					["apply", `git -C ${checkoutDirectory} apply --whitespace=error-all candidate.patch`, undefined],
 					["validate", `git -C ${checkoutDirectory} diff --check`, undefined],
 					["policy", `git -C ${checkoutDirectory} diff --name-only | grep -E '^(README\\.md|docs/[^/]+\\.md)$'`, undefined],
 					["stage", `git -C ${checkoutDirectory} add -- README.md docs`, undefined],

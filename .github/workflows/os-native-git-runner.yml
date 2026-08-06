@@ -28,6 +28,7 @@ jobs:
       APP_HARNESS_GITHUB_APP_ID: ${{ secrets.APP_HARNESS_GITHUB_APP_ID }}
       APP_HARNESS_GITHUB_APP_INSTALLATION_ID: ${{ secrets.APP_HARNESS_GITHUB_APP_INSTALLATION_ID }}
       APP_HARNESS_GITHUB_APP_PRIVATE_KEY: ${{ secrets.APP_HARNESS_GITHUB_APP_PRIVATE_KEY }}
+      APP_HARNESS_OPENAI_API_KEY: ${{ secrets.APP_HARNESS_OPENAI_API_KEY }}
     steps:
       - uses: actions/checkout@v4
 
@@ -60,6 +61,8 @@ jobs:
           printf '%s' "$APP_HARNESS_GITHUB_APP_INSTALLATION_ID" | npx wrangler secret put GITHUB_APP_INSTALLATION_ID --name app-harness-os-native-git
           test -n "$APP_HARNESS_GITHUB_APP_PRIVATE_KEY"
           printf '%s' "$APP_HARNESS_GITHUB_APP_PRIVATE_KEY" | npx wrangler secret put GITHUB_APP_PRIVATE_KEY --name app-harness-os-native-git
+          test -n "$APP_HARNESS_OPENAI_API_KEY"
+          printf '%s' "$APP_HARNESS_OPENAI_API_KEY" | npx wrangler secret put OPENAI_API_KEY --name app-harness-os-native-git
 
       # GitHub-hosted Ubuntu supplies Docker. Wrangler builds and pushes the
       # image to Cloudflare's registry; no developer laptop participates.
