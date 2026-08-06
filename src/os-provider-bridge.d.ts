@@ -1,12 +1,25 @@
+export type OsPlanningManifest = {
+	workItemId: string;
+	issueUrl: string;
+	repository: "callil/autonomous-live-chat";
+	request: string;
+	target?: { targetId: string; page: string; label?: string };
+	stack: { id: string; lane: string; generation: number };
+	runnerUrl: string;
+	orchestratorUrl: string;
+	issueNumber: number;
+};
+
 export type OsNativeGitJob = {
 	jobId: string;
-	repository: string;
+	repository: "callil/autonomous-live-chat";
 	generation: number;
-	issueUrl: string;
-	room: string;
-	stack: { id: string; lane: string; generation: number; baseSha: null; state: "awaiting-base-sha" };
-	audit: string[];
-	runnerUrl: string;
+	candidate: {
+		change: { kind: "accent-color"; color: "blue" | "green" | "purple" | "orange" };
+		stack: { stackId: string; nodeId: "root"; branch: string; parentBranch: "main"; parentBaseSha: null; pullRequestBase: "main"; issueNumber: number };
+	};
 };
-export function createOsNativeGitJob(input: { workItemId: string; issueUrl: string; room?: string; generation?: number }): OsNativeGitJob;
+
+export function createOsPlanningManifest(input: { workItemId: string; issueUrl: string; request: string; target?: { targetId?: string; page?: string; label?: string }; room?: string; generation?: number }): OsPlanningManifest;
+export function createOsNativeGitJob(input: { manifest: OsPlanningManifest; plan: { kind: "accent-color"; color: "blue" | "green" | "purple" | "orange" } }): OsNativeGitJob;
 export function classifyOsRunnerResponse(value: unknown): { phase: "building" | "needs_review"; detail: string; terminal: boolean };

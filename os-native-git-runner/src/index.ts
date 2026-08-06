@@ -16,9 +16,33 @@ type NativeGitJob = {
 	jobId?: unknown;
 	repository?: unknown;
 	generation?: unknown;
+	candidate?: unknown;
+};
+
+type AccentColor = "blue" | "green" | "purple" | "orange";
+
+type CandidatePlan = {
+	change: { kind: "accent-color"; color: AccentColor };
+	stack: {
+		stackId: string;
+		nodeId: string;
+		branch: string;
+		parentBranch: string;
+		parentBaseSha: string | null;
+		pullRequestBase: string;
+		issueNumber: number;
+	};
 };
 
 const JOB_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/;
+const BRANCH = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,159}$/;
+const SHA = /^[0-9a-f]{40}$/i;
+const ACCENT_COLORS: Readonly<Record<AccentColor, string>> = {
+	blue: "#3478f6",
+	green: "#10a37f",
+	purple: "#8b5cf6",
+	orange: "#ef7d32",
+};
 const encoder = new TextEncoder();
 
 function base64Url(bytes: Uint8Array): string {
@@ -37,6 +61,37 @@ function safeJob(input: NativeGitJob, env: Env): { jobId: string; repository: st
 	if (input.repository !== env.ALLOWED_REPOSITORY) return null;
 	if (!Number.isInteger(input.generation) || (input.generation as number) < 1) return null;
 	return { jobId: input.jobId, repository: input.repository, generation: input.generation as number };
+}
+
+function safeBranch(value: unknown): string | null {
+	if (typeof value !== "string" || !BRANCH.test(value) || value.includes("..") || value.endsWith("/") || value.startsWith("-")) return null;
+	return value;
+}
+
+function safeCandidate(input: unknown): CandidatePlan | null {
+	if (!input || typeof input !== "object") return null;
+	const candidate = input as Record<string, unknown>;
+	const change = candidate.change;
+	const stack = candidate.stack;
+	if (!change || typeof change !== "object" || !stack || typeof stack !== "object") return null;
+	const rawChange = change as Record<string, unknown>;
+	const rawStack = stack as Record<string, unknown>;
+	if (rawChange.kind !== "accent-color" || typeof rawChange.color !== "string" || !(rawChange.color in ACCENT_COLORS)) return null;
+	const stackId = typeof rawStack.stackId === "string" && JOB_ID.test(rawStack.stackId) ? rawStack.stackId : null;
+	const nodeId = typeof rawStack.nodeId === "string" && JOB_ID.test(rawStack.nodeId) ? rawStack.nodeId : null;
+	const branch = safeBranch(rawStack.branch);
+	const parentBranch = safeBranch(rawStack.parentBranch);
+	const pullRequestBase = safeBranch(rawStack.pullRequestBase);
+	const parentBaseSha = rawStack.parentBaseSha === null ? null : typeof rawStack.parentBaseSha === "string" && SHA.test(rawStack.parentBaseSha) ? rawStack.parentBaseSha : undefined;
+	const issueNumber = rawStack.issueNumber;
+	if (!stackId || !nodeId || !branch || !parentBranch || !pullRequestBase || parentBaseSha === undefined || typeof issueNumber !== "number" || !Number.isInteger(issueNumber) || issueNumber < 1) return null;
+	// A stack node can only target its immediate parent. The root is the sole
+	// exception: it is based on main and receives its base SHA from checkout.
+	if (pullRequestBase !== parentBranch || (parentBranch !== "main" && parentBaseSha === null)) return null;
+	return {
+		change: { kind: "accent-color", color: rawChange.color as AccentColor },
+		stack: { stackId, nodeId, branch, parentBranch, parentBaseSha, pullRequestBase, issueNumber },
+	};
 }
 
 function classifyGitTransportFailure(stderr: string): "github-unreachable" | "github-authorization-rejected" | "github-upstream-unavailable" | "git-transport-failed" {
@@ -84,6 +139,58 @@ async function prepareGitHubInstallation(env: Env): Promise<GitHubInstallationPr
 		return repositoryResponse.ok ? { token } : { classification: "github-installation-unavailable" };
 	} catch {
 		return { classification: "github-installation-unavailable" };
+	}
+}
+
+function gitAuthorizationEnv(token: string): Record<string, string> {
+	return {
+		GIT_CONFIG_COUNT: "1",
+		GIT_CONFIG_KEY_0: "http.extraHeader",
+		GIT_CONFIG_VALUE_0: `Authorization: Basic ${btoa(`x-access-token:${token}`)}`,
+		GIT_TERMINAL_PROMPT: "0",
+	};
+}
+
+async function createStackPullRequest(
+	env: Env,
+	token: string,
+	job: { repository: string; generation: number },
+	candidate: CandidatePlan,
+	headSha: string,
+): Promise<{ url: string; number: number } | { classification: "pull-request-create-failed" }> {
+	try {
+		const { color } = candidate.change;
+		const response = await fetch(`https://api.github.com/repos/${job.repository}/pulls`, {
+			method: "POST",
+			headers: {
+				Accept: "application/vnd.github+json",
+				Authorization: `Bearer ${token}`,
+				"Content-Type": "application/json",
+				"User-Agent": "app-harness-os-native-git",
+				"X-GitHub-Api-Version": "2022-11-28",
+			},
+			body: JSON.stringify({
+				title: `App Harness: set accent color to ${color}`,
+				head: candidate.stack.branch,
+				base: candidate.stack.pullRequestBase,
+				body: [
+					`Closes #${candidate.stack.issueNumber}`,
+					"",
+					"## Cloudflare OS candidate provenance",
+					`- Stack: \`${candidate.stack.stackId}\` generation ${job.generation}`,
+					`- Node: \`${candidate.stack.nodeId}\``,
+					`- Parent base: \`${candidate.stack.parentBranch}\``,
+					`- Candidate head: \`${headSha}\``,
+					"- Runner executed only the validated accent-color plan.",
+				].join("\n"),
+			}),
+		});
+		if (!response.ok) return { classification: "pull-request-create-failed" };
+		const pullRequest = (await response.json()) as { html_url?: unknown; number?: unknown };
+		if (typeof pullRequest.html_url !== "string" || !Number.isInteger(pullRequest.number)) return { classification: "pull-request-create-failed" };
+		return { url: pullRequest.html_url, number: pullRequest.number as number };
+	} catch {
+		return { classification: "pull-request-create-failed" };
 	}
 }
 
@@ -148,6 +255,10 @@ export default {
 			}
 			const job = safeJob(body, env);
 			if (!job) return Response.json({ error: "Job is outside the runner's scope." }, { status: 403 });
+			const candidate = body.candidate === undefined ? null : safeCandidate(body.candidate);
+			if (body.candidate !== undefined && !candidate) {
+				return Response.json({ error: "Candidate plan is outside the runner's fixed policy." }, { status: 403 });
+			}
 			if (env.NATIVE_GIT_ENABLED !== "true" || !env.GITHUB_APP_ID || !env.GITHUB_APP_INSTALLATION_ID || !env.GITHUB_APP_PRIVATE_KEY) {
 				return Response.json({
 					jobId: job.jobId,
@@ -183,16 +294,13 @@ export default {
 				// The SDK applies these only to this one process. The one-hour
 				// installation token is never included in a command string, repository
 				// URL, session-global environment, audit event, or response.
+				const gitEnv = gitAuthorizationEnv(installation.token);
+				const cloneBranch = candidate?.stack.parentBranch ?? "main";
 				const clone = await session.exec(
-					`git clone --depth 1 https://github.com/callil/autonomous-live-chat.git ${checkoutDirectory}`,
+					`git clone --depth 1 --branch ${cloneBranch} https://github.com/callil/autonomous-live-chat.git ${checkoutDirectory}`,
 					{
 						timeout: 120_000,
-						env: {
-							GIT_CONFIG_COUNT: "1",
-							GIT_CONFIG_KEY_0: "http.extraHeader",
-							GIT_CONFIG_VALUE_0: `Authorization: Basic ${btoa(`x-access-token:${installation.token}`)}`,
-							GIT_TERMINAL_PROMPT: "0",
-						},
+						env: gitEnv,
 					},
 				);
 				if (!clone.success) {
@@ -203,8 +311,66 @@ export default {
 						classification: classifyGitTransportFailure(clone.stderr),
 					});
 				}
+				const base = await session.exec(`git -C ${checkoutDirectory} rev-parse HEAD`, { timeout: 15_000 });
+				const baseSha = base.stdout.trim();
+				if (!base.success || !SHA.test(baseSha)) {
+					return Response.json({ jobId: job.jobId, state: "checkout-failed", classification: "checkout-head-unavailable" });
+				}
+				if (!candidate) return Response.json({ jobId: job.jobId, state: "checked-out", head: baseSha, baseSha });
+				if (candidate.stack.parentBaseSha && candidate.stack.parentBaseSha !== baseSha) {
+					return Response.json({
+						jobId: job.jobId,
+						state: "needs-restack",
+						baseSha,
+						classification: "parent-base-sha-mismatch",
+						stack: { id: candidate.stack.stackId, generation: job.generation, nodeId: candidate.stack.nodeId, parentBranch: candidate.stack.parentBranch },
+					});
+				}
+
+				const sourcePath = `${checkoutDirectory}/public/index.html`;
+				const source = await session.readFile(sourcePath);
+				const nextSource = source.content.replace(/--accent:\s*#[0-9a-f]{3,8}/iu, `--accent: ${ACCENT_COLORS[candidate.change.color]}`);
+				if (!source.success || nextSource === source.content) {
+					return Response.json({ jobId: job.jobId, state: "candidate-failed", classification: "allowlisted-target-not-found" });
+				}
+				const write = await session.writeFile(sourcePath, nextSource);
+				if (!write.success) return Response.json({ jobId: job.jobId, state: "candidate-failed", classification: "allowlisted-write-failed" });
+
+				const commandStages: Array<[string, string, Record<string, string> | undefined]> = [
+					["branch", `git -C ${checkoutDirectory} checkout -b ${candidate.stack.branch}`, undefined],
+					["identity", `git -C ${checkoutDirectory} config user.name \"App Harness OS\"`, undefined],
+					["identity", `git -C ${checkoutDirectory} config user.email \"app-harness-os@users.noreply.github.com\"`, undefined],
+					["validate", `git -C ${checkoutDirectory} diff --check`, undefined],
+					["stage", `git -C ${checkoutDirectory} add -- public/index.html`, undefined],
+					["commit", `git -C ${checkoutDirectory} commit -m \"App Harness: set accent color to ${candidate.change.color}\"`, undefined],
+					["push", `git -C ${checkoutDirectory} push --set-upstream origin ${candidate.stack.branch}`, gitEnv],
+				];
+				for (const [stage, command, commandEnv] of commandStages) {
+					const result = await session.exec(command, { timeout: 120_000, ...(commandEnv ? { env: commandEnv } : {}) });
+					if (!result.success) {
+						return Response.json({ jobId: job.jobId, state: "candidate-failed", exitCode: result.exitCode, classification: `candidate-${stage}-failed` });
+					}
+				}
 				const head = await session.exec(`git -C ${checkoutDirectory} rev-parse HEAD`, { timeout: 15_000 });
-				return Response.json({ jobId: job.jobId, state: "checked-out", head: head.stdout.trim().slice(0, 64) });
+				const headSha = head.stdout.trim();
+				if (!head.success || !SHA.test(headSha)) return Response.json({ jobId: job.jobId, state: "candidate-failed", classification: "candidate-head-unavailable" });
+				const pullRequest = await createStackPullRequest(env, installation.token, job, candidate, headSha);
+				if ("classification" in pullRequest) return Response.json({ jobId: job.jobId, state: "candidate-failed", classification: pullRequest.classification });
+				return Response.json({
+					jobId: job.jobId,
+					state: "pull-request-opened",
+					baseSha,
+					headSha,
+					pullRequest,
+					stack: {
+						id: candidate.stack.stackId,
+						generation: job.generation,
+						nodeId: candidate.stack.nodeId,
+						branch: candidate.stack.branch,
+						parentBranch: candidate.stack.parentBranch,
+						pullRequestBase: candidate.stack.pullRequestBase,
+					},
+				});
 			} finally {
 				await sandbox.deleteSession(sessionId);
 			}

@@ -22,12 +22,16 @@
 	},
 	"vars": {
 		"GITHUB_REPOSITORY": "callil/autonomous-live-chat",
-		"OS_NATIVE_GIT_PROVIDER": "disabled"
+		"OS_NATIVE_GIT_PROVIDER": "enabled"
 	},
 	"services": [
 		{
 			"binding": "OS_NATIVE_GIT_RUNNER",
 			"service": "app-harness-os-native-git"
+		},
+		{
+			"binding": "OS_AGENT_ORCHESTRATOR",
+			"service": "app-harness-os-orchestrator"
 		}
 	],
 	"durable_objects": {

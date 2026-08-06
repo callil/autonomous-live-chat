@@ -1,0 +1,45 @@
+name: Deploy OS planning agent
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: app-harness-os-planning-agent-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      APP_HARNESS_ORCHESTRATOR_SECRET: ${{ secrets.APP_HARNESS_ORCHESTRATOR_SECRET }}
+      APP_HARNESS_OPENAI_API_KEY: ${{ secrets.APP_HARNESS_OPENAI_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Validate planner Worker
+        run: |
+          npm ci
+          npx tsc --noEmit --project os-agent-orchestrator/tsconfig.json
+
+      # Values travel directly from GitHub Secrets to Worker Secrets over stdin.
+      # The model credential is never included in source, logs, App Harness,
+      # the durable ledger, or the Git runner.
+      - name: Install planning-agent secrets
+        shell: bash
+        run: |
+          test -n "$APP_HARNESS_ORCHESTRATOR_SECRET"
+          printf '%s' "$APP_HARNESS_ORCHESTRATOR_SECRET" | npx wrangler secret put APP_HARNESS_ORCHESTRATOR_SECRET --name app-harness-os-orchestrator
+          test -n "$APP_HARNESS_OPENAI_API_KEY"
+          printf '%s' "$APP_HARNESS_OPENAI_API_KEY" | npx wrangler secret put OPENAI_API_KEY --name app-harness-os-orchestrator
+
+      - name: Deploy planning agent
+        run: npx wrangler deploy --config os-agent-orchestrator/wrangler.jsonc

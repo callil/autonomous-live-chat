@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import { classifyOsRunnerResponse, createOsNativeGitJob } from "./os-provider-bridge.js";
+import { classifyOsRunnerResponse, createOsNativeGitJob, createOsPlanningManifest } from "./os-provider-bridge.js";
 
 type ChatMessage = {
 	id: string;
@@ -107,7 +107,16 @@ type HarnessWorkItem = {
 	workflowId?: string;
 	githubIssue?: { number: number; url: string };
 	githubPullRequestUrl?: string;
-	osNativeGit?: { jobId: string; state: string; runnerUrl: string; stackId: string; generation: number };
+	osNativeGit?: {
+		jobId: string;
+		state: string;
+		runnerUrl: string;
+		stackId: string;
+		generation: number;
+		model?: { id: string; model: string };
+		baseSha?: string;
+		headSha?: string;
+	};
 };
 
 type ClientEvent =
@@ -124,11 +133,13 @@ type WorkflowCallback = {
 	result?: unknown;
 };
 
-type RuntimeEnv = Omit<Env, "OS_NATIVE_GIT_PROVIDER" | "OS_NATIVE_GIT_RUNNER"> & {
+type RuntimeEnv = Omit<Env, "OS_NATIVE_GIT_PROVIDER" | "OS_NATIVE_GIT_RUNNER" | "OS_AGENT_ORCHESTRATOR"> & {
 	GITHUB_AUTOMATION_TOKEN: string;
 	AUTONOMY_CALLBACK_SECRET: string;
 	OS_NATIVE_GIT_RUNNER?: Fetcher;
 	OS_NATIVE_GIT_RUNNER_SECRET?: string;
+	OS_AGENT_ORCHESTRATOR?: Fetcher;
+	OS_AGENT_ORCHESTRATOR_SECRET?: string;
 	OS_NATIVE_GIT_PROVIDER?: string;
 };
 
@@ -158,6 +169,27 @@ const PHASES: ReadonlySet<WorkflowPhase> = new Set([
 	"rejected",
 	"failed",
 ]);
+
+type OsAgentPlanResponse = {
+	state?: unknown;
+	model?: unknown;
+	plan?: unknown;
+	rationale?: unknown;
+};
+
+function acceptedOsAgentPlan(value: unknown): { model: { id: string; model: string }; plan: { kind: "accent-color"; color: "blue" | "green" | "purple" | "orange" }; rationale: string } | null {
+	if (!value || typeof value !== "object") return null;
+	const response = value as OsAgentPlanResponse;
+	if (response.state !== "planned" || !response.model || typeof response.model !== "object" || !response.plan || typeof response.plan !== "object" || typeof response.rationale !== "string") return null;
+	const model = response.model as Record<string, unknown>;
+	const plan = response.plan as Record<string, unknown>;
+	if (typeof model.id !== "string" || typeof model.model !== "string" || plan.kind !== "accent-color" || !["blue", "green", "purple", "orange"].includes(plan.color as string)) return null;
+	return {
+		model: { id: model.id, model: model.model },
+		plan: { kind: "accent-color", color: plan.color as "blue" | "green" | "purple" | "orange" },
+		rationale: response.rationale.slice(0, 240),
+	};
+}
 
 /**
  * A room is the durable coordination boundary for both chat and autonomous
@@ -422,9 +454,10 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 	}
 
 	/**
-	 * The OS provider boundary is deliberately narrow: only the existing GitHub
-	 * issue, durable work-item ID, room, and first stack generation leave this
-	 * object. Request prose, source, browser values, and credentials do not.
+	 * The OS provider has two deliberately separate boundaries. The planning
+	 * agent sees a bounded manifest (including the request); the native-Git
+	 * runner receives only its schema-validated plan, never user prose or a
+	 * model response. Both sides are capability-scoped service bindings.
 	 */
 	private async dispatchOsNativeGitJob(workflow: WorkflowRecord): Promise<void> {
 		const workItems = await this.getWorkItems();
@@ -433,24 +466,55 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 			await this.failWorkflow(workflow, "Cloudflare OS job is blocked because the linked GitHub issue is missing.");
 			return;
 		}
-		const job = createOsNativeGitJob({
+		const manifest = createOsPlanningManifest({
 			workItemId: workItem.id,
 			issueUrl: workItem.githubIssue.url,
+			request: workflow.request,
+			target: workflow.target,
 			room: "main",
 		});
 		workItem.osNativeGit = {
-			jobId: job.jobId,
-			state: "queued",
-			runnerUrl: job.runnerUrl,
-			stackId: job.stack.id,
-			generation: job.generation,
+			jobId: `os-${workItem.id}-g${manifest.stack.generation}`,
+			state: "planning",
+			runnerUrl: manifest.runnerUrl,
+			stackId: manifest.stack.id,
+			generation: manifest.stack.generation,
 		};
-		if (!this.env.OS_NATIVE_GIT_RUNNER || !this.env.OS_NATIVE_GIT_RUNNER_SECRET) {
+		if (!this.env.OS_AGENT_ORCHESTRATOR || !this.env.OS_AGENT_ORCHESTRATOR_SECRET || !this.env.OS_NATIVE_GIT_RUNNER || !this.env.OS_NATIVE_GIT_RUNNER_SECRET) {
 			workItem.osNativeGit.state = "blocked";
-			this.transitionWorkItem(workItem, "needs_review", "Cloudflare OS provider is enabled but its private runner binding is not configured. No native Git action was attempted.");
+			this.transitionWorkItem(workItem, "needs_review", "Cloudflare OS provider is enabled but its private planning or runner binding is not configured. No model or native Git action was attempted.");
 			await this.saveWorkItems(workItems);
 			return;
 		}
+
+		const planningResponse = await this.env.OS_AGENT_ORCHESTRATOR.fetch(new Request("https://os-agent.internal/v1/plans", {
+			method: "POST",
+			headers: {
+				Authorization: `Bearer ${this.env.OS_AGENT_ORCHESTRATOR_SECRET}`,
+				"Content-Type": "application/json",
+			},
+			body: JSON.stringify(manifest),
+		}));
+		let planningBody: unknown = null;
+		try { planningBody = await planningResponse.json(); } catch { /* handled as blocked below */ }
+		const agentPlan = acceptedOsAgentPlan(planningBody);
+		if (!agentPlan) {
+			workItem.osNativeGit.state = typeof planningBody === "object" && planningBody && "state" in planningBody && typeof (planningBody as { state?: unknown }).state === "string" ? (planningBody as { state: string }).state : "unknown";
+			this.transitionWorkItem(workItem, "needs_review", "Cloudflare OS planning agent did not return an approved bounded plan. No native Git action was attempted.");
+			workflow.phase = "requires_review";
+			workflow.updatedAt = Date.now();
+			workflow.activity.push({ phase: workflow.phase, message: "Cloudflare OS planning agent did not return an approved bounded plan. No native Git action was attempted.", at: workflow.updatedAt });
+			await Promise.all([this.ctx.storage.put(WORKFLOW_KEY, workflow), this.saveWorkItems(workItems)]);
+			await this.appendGitHubIssueStatus(workItem, "Cloudflare OS planner returned no approved bounded plan; native Git was not started.");
+			this.broadcastWorkflow(workflow);
+			return;
+		}
+		const job = createOsNativeGitJob({ manifest, plan: agentPlan.plan });
+		workItem.osNativeGit.state = "planned";
+		workItem.osNativeGit.model = agentPlan.model;
+		this.transitionWorkItem(workItem, "queued", `Cloudflare OS model ${agentPlan.model.model} produced a bounded candidate plan; native Git is starting.`);
+		workflow.activity.push({ phase: "preparing_candidate", message: `Cloudflare OS model plan recorded (${agentPlan.rationale}).`, at: Date.now() });
+		await this.saveWorkItems(workItems);
 
 		const response = await this.env.OS_NATIVE_GIT_RUNNER.fetch(new Request("https://runner.internal/v1/native-git/jobs", {
 			method: "POST",
@@ -464,8 +528,14 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		try { body = await response.json(); } catch { /* handled as unrecognized below */ }
 		const outcome = classifyOsRunnerResponse(body);
 		workItem.osNativeGit.state = typeof body === "object" && body && "state" in body && typeof body.state === "string" ? body.state : "unknown";
+		if (typeof body === "object" && body && "baseSha" in body && typeof (body as { baseSha?: unknown }).baseSha === "string") workItem.osNativeGit.baseSha = (body as { baseSha: string }).baseSha;
+		if (typeof body === "object" && body && "headSha" in body && typeof (body as { headSha?: unknown }).headSha === "string") workItem.osNativeGit.headSha = (body as { headSha: string }).headSha;
+		if (typeof body === "object" && body && "pullRequest" in body) {
+			const pullRequest = (body as { pullRequest?: unknown }).pullRequest;
+			if (pullRequest && typeof pullRequest === "object" && typeof (pullRequest as { url?: unknown }).url === "string") workItem.githubPullRequestUrl = (pullRequest as { url: string }).url;
+		}
 		this.transitionWorkItem(workItem, outcome.phase, outcome.detail);
-		workflow.phase = outcome.terminal ? "requires_review" : "preparing_candidate";
+		workflow.phase = outcome.terminal ? "requires_review" : workItem.githubPullRequestUrl ? "validating" : "preparing_candidate";
 		workflow.updatedAt = Date.now();
 		workflow.activity.push({ phase: workflow.phase, message: outcome.detail, at: workflow.updatedAt });
 		await Promise.all([this.ctx.storage.put(WORKFLOW_KEY, workflow), this.saveWorkItems(workItems)]);
