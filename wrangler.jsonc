@@ -54,8 +54,7 @@
 	},
 	"upload_source_maps": true,
 	"compatibility_flags": [
-		"nodejs_compat",
-		"enable_ctx_exports"
+		"nodejs_compat"
 	]
 	/**
 	 * Smart Placement
