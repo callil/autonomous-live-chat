@@ -12,7 +12,7 @@ on:
 
 permissions:
   contents: read
-  checks: write
+  statuses: write
   pull-requests: write
   issues: write
 
@@ -46,7 +46,10 @@ jobs:
           '
       - uses: actions/checkout@v4
         with:
-          ref: refs/pull/${{ inputs.pull_request || github.event.pull_request.number }}/merge
+          # Node validation is against the candidate itself. Promotion later
+          # validates the synthetic merge ref as the current stack tip.
+          ref: refs/pull/${{ inputs.pull_request || github.event.pull_request.number }}/head
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -61,7 +64,9 @@ jobs:
           npm run test:os-provider-bridge
           git diff --check
       - name: Visual CI profile (scoped static safeguard)
-        run: node scripts/check-visual-candidate.mjs
+        run: |
+          test "$(git rev-parse HEAD)" = "$APP_HARNESS_EXPECTED_HEAD"
+          node scripts/check-visual-candidate.mjs
       - name: Publish validation evidence
         run: |
           printf '%s\n' \
@@ -70,20 +75,28 @@ jobs:
             'Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}' \
             > /tmp/app-harness-os-ci.md
           gh pr comment "$PR" --body-file /tmp/app-harness-os-ci.md
-      - name: Publish immutable manual validation check
-        if: github.event_name == 'workflow_dispatch'
+      - name: Publish immutable candidate validation status
         run: |
           node - <<'NODE'
           const fs = require("node:fs");
-          fs.writeFileSync("/tmp/app-harness-os-check.json", JSON.stringify({
-            name: "validate-node",
-            head_sha: process.env.APP_HARNESS_EXPECTED_HEAD,
-            status: "completed",
-            conclusion: "success",
-            output: {
-              title: "App Harness OS stack-node validation passed",
-              summary: "The immutable candidate merge ref passed baseline and scoped visual safeguards.",
-            },
+          fs.writeFileSync("/tmp/app-harness-os-status.json", JSON.stringify({
+            state: "success",
+            context: "app-harness-os/validate-node",
+            description: "Baseline and scoped visual safeguards passed.",
+            target_url: `${process.env.GITHUB_SERVER_URL}/${process.env.GH_REPO}/actions/runs/${process.env.GITHUB_RUN_ID}`,
           }));
           NODE
-          gh api --method POST "repos/${GH_REPO}/check-runs" --input /tmp/app-harness-os-check.json > /tmp/app-harness-os-check-response.json
+          gh api --method POST "repos/${GH_REPO}/statuses/${APP_HARNESS_EXPECTED_HEAD}" --input /tmp/app-harness-os-status.json > /tmp/app-harness-os-status-response.json
+      - name: Publish failed immutable candidate validation status
+        if: failure() && env.APP_HARNESS_EXPECTED_HEAD != ''
+        run: |
+          node - <<'NODE'
+          const fs = require("node:fs");
+          fs.writeFileSync("/tmp/app-harness-os-status.json", JSON.stringify({
+            state: "failure",
+            context: "app-harness-os/validate-node",
+            description: "Validation failed; promotion remains blocked.",
+            target_url: `${process.env.GITHUB_SERVER_URL}/${process.env.GH_REPO}/actions/runs/${process.env.GITHUB_RUN_ID}`,
+          }));
+          NODE
+          gh api --method POST "repos/${GH_REPO}/statuses/${APP_HARNESS_EXPECTED_HEAD}" --input /tmp/app-harness-os-status.json > /tmp/app-harness-os-status-response.json

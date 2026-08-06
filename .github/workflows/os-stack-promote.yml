@@ -57,11 +57,11 @@ jobs:
           '
       - name: Require the supported effective CI profile
         run: test "$CI_PROFILE" = visual
-      - name: Wait for the immutable stack-node validation check
+      - name: Wait for the immutable stack-node validation status
         run: |
           attempt=1
           while [ "$attempt" -le 36 ]; do
-            result="$(gh api "repos/${GH_REPO}/commits/${EXPECTED_HEAD}/check-runs" --jq '.check_runs[] | select(.name == "validate-node") | .conclusion' | tail -n 1)"
+            result="$(gh api "repos/${GH_REPO}/commits/${EXPECTED_HEAD}/status" --jq '.statuses[] | select(.context == "app-harness-os/validate-node") | .state' | tail -n 1)"
             if [ "$result" = success ]; then exit 0; fi
             if [ -n "$result" ] && [ "$result" != null ]; then echo "validate-node concluded: $result"; exit 1; fi
             sleep 5
@@ -71,6 +71,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: refs/pull/${{ inputs.pull_request }}/merge
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: 22

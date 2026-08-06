@@ -110,11 +110,26 @@ function classifySandboxFailure(error: unknown): "sandbox-capacity-exhausted" | 
 	return "sandbox-unavailable";
 }
 
+const SANDBOX_CLEANUP_TIMEOUT_MS = 5_000;
+
+async function runBoundedSandboxCleanup(action: () => Promise<unknown>, failureClassification: string): Promise<void> {
+	let timeout: ReturnType<typeof setTimeout> | undefined;
+	try {
+		const outcome = await Promise.race([
+			action().then(() => "complete" as const, () => "failed" as const),
+			new Promise<"timed-out">((resolve) => { timeout = setTimeout(() => resolve("timed-out"), SANDBOX_CLEANUP_TIMEOUT_MS); }),
+		]);
+		if (outcome !== "complete") console.warn("Sandbox cleanup did not complete", { classification: outcome === "timed-out" ? `${failureClassification}-timed-out` : failureClassification });
+	} finally {
+		if (timeout) clearTimeout(timeout);
+	}
+}
+
 async function destroySandboxSafely(sandbox: ReturnType<typeof getSandbox>, sessionId?: string): Promise<void> {
 	if (sessionId) {
-		try { await sandbox.deleteSession(sessionId); } catch { console.warn("Sandbox session cleanup failed", { classification: "sandbox-session-cleanup-failed" }); }
+		await runBoundedSandboxCleanup(() => sandbox.deleteSession(sessionId), "sandbox-session-cleanup-failed");
 	}
-	try { await sandbox.destroy(); } catch { console.warn("Sandbox container cleanup failed", { classification: "sandbox-destroy-failed" }); }
+	await runBoundedSandboxCleanup(() => sandbox.destroy(), "sandbox-destroy-failed");
 }
 
 function pemToDer(pem: string): ArrayBuffer {
