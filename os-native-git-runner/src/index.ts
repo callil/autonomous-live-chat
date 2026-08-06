@@ -165,6 +165,7 @@ export default {
 			// attempt. The session ID is opaque and short lived; the durable job ID
 			// remains the audit identity.
 			const sessionId = `candidate-${job.generation}-${crypto.randomUUID().replaceAll("-", "").slice(0, 16)}`;
+			const checkoutDirectory = `/workspace/${sessionId}-repository`;
 			let session;
 			try {
 				session = await createSessionAfterRuntimeUpdate(sandbox, { id: sessionId, cwd: "/workspace", commandTimeoutMs: 120_000 });
@@ -185,7 +186,7 @@ export default {
 					GIT_TERMINAL_PROMPT: "0",
 				});
 				const clone = await session.exec(
-					"git clone --depth 1 https://github.com/callil/autonomous-live-chat.git /workspace/repository",
+					`git clone --depth 1 https://github.com/callil/autonomous-live-chat.git ${checkoutDirectory}`,
 					{ timeout: 120_000 },
 				);
 				if (!clone.success) {
@@ -196,7 +197,7 @@ export default {
 						classification: classifyGitTransportFailure(clone.stderr),
 					});
 				}
-				const head = await session.exec("git -C /workspace/repository rev-parse HEAD", { timeout: 15_000 });
+				const head = await session.exec(`git -C ${checkoutDirectory} rev-parse HEAD`, { timeout: 15_000 });
 				return Response.json({ jobId: job.jobId, state: "checked-out", head: head.stdout.trim().slice(0, 64) });
 			} finally {
 				await sandbox.deleteSession(sessionId);
