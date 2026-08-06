@@ -9,6 +9,7 @@ App Harness is a small but real experiment in software that can evolve in public
 - [Cloudflare OS provider](./cloudflare-os-provider.md) — the default capability/execution architecture and its real deployment boundary.
 - [Stacked PR scheduling](./stacked-prs.md) — the dependency model that prevents autonomous rebase races.
 - [Native Git credential bridge](./native-git-credential-bridge.md) — the default-deny Sandbox-to-GitHub App boundary.
+- [Architecture map](./architecture-map.md) — deployed services, prepared glue, trust boundaries, ordering, and remaining proof.
 - [Legacy NanoCodex note](./next-architecture-nanocodex.md) — the superseded GitHub Actions candidate experiment.
 - [Design principles](./design-principles.md) — the product experience this system is trying to protect.
 - [Targeting and integration](./targeting.md) — the click-to-target envelope and the intended installable harness.
