@@ -114,6 +114,7 @@ type HarnessWorkItem = {
 		stackId: string;
 		generation: number;
 		model?: { id: string; model: string };
+		plan?: { kind: "accent-color"; color: "blue" | "green" | "purple" | "orange" };
 		baseSha?: string;
 		headSha?: string;
 	};
@@ -231,6 +232,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		this.ctx.acceptWebSocket(server);
 
 		await this.backfillExternalHandoffs();
+		await this.schedulePendingOsRunner();
 		const [storedMessages, workflow, annotations, workItems] = await Promise.all([
 			this.ctx.storage.get<ChatMessage[]>("messages"),
 			this.ctx.storage.get<WorkflowRecord>(WORKFLOW_KEY),
@@ -246,6 +248,11 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		this.broadcastPresence();
 
 		return new Response(null, { status: 101, webSocket: client });
+	}
+
+	/** Alarms make the external runner handoff durable instead of tying it to a WebSocket event. */
+	async alarm(): Promise<void> {
+		await this.resumeOsNativeGitRunner();
 	}
 
 	async webSocketMessage(socket: WebSocket, raw: ArrayBuffer | string): Promise<void> {
@@ -528,12 +535,44 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 			this.broadcastWorkflow(workflow);
 			return;
 		}
-		const job = createOsNativeGitJob({ manifest, plan: agentPlan.plan });
 		workItem.osNativeGit.state = "planned";
 		workItem.osNativeGit.model = agentPlan.model;
-		this.transitionWorkItem(workItem, "queued", `Cloudflare OS model ${agentPlan.model.model} produced a bounded candidate plan; native Git is starting.`);
+		workItem.osNativeGit.plan = agentPlan.plan;
+		this.transitionWorkItem(workItem, "queued", `Cloudflare OS model ${agentPlan.model.model} produced a bounded candidate plan; native Git is queued durably.`);
+		workflow.phase = "preparing_candidate";
+		workflow.updatedAt = Date.now();
 		workflow.activity.push({ phase: "preparing_candidate", message: `Cloudflare OS model plan recorded (${agentPlan.rationale}).`, at: Date.now() });
-		await this.saveWorkItems(workItems);
+		await Promise.all([this.ctx.storage.put(WORKFLOW_KEY, workflow), this.saveWorkItems(workItems)]);
+		await this.appendGitHubIssueStatus(workItem, `Cloudflare OS model plan recorded (${agentPlan.model.model}, ${agentPlan.model.id}); native Git is queued durably.`);
+		await this.ctx.storage.setAlarm(Date.now() + 50);
+		this.broadcastWorkflow(workflow);
+	}
+
+	private async schedulePendingOsRunner(): Promise<void> {
+		const workflow = await this.ctx.storage.get<WorkflowRecord>(WORKFLOW_KEY);
+		if (!workflow || TERMINAL_PHASES.has(workflow.phase)) return;
+		const workItem = await this.workItemForWorkflow(workflow);
+		if (workItem?.osNativeGit?.state === "planned" && workItem.osNativeGit.plan) await this.ctx.storage.setAlarm(Date.now() + 50);
+	}
+
+	private async resumeOsNativeGitRunner(): Promise<void> {
+		const workflow = await this.ctx.storage.get<WorkflowRecord>(WORKFLOW_KEY);
+		if (!workflow || TERMINAL_PHASES.has(workflow.phase)) return;
+		const workItems = await this.getWorkItems();
+		const workItem = workflow.workItemId ? workItems.find((item) => item.id === workflow.workItemId) : undefined;
+		if (!workItem?.githubIssue || !workItem.osNativeGit?.plan || workItem.osNativeGit.state !== "planned") return;
+		if (!this.env.OS_NATIVE_GIT_RUNNER || !this.env.OS_NATIVE_GIT_RUNNER_SECRET) {
+			workItem.osNativeGit.state = "blocked";
+			this.transitionWorkItem(workItem, "needs_review", "Cloudflare OS runner binding is unavailable. The model plan is retained; no native Git action was attempted.");
+			workflow.phase = "requires_review";
+			await Promise.all([this.ctx.storage.put(WORKFLOW_KEY, workflow), this.saveWorkItems(workItems)]);
+			return;
+		}
+		const manifest = createOsPlanningManifest({ workItemId: workItem.id, issueUrl: workItem.githubIssue.url, request: workflow.request, target: workflow.target, room: "main", generation: workItem.osNativeGit.generation });
+		const job = createOsNativeGitJob({ manifest, plan: workItem.osNativeGit.plan });
+		workItem.osNativeGit.state = "running";
+		this.transitionWorkItem(workItem, "building", "Cloudflare OS isolated native Git runner started the durable candidate job.");
+		await Promise.all([this.ctx.storage.put(WORKFLOW_KEY, workflow), this.saveWorkItems(workItems)]);
 
 		const response = await this.env.OS_NATIVE_GIT_RUNNER.fetch(new Request("https://runner.internal/v1/native-git/jobs", {
 			method: "POST",

@@ -160,6 +160,14 @@ async function createStackPullRequest(
 ): Promise<{ url: string; number: number } | { classification: "pull-request-create-failed" }> {
 	try {
 		const { color } = candidate.change;
+		const existing = await fetch(`https://api.github.com/repos/${job.repository}/pulls?state=open&head=${encodeURIComponent(`callil:${candidate.stack.branch}`)}&base=${encodeURIComponent(candidate.stack.pullRequestBase)}`, {
+			headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${token}`, "User-Agent": "app-harness-os-native-git", "X-GitHub-Api-Version": "2022-11-28" },
+		});
+		if (existing.ok) {
+			const pullRequests = await existing.json() as Array<{ html_url?: unknown; number?: unknown }>;
+			const current = pullRequests[0];
+			if (typeof current?.html_url === "string" && Number.isInteger(current.number)) return { url: current.html_url, number: current.number as number };
+		}
 		const response = await fetch(`https://api.github.com/repos/${job.repository}/pulls`, {
 			method: "POST",
 			headers: {
@@ -343,7 +351,9 @@ export default {
 					["validate", `git -C ${checkoutDirectory} diff --check`, undefined],
 					["stage", `git -C ${checkoutDirectory} add -- public/index.html`, undefined],
 					["commit", `git -C ${checkoutDirectory} commit -m \"App Harness: set accent color to ${candidate.change.color}\"`, undefined],
-					["push", `git -C ${checkoutDirectory} push --set-upstream origin ${candidate.stack.branch}`, gitEnv],
+					// The branch name is derived solely from the durable stack ID, issue, and
+					// generation. Retrying this same job may update only that same candidate.
+					["push", `git -C ${checkoutDirectory} push --force --set-upstream origin ${candidate.stack.branch}`, gitEnv],
 				];
 				for (const [stage, command, commandEnv] of commandStages) {
 					const result = await session.exec(command, { timeout: 120_000, ...(commandEnv ? { env: commandEnv } : {}) });
