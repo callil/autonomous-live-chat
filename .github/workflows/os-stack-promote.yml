@@ -51,9 +51,16 @@ jobs:
         run: |
           # shellcheck disable=SC2016
           node -e '
+            const fs = require("node:fs");
             const { execFileSync } = require("node:child_process");
             const pr = JSON.parse(execFileSync("gh", ["api", `repos/${process.env.GH_REPO}/pulls/${process.env.PR}`], { encoding: "utf8" }));
-            if (pr.state !== "open" || pr.base.ref !== process.env.EXPECTED_PARENT || pr.head.sha !== process.env.EXPECTED_HEAD || !/^app-harness-os\/\d+\/g\d+$/.test(pr.head.ref)) throw new Error("stale or invalid stack provenance");
+            const expected = pr.base.ref === process.env.EXPECTED_PARENT && pr.head.sha === process.env.EXPECTED_HEAD && /^app-harness-os\/\d+\/g\d+$/.test(pr.head.ref);
+            const alreadyMerged = expected && pr.state === "closed" && Boolean(pr.merged_at) && typeof pr.merge_commit_sha === "string";
+            if (!(expected && (pr.state === "open" || alreadyMerged))) throw new Error("stale or invalid stack provenance");
+            if (alreadyMerged) {
+              fs.appendFileSync(process.env.GITHUB_ENV, "ALREADY_MERGED=true\\n");
+              fs.appendFileSync(process.env.GITHUB_ENV, `MERGED_SHA=${pr.merge_commit_sha}\\n`);
+            }
           '
       - name: Require the supported effective CI profile
         run: test "$CI_PROFILE" = visual
@@ -90,6 +97,7 @@ jobs:
           git diff --check
           node scripts/check-visual-candidate.mjs
       - name: Merge the validated current generation
+        if: env.ALREADY_MERGED != 'true'
         run: |
           cat > /tmp/app-harness-promoting.md <<'EOF'
           Stack promotion started after the current node and stack-tip gates passed.
@@ -100,13 +108,27 @@ jobs:
         run: |
           git fetch origin main
           git checkout --detach origin/main
-          merge_sha="$(gh pr view "$PR" --json mergeCommit --jq '.mergeCommit.oid')"
+          merge_sha="${MERGED_SHA:-$(gh pr view "$PR" --json mergeCommit --jq '.mergeCommit.oid')}"
           test -n "$merge_sha"
-          test "$(git rev-parse HEAD)" = "$merge_sha"
+          if [ "$ALREADY_MERGED" = true ]; then
+            git merge-base --is-ancestor "$merge_sha" HEAD
+          else
+            test "$(git rev-parse HEAD)" = "$merge_sha"
+          fi
       - name: Deploy verified merged main
+        if: env.ALREADY_MERGED != 'true'
         run: npx wrangler deploy
+      - name: Mark the public issue completed
+        run: |
+          gh label create 'status:completed' --color 1f883d --description 'App Harness completed' --force
+          gh issue edit "$ISSUE" --add-label 'status:completed'
       - name: Publish durable completion callback
-        run: node scripts/autonomy-callback.mjs completed "Cloudflare OS stack ${STACK_ID} generation ${GENERATION} validated, merged, and deployed." "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        run: |
+          if [ "$ALREADY_MERGED" = true ]; then
+            node scripts/autonomy-callback.mjs completed "Cloudflare OS stack ${STACK_ID} generation ${GENERATION} reconciled a previously verified merge and deployment." "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          else
+            node scripts/autonomy-callback.mjs completed "Cloudflare OS stack ${STACK_ID} generation ${GENERATION} validated, merged, and deployed." "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          fi
       - name: Publish safe failure callback
         if: failure()
         run: node scripts/autonomy-callback.mjs requires_review "Cloudflare OS stack promotion did not pass immutable provenance, CI, merge, or deployment gates. Review the linked GitHub Actions run; no success is claimed." "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"

@@ -249,6 +249,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		this.ctx.acceptWebSocket(server);
 
 		await this.backfillExternalHandoffs();
+		await this.reconcileClosedGitHubIssues();
 		await this.schedulePendingOsRunner();
 		const [storedMessages, workflow, annotations, workItems] = await Promise.all([
 			this.ctx.storage.get<ChatMessage[]>("messages"),
@@ -731,7 +732,11 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		}
 
 		const workflow = await this.ctx.storage.get<WorkflowRecord>(WORKFLOW_KEY);
-		if (!workflow || workflow.id !== callback.requestId || TERMINAL_PHASES.has(workflow.phase)) return;
+		// A verified promotion may finish after a temporary promotion callback
+		// recorded needs-review. A trusted completion callback can reconcile that
+		// specific recoverable state; every other terminal state stays immutable.
+		const recoverableCompletion = workflow?.phase === "requires_review" && callback.phase === "completed";
+		if (!workflow || workflow.id !== callback.requestId || (TERMINAL_PHASES.has(workflow.phase) && !recoverableCompletion)) return;
 
 		const phase = callback.phase as WorkflowPhase;
 		const now = Date.now();
@@ -822,6 +827,42 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 				this.env.OS_NATIVE_GIT_PROVIDER === "enabled" && workItem.kind !== "draw" ? "os-planning" : workItem.kind !== "draw" && isPolicyApprovedFallbackRequest(workItem.summary) ? "fallback" : "triage",
 			);
 		}
+	}
+
+	/** Reconcile only public terminal labels; GitHub history is never rewritten. */
+	private async reconcileClosedGitHubIssues(): Promise<void> {
+		const workItems = await this.getWorkItems();
+		let changed = false;
+		for (const workItem of workItems) {
+			if (!workItem.githubIssue || ["completed", "rejected", "needs_review"].includes(workItem.phase)) continue;
+			try {
+				const response = await fetch(`https://api.github.com/repos/${this.env.GITHUB_REPOSITORY}/issues/${workItem.githubIssue.number}`, {
+					headers: {
+						Accept: "application/vnd.github+json",
+						Authorization: `Bearer ${this.env.GITHUB_AUTOMATION_TOKEN}`,
+						"User-Agent": "app-harness-autonomy",
+						"X-GitHub-Api-Version": "2022-11-28",
+					},
+				});
+				if (!response.ok) continue;
+				const issue = (await response.json()) as { state?: unknown; labels?: Array<{ name?: unknown }> };
+				if (issue.state !== "closed") continue;
+				const labels = new Set((issue.labels ?? []).map((label) => label.name).filter((label): label is string => typeof label === "string"));
+				if (labels.has("status:completed")) {
+					this.transitionWorkItem(workItem, "completed", `GitHub issue #${workItem.githubIssue.number} is closed with completed status.`);
+					changed = true;
+				} else if (labels.has("status:superseded")) {
+					this.transitionWorkItem(workItem, "rejected", `GitHub issue #${workItem.githubIssue.number} is closed as superseded.`);
+					changed = true;
+				} else if (labels.has("status:needs-review")) {
+					this.transitionWorkItem(workItem, "needs_review", `GitHub issue #${workItem.githubIssue.number} is closed pending human review.`);
+					changed = true;
+				}
+			} catch {
+				// A transient GitHub read does not change the durable room record.
+			}
+		}
+		if (changed) await this.saveWorkItems(workItems);
 	}
 
 	private async ensureGitHubIssue(workItemId: string, policyApproved: boolean, backfill: boolean, handoff: "os-planning" | "fallback" | "triage" = policyApproved ? "fallback" : "triage"): Promise<boolean> {
