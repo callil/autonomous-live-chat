@@ -45,7 +45,7 @@ The durable ledger and runner contract model dependent nodes, but the current tr
 
 ## Data boundaries
 
-The demo retains the latest 200 chat messages to bound snapshots and room storage. Agent memory is separate: Cloudflare OS conversation, durable work items, GitHub issues/PRs, commits, and repository docs preserve the implementation history.
+The demo does not invent character-count or record-count product limits. Messages, annotations, and work items use individual Durable Object records so history is not silently discarded to protect one oversized array value. Cloudflare's documented storage and WebSocket limits remain the actual runtime boundary. Agent memory is separate: Cloudflare OS conversation, durable work items, GitHub issues/PRs, commits, and repository docs preserve the implementation history.
 
 Target envelopes contain stable IDs, tag/role, an explicit safe label or marked static text, same-origin path, and viewport rectangle. They do not contain form values, message bodies, query strings, credentials, or arbitrary DOM serialization.
 

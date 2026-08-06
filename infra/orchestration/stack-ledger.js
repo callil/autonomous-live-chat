@@ -96,7 +96,7 @@ export function createStackLedger(input) {
 		const prefix = branchPrefix(node.branchPrefix, "Node branch prefix");
 		if (ids.has(nodeId)) throw new Error("Stack node IDs must be unique.");
 		if (prefixes.has(prefix)) throw new Error("Stack branch prefixes must be unique.");
-		if (typeof node.intent !== "string" || !node.intent.trim() || node.intent.length > 280) throw new Error("Each stack node needs a bounded intent.");
+		if (typeof node.intent !== "string" || !node.intent.trim()) throw new Error("Each stack node needs an intent.");
 		ids.add(nodeId);
 		prefixes.add(prefix);
 		return {

@@ -78,7 +78,7 @@ function safeCandidate(input: unknown): CandidatePlan | null {
 	if (!change || typeof change !== "object" || !stack || typeof stack !== "object") return null;
 	const rawChange = change as Record<string, unknown>;
 	const rawStack = stack as Record<string, unknown>;
-	if (rawChange.kind !== "repository-task" || typeof rawChange.request !== "string" || !rawChange.request.trim() || rawChange.request.length > 500) return null;
+	if (rawChange.kind !== "repository-task" || typeof rawChange.request !== "string" || !rawChange.request.trim()) return null;
 	const stackId = typeof rawStack.stackId === "string" && JOB_ID.test(rawStack.stackId) ? rawStack.stackId : null;
 	const nodeId = typeof rawStack.nodeId === "string" && JOB_ID.test(rawStack.nodeId) ? rawStack.nodeId : null;
 	const branch = safeBranch(rawStack.branch);

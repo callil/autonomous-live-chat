@@ -22,7 +22,7 @@ function safeIssue(issue) {
 }
 
 function safeRequest(value) {
-	if (typeof value !== "string" || !value.trim() || value.length > 500) throw new Error("OS work needs a bounded durable request.");
+	if (typeof value !== "string" || !value.trim()) throw new Error("OS work needs a durable request.");
 	return value.trim();
 }
 

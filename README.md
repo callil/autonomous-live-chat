@@ -45,6 +45,6 @@ Infrastructure services have separate, explicit deployment workflows. Ordinary a
 
 ## What persists where
 
-The room stores the latest 200 chat messages as a bounded product transcript. That is not the coding agent's memory limit. Repository intent and progress remain in the Durable Object work ledger, Cloudflare OS workspace, GitHub issues and pull requests, commits, and checked-in documentation.
+The room does not impose product-level character or history-count caps. Messages and collaboration records are stored as individual Durable Object records rather than silently dropping older entries from a fixed-size array. Repository intent and progress remain in the Durable Object work ledger, Cloudflare OS workspace, GitHub issues and pull requests, commits, and checked-in documentation.
 
 The end-to-end path, trust boundaries, stack behavior, and current limitations are described in [the architecture guide](./docs/architecture.md).

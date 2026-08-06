@@ -207,21 +207,18 @@ type OsWorkspaceResponseRestoreParams = { type: "os-workspace-response"; workIte
 type OsExecutionBridgeProps = { source: string };
 type OsExecutionRequest = { workItemId: string; issueNumber: number };
 
-const MAX_MESSAGE_LENGTH = 500;
-const MAX_REQUEST_LENGTH = 500;
-const MAX_STORED_MESSAGES = 200;
-const MAX_STORED_ANNOTATIONS = 100;
 // Kept only as the public "latest workflow" compatibility snapshot. Admission,
 // callbacks, leases, and retries are keyed by workflow/work item below.
 const WORKFLOW_KEY = "workflow";
 const WORKFLOW_PREFIX = "workflow:";
+const MESSAGE_PREFIX = "message:";
+const ANNOTATION_PREFIX = "annotation:";
 const JOB_PREFIX = "coordinator-job:";
 const OUTBOX_PREFIX = "coordinator-outbox:";
 const LEDGER_PREFIX = "stack-ledger:";
 const WORK_ITEM_PREFIX = "harness-work-item:";
 const ANNOTATIONS_KEY = "harness-annotations";
 const WORK_ITEMS_KEY = "harness-work-items";
-const MAX_STORED_WORK_ITEMS = 100;
 const COORDINATOR_LEASE_MS = 180_000;
 const OS_RUNNER_LEASE_MS = 780_000;
 const COORDINATOR_MAX_ATTEMPTS = 3;
@@ -330,18 +327,20 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		const [client, server] = Object.values(pair);
 		this.ctx.acceptWebSocket(server);
 
-		const [storedMessages, workflow, annotations, workItems] = await Promise.all([
-			this.ctx.storage.get<ChatMessage[]>("messages"),
+		let [messages, workflow, annotations, workItems] = await Promise.all([
+			this.getMessages(),
 			this.latestWorkflow(),
-			this.ctx.storage.get<HarnessAnnotation[]>(ANNOTATIONS_KEY),
-			this.ctx.storage.get<HarnessWorkItem[]>(WORK_ITEMS_KEY),
+			this.getAnnotations(),
+			this.getWorkItems(),
 		]);
-		const messages = storedMessages ?? seededMessages();
-		if (!storedMessages) await this.ctx.storage.put("messages", messages);
-		server.send(JSON.stringify({ type: "chat:snapshot", messages: messages ?? [] }));
+		if (!messages.length) {
+			messages = seededMessages();
+			await Promise.all(messages.map((message) => this.ctx.storage.put(this.messageKey(message.id), message)));
+		}
+		server.send(JSON.stringify({ type: "chat:snapshot", messages }));
 		server.send(JSON.stringify({ type: "workflow:snapshot", workflow: workflow ?? null }));
-		server.send(JSON.stringify({ type: "harness:annotations", annotations: annotations ?? [] }));
-		server.send(JSON.stringify({ type: "harness:work-items", workItems: workItems ?? [] }));
+		server.send(JSON.stringify({ type: "harness:annotations", annotations }));
+		server.send(JSON.stringify({ type: "harness:work-items", workItems }));
 		this.broadcastPresence();
 
 		return new Response(null, { status: 101, webSocket: client });
@@ -361,7 +360,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 	/** Record the final agent response delivered by the persistent OS workspace. */
 	async receiveOsWorkspaceResponse(workItemId: string, response: OsWorkspaceResponse): Promise<void> {
 		if (!isUuid(workItemId) || !response || typeof response.text !== "string") return;
-		const text = response.text.trim().replace(/\s+/gu, " ").slice(0, 500);
+		const text = response.text.trim().replace(/\s+/gu, " ");
 		if (!text) return;
 		const workItem = await this.getWorkItem(workItemId);
 		if (!workItem?.workflowId) return;
@@ -379,7 +378,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		const status = delegated
 			? `Cloudflare OS workspace: ${text}`
 			: `Cloudflare OS assessment: ${text} Repository execution may still be awaiting approval.`;
-		workflow.activity.push({ phase: workflow.phase, message: status.slice(0, 280), at: now });
+		workflow.activity.push({ phase: workflow.phase, message: status, at: now });
 		this.transitionWorkItem(workItem, workItem.phase, status);
 		await this.ctx.storage.transaction(async (txn) => {
 			await Promise.all([
@@ -508,7 +507,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 
 	private async sendChat(event: Extract<ClientEvent, { type: "chat:send" }>): Promise<void> {
 		const text = typeof event.text === "string" ? event.text.trim() : "";
-		if (!text || text.length > MAX_MESSAGE_LENGTH) return;
+		if (!text) return;
 
 		const message: ChatMessage = {
 			id: crypto.randomUUID(),
@@ -517,9 +516,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 			createdAt: Date.now(),
 		};
 
-		const messages = (await this.ctx.storage.get<ChatMessage[]>("messages")) ?? [];
-		messages.push(message);
-		await this.ctx.storage.put("messages", messages.slice(-MAX_STORED_MESSAGES));
+		await this.ctx.storage.put(this.messageKey(message.id), message);
 		this.broadcast({ type: "chat:message", message });
 	}
 
@@ -545,17 +542,11 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 			now,
 		});
 		annotation.workItemId = workItem.id;
-		const annotations = (await this.ctx.storage.get<HarnessAnnotation[]>(ANNOTATIONS_KEY)) ?? [];
-		annotations.push(annotation);
-		const stored = annotations.slice(-MAX_STORED_ANNOTATIONS);
-		const workItems = await this.getWorkItems();
-		workItems.unshift(workItem);
 		await Promise.all([
-			this.ctx.storage.put(ANNOTATIONS_KEY, stored),
-			this.ctx.storage.put(WORK_ITEMS_KEY, workItems.slice(0, MAX_STORED_WORK_ITEMS)),
+			this.ctx.storage.put(this.annotationKey(annotation.id), annotation),
+			this.saveWorkItems([workItem]),
 		]);
-		this.broadcast({ type: "harness:annotations", annotations: stored });
-		this.broadcastWorkItems(workItems);
+		this.broadcast({ type: "harness:annotations", annotations: await this.getAnnotations() });
 
 		if (canSubmitComment && annotation.kind === "comment") {
 			await this.startWorkflow(socket, annotation.text, annotation.target, workItem.clientSubmissionId, workItem.id);
@@ -570,18 +561,16 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 			return;
 		}
 
-		const annotations = (await this.ctx.storage.get<HarnessAnnotation[]>(ANNOTATIONS_KEY)) ?? [];
-		const stored = annotations.filter((annotation) => annotation.id !== annotationId);
-		if (stored.length === annotations.length) return;
-		await this.ctx.storage.put(ANNOTATIONS_KEY, stored);
+		if (!(await this.ctx.storage.get(this.annotationKey(annotationId)))) return;
+		await this.ctx.storage.delete(this.annotationKey(annotationId));
 		this.broadcast({ type: "harness:annotation:deleted", annotationId });
-		this.broadcast({ type: "harness:annotations", annotations: stored });
+		this.broadcast({ type: "harness:annotations", annotations: await this.getAnnotations() });
 	}
 
 	private async clearHarnessAnnotations(): Promise<void> {
-		const annotations = (await this.ctx.storage.get<HarnessAnnotation[]>(ANNOTATIONS_KEY)) ?? [];
-		if (!annotations.length) return;
-		await this.ctx.storage.put(ANNOTATIONS_KEY, []);
+		const keys = [...(await this.ctx.storage.list({ prefix: ANNOTATION_PREFIX })).keys()];
+		if (!keys.length) return;
+		await this.ctx.storage.delete(keys);
 		this.broadcast({ type: "harness:annotations:cleared" });
 		this.broadcast({ type: "harness:annotations", annotations: [] });
 	}
@@ -595,7 +584,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 	): Promise<void> {
 		const request = normalizeRequest(input);
 		if (!request) {
-			socket.send(JSON.stringify({ type: "workflow:notice", message: "Describe a change in 500 characters or fewer." }));
+			socket.send(JSON.stringify({ type: "workflow:notice", message: "Describe the change before submitting." }));
 			return;
 		}
 
@@ -672,6 +661,8 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 	private outboxKey(id: string): string { return `${OUTBOX_PREFIX}${id}`; }
 	private ledgerKey(workItemId: string): string { return `${LEDGER_PREFIX}${workItemId}`; }
 	private workItemKey(id: string): string { return `${WORK_ITEM_PREFIX}${id}`; }
+	private messageKey(id: string): string { return `${MESSAGE_PREFIX}${id}`; }
+	private annotationKey(id: string): string { return `${ANNOTATION_PREFIX}${id}`; }
 	private effectId(workflowId: string, kind: string, suffix = "main"): string { return `${workflowId}-${kind}-${suffix}`; }
 
 	private async drainCoordinatorOutbox(limit: number): Promise<void> {
@@ -1021,8 +1012,8 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		const now = Date.now();
 		workflow.phase = phase;
 		workflow.updatedAt = now;
-		workflow.result = message.slice(0, 500);
-		workflow.activity.push({ phase, message: message.slice(0, 280), at: now });
+		workflow.result = message;
+		workflow.activity.push({ phase, message, at: now });
 		this.transitionWorkItem(workItem, workItemPhaseFor(phase), message);
 		const blocked = ledger ? blockCoordinatorStack(ledger) : undefined;
 		const didComplete = await this.ctx.storage.transaction(async (txn) => {
@@ -1048,7 +1039,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 	}
 
 	private async retryClaim(claim: CoordinatorClaim, error: unknown): Promise<void> {
-		const message = error instanceof Error ? error.message.slice(0, 180) : "unknown coordinator error";
+		const message = error instanceof Error ? error.message : "unknown coordinator error";
 		const terminal = claim.effect.attempts >= COORDINATOR_MAX_ATTEMPTS;
 		const terminalWork = terminal && claim.effect.blocking;
 		const now = Date.now();
@@ -1076,7 +1067,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 					workflow.result = detail;
 				}
 				workflow.updatedAt = now;
-				workflow.activity.push({ phase: workflow.phase, message: detail.slice(0, 280), at: now });
+				workflow.activity.push({ phase: workflow.phase, message: detail, at: now });
 				this.transitionWorkItem(workItem, terminalWork ? "needs_review" : workItem.phase, detail);
 				changedWorkflow = workflow;
 				changedWorkItem = workItem;
@@ -1120,7 +1111,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 	 * new runs use the normal in-band restack and enqueue/poll paths above.
 	 */
 	private async recoverAutoRestackStops(): Promise<void> {
-		const workItems = (await this.ctx.storage.get<HarnessWorkItem[]>(WORK_ITEMS_KEY)) ?? [];
+		const workItems = await this.getWorkItems();
 		for (const stored of workItems) {
 			const last = stored.activity.at(-1);
 			if (stored.phase !== "needs_review" || ![AUTO_RESTACK_MESSAGE, LEGACY_RUNNER_RPC_MESSAGE].includes(last?.message ?? "") || !stored.workflowId || !stored.githubIssue || !stored.osNativeGit?.workspace) continue;
@@ -1189,7 +1180,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 	 */
 	private async recoverDurablePollTokenStops(): Promise<void> {
 		if (!this.env.OS_NATIVE_GIT_RUNNER) return;
-		const workItems = (await this.ctx.storage.get<HarnessWorkItem[]>(WORK_ITEMS_KEY)) ?? [];
+		const workItems = await this.getWorkItems();
 		for (const stored of workItems) {
 			if (stored.phase !== "needs_review" || stored.activity.at(-1)?.message !== DURABLE_POLL_TOKEN_MESSAGE || !stored.workflowId || !stored.githubIssue || !stored.osNativeGit?.workspace) continue;
 			const issueResponse = await fetch(`https://api.github.com/repos/${this.env.GITHUB_REPOSITORY}/issues/${stored.githubIssue.number}`, {
@@ -1308,7 +1299,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		if (!job) return;
 
 		let phase = callback.phase as WorkflowPhase;
-		let message = callback.message.slice(0, 280);
+		let message = callback.message;
 		let ledger = await this.ctx.storage.get<StackLedger>(this.ledgerKey(workItem.id));
 		let deploymentUrl = typeof callback.deploymentUrl === "string" && /^https:\/\/[^\s]+$/u.test(callback.deploymentUrl) ? callback.deploymentUrl : undefined;
 		const runId = typeof callback.runId === "number" && Number.isSafeInteger(callback.runId) ? String(callback.runId) : typeof callback.runId === "string" && /^[A-Za-z0-9_-]{1,120}$/u.test(callback.runId) ? callback.runId : undefined;
@@ -1341,7 +1332,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		workflow.phase = phase;
 		workflow.updatedAt = now;
 		workflow.activity.push({ phase, message, at: now });
-		if (typeof callback.result === "string") workflow.result = callback.result.slice(0, 500);
+		if (typeof callback.result === "string") workflow.result = callback.result;
 		this.transitionWorkItem(workItem, workItemPhaseFor(phase), message);
 		if (typeof callback.result === "string" && /^https:\/\/github\.com\/[^/]+\/[^/]+\/pull\/\d+$/iu.test(callback.result)) workItem.githubPullRequestUrl = callback.result;
 		if (TERMINAL_PHASES.has(phase) && phase !== "completed" && ledger) ledger = blockCoordinatorStack(ledger);
@@ -1395,7 +1386,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		const now = Date.now();
 		workItem.phase = phase;
 		workItem.updatedAt = now;
-		workItem.activity.push({ phase, message: message.slice(0, 280), at: now });
+		workItem.activity.push({ phase, message, at: now });
 	}
 
 	private async getWorkItems(): Promise<HarnessWorkItem[]> {
@@ -1403,19 +1394,25 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		const individual = [...(await this.ctx.storage.list<HarnessWorkItem>({ prefix: WORK_ITEM_PREFIX })).values()];
 		const merged = new Map(projection.map((item) => [item.id, item]));
 		for (const item of individual) merged.set(item.id, item);
-		return [...merged.values()].sort((left, right) => right.createdAt - left.createdAt).slice(0, MAX_STORED_WORK_ITEMS);
+		return [...merged.values()].sort((left, right) => right.createdAt - left.createdAt);
+	}
+
+	private async getMessages(): Promise<ChatMessage[]> {
+		return [...(await this.ctx.storage.list<ChatMessage>({ prefix: MESSAGE_PREFIX })).values()]
+			.sort((left, right) => left.createdAt - right.createdAt);
+	}
+
+	private async getAnnotations(): Promise<HarnessAnnotation[]> {
+		return [...(await this.ctx.storage.list<HarnessAnnotation>({ prefix: ANNOTATION_PREFIX })).values()]
+			.sort((left, right) => left.createdAt - right.createdAt);
 	}
 
 	private async saveWorkItems(workItems: HarnessWorkItem[]): Promise<void> {
-		const current = (await this.ctx.storage.get<HarnessWorkItem[]>(WORK_ITEMS_KEY)) ?? [];
+		const current = await this.getWorkItems();
 		const merged = new Map(current.map((item) => [item.id, item]));
 		for (const item of workItems) merged.set(item.id, item);
-		const stored = [...merged.values()].sort((left, right) => right.createdAt - left.createdAt).slice(0, MAX_STORED_WORK_ITEMS);
-		await Promise.all([
-			this.ctx.storage.put(WORK_ITEMS_KEY, stored),
-			...workItems.map((item) => this.ctx.storage.put(this.workItemKey(item.id), item)),
-		]);
-		this.broadcastWorkItems(stored);
+		await Promise.all(workItems.map((item) => this.ctx.storage.put(this.workItemKey(item.id), item)));
+		this.broadcastWorkItems([...merged.values()].sort((left, right) => right.createdAt - left.createdAt));
 	}
 
 	private async saveWorkItem(workItem: HarnessWorkItem): Promise<void> {
@@ -1454,15 +1451,24 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 	}
 
 	private async migrateLegacyRecords(): Promise<void> {
-		const [items, workflow] = await Promise.all([
+		const [items, workflow, messages, annotations] = await Promise.all([
 			this.ctx.storage.get<HarnessWorkItem[]>(WORK_ITEMS_KEY),
 			this.ctx.storage.get<WorkflowRecord>(WORKFLOW_KEY),
+			this.ctx.storage.get<ChatMessage[]>("messages"),
+			this.ctx.storage.get<HarnessAnnotation[]>(ANNOTATIONS_KEY),
 		]);
 		await Promise.all([
 			...(items ?? []).map(async (item) => {
 				if (!(await this.ctx.storage.get(this.workItemKey(item.id)))) await this.ctx.storage.put(this.workItemKey(item.id), item);
 			}),
 			...(workflow && !(await this.ctx.storage.get(this.workflowKey(workflow.id))) ? [this.ctx.storage.put(this.workflowKey(workflow.id), workflow)] : []),
+			...(messages ?? []).map((message) => this.ctx.storage.put(this.messageKey(message.id), message)),
+			...(annotations ?? []).map((annotation) => this.ctx.storage.put(this.annotationKey(annotation.id), annotation)),
+		]);
+		await Promise.all([
+			...(items ? [this.ctx.storage.delete(WORK_ITEMS_KEY)] : []),
+			...(messages ? [this.ctx.storage.delete("messages")] : []),
+			...(annotations ? [this.ctx.storage.delete(ANNOTATIONS_KEY)] : []),
 		]);
 	}
 
@@ -1569,7 +1575,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 			targetDetails,
 		].filter(Boolean).join("\n");
 		return createGithubIdentityClient(this.env, { workItemId: workItem.id }).createIssue({
-			title: `App Harness: ${workItem.summary.slice(0, 90)}`,
+			title: `App Harness: ${workItem.target?.targetId ?? workItem.kind}`,
 			body,
 			classification: handoff === "triage" ? "triage" : "agent",
 		});
@@ -1600,7 +1606,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 	}
 
 	private broadcastWorkItems(workItems: HarnessWorkItem[]): void {
-		this.broadcast({ type: "harness:work-items", workItems: workItems.slice(0, MAX_STORED_WORK_ITEMS) });
+		this.broadcast({ type: "harness:work-items", workItems });
 	}
 
 	private broadcastPresence(): void {
@@ -1614,7 +1620,7 @@ function githubPhaseLabel(phase: WorkItemPhase): string {
 }
 
 function formatGithubStatus(workItem: HarnessWorkItem, message: string, result?: string): string {
-	const progress = workItem.activity.slice(-6).map((event) => {
+	const progress = workItem.activity.map((event) => {
 		const marker = event.phase === "completed" ? "✅" : event.phase === "rejected" || event.phase === "needs_review" ? "⚠️" : event === workItem.activity.at(-1) ? "▶️" : "✓";
 		return `- ${marker} **${githubPhaseLabel(event.phase)}** — ${event.message}`;
 	});
@@ -1642,12 +1648,12 @@ function formatGithubStatus(workItem: HarnessWorkItem, message: string, result?:
 		...progress,
 		"",
 		`<sub>Updated ${new Date(workItem.updatedAt).toISOString()}. This comment is updated in place by the App Harness GitHub App.</sub>`,
-	].join("\n").slice(0, 5_900);
+	].join("\n");
 }
 
 function normalizeAuthor(value: unknown): string {
 	if (typeof value !== "string") return "Guest";
-	const author = value.trim().replace(/\s+/g, " ").slice(0, 32);
+	const author = value.trim().replace(/\s+/g, " ");
 	return author || "Guest";
 }
 
@@ -1691,7 +1697,7 @@ function isUuid(value: string): boolean {
 function normalizeRequest(value: unknown): string | null {
 	if (typeof value !== "string") return null;
 	const request = value.trim().replace(/\s+/g, " ");
-	return request && request.length <= MAX_REQUEST_LENGTH ? request : null;
+	return request || null;
 }
 
 function normalizeSubmissionId(value: unknown): string | undefined {
@@ -1779,11 +1785,11 @@ function normalizeAnnotation(value: unknown): HarnessAnnotation | null {
 function normalizeAnnotationText(value: unknown): string | null {
 	if (typeof value !== "string") return null;
 	const text = value.trim().replace(/\s+/g, " ");
-	return text && text.length <= MAX_REQUEST_LENGTH ? text : null;
+	return text || null;
 }
 
 function normalizeDrawingPoints(value: unknown): DrawingPoint[] | null {
-	if (!Array.isArray(value) || value.length < 2 || value.length > 240) return null;
+	if (!Array.isArray(value) || value.length < 2) return null;
 	const points: DrawingPoint[] = [];
 	for (const rawPoint of value) {
 		if (!rawPoint || typeof rawPoint !== "object") return null;

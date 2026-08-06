@@ -177,8 +177,8 @@ function validIssueNumber(value: string | undefined): number | null {
 	return Number.isSafeInteger(number) ? number : null;
 }
 
-function readText(value: unknown, maximum: number): string | null {
-	if (typeof value !== "string" || !value || value.length > maximum || !SAFE_ISSUE_TEXT.test(value)) return null;
+function readText(value: unknown): string | null {
+	if (typeof value !== "string" || !value || !SAFE_ISSUE_TEXT.test(value)) return null;
 	return value;
 }
 
@@ -299,8 +299,8 @@ async function handleIssueBridge(request: Request, env: Env, url: URL): Promise<
 	const eventId = readEventId(input.eventId);
 	if (!eventId) return new Response("Not found", { status: 404 });
 	if (create) {
-		const title = readText(input.title, 140);
-		const body = readText(input.body, 8_000);
+		const title = readText(input.title);
+		const body = readText(input.body);
 		const classification = readClassification(input.classification);
 		if (!title || !body || !classification) return new Response("Not found", { status: 404 });
 		const token = await installationToken(env);
@@ -322,7 +322,7 @@ async function handleIssueBridge(request: Request, env: Env, url: URL): Promise<
 		return result.ok ? json({ issueNumber, classification, modelClassification: Boolean(modelClassification) }) : new Response("GitHub write unavailable", { status: 503 });
 	}
 	if (statusPath) {
-		const body = readText(input.body, 6_000);
+		const body = readText(input.body);
 		if (!body) return new Response("Not found", { status: 404 });
 		const token = await installationToken(env);
 		const result = await upsertStatusComment(env, token, issueNumber, eventId, body);
@@ -330,7 +330,7 @@ async function handleIssueBridge(request: Request, env: Env, url: URL): Promise<
 	}
 	if (closePath) {
 		const deploymentUrl = productionUrl(env, input.deploymentUrl);
-		const body = readText(input.body, 4_000);
+		const body = readText(input.body);
 		if (!deploymentUrl || !body) return new Response("Not found", { status: 404 });
 		const live = await fetch(deploymentUrl, { method: "GET", redirect: "follow", headers: { "user-agent": "app-harness-os-git-proxy-verifier" } });
 		if (!live.ok) return new Response("Deployment verification unavailable", { status: 503 });

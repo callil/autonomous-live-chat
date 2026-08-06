@@ -407,15 +407,6 @@ textarea::placeholder {
   font-size: var(--type-caption);
 }
 
-.message-count {
-  flex: 0 0 auto;
-  font-family: var(--font-mono);
-}
-
-.message-count.warning {
-  color: var(--color-warning);
-}
-
 /* App Harness is a removable layer above the host, never host navigation. */
 .harness-frame {
   position: fixed;
