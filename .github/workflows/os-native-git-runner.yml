@@ -63,3 +63,13 @@ jobs:
             --request POST \
             --header "Authorization: Bearer ${APP_HARNESS_RUNNER_SECRET}" \
             https://app-harness-os-native-git.coda-a.workers.dev/v1/probe
+
+      - name: Verify repository-scoped native checkout
+        if: inputs.verify_sandbox
+        run: |
+          curl --fail --silent --show-error \
+            --request POST \
+            --header "Authorization: Bearer ${APP_HARNESS_RUNNER_SECRET}" \
+            --header "Content-Type: application/json" \
+            --data '{"jobId":"bridge-verification-g1","repository":"callil/autonomous-live-chat","generation":1}' \
+            https://app-harness-os-native-git.coda-a.workers.dev/v1/native-git/jobs

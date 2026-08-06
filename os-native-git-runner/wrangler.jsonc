@@ -8,7 +8,7 @@
   "vars": {
     "ALLOWED_REPOSITORY": "callil/autonomous-live-chat",
     "GIT_PROXY_ORIGIN": "https://app-harness-os-git-proxy.coda-a.workers.dev",
-    "NATIVE_GIT_ENABLED": "false"
+    "NATIVE_GIT_ENABLED": "true"
   },
   "containers": [
     {
