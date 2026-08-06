@@ -42,7 +42,9 @@ const ISSUE_LABELS_PATH = /^\/v1\/issues\/(\d+)\/classification$/;
 const ISSUE_STATUS_PATH = /^\/v1\/issues\/(\d+)\/status$/;
 const ISSUE_CLOSE_PATH = /^\/v1\/issues\/(\d+)\/close-after-deployment$/;
 const EVENT_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/;
-const SAFE_ISSUE_TITLE = /^[\p{L}\p{N}\p{P}\p{Z}\n\r\t]+$/u;
+// GitHub issue bodies are Markdown. Reject non-text control bytes while allowing
+// ordinary Markdown syntax (`code`, selectors with `=`, emoji, links, etc.).
+const SAFE_ISSUE_TEXT = /^[^\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]+$/u;
 const CLASSIFICATION_LABELS: Readonly<Record<Classification, readonly string[]>> = {
 	triage: ["app-harness", "triage"],
 	agent: ["app-harness", "agent"],
@@ -176,7 +178,7 @@ function validIssueNumber(value: string | undefined): number | null {
 }
 
 function readText(value: unknown, maximum: number): string | null {
-	if (typeof value !== "string" || !value || value.length > maximum || !SAFE_ISSUE_TITLE.test(value)) return null;
+	if (typeof value !== "string" || !value || value.length > maximum || !SAFE_ISSUE_TEXT.test(value)) return null;
 	return value;
 }
 
