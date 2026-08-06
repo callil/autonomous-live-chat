@@ -30,6 +30,8 @@ From there deterministic code owns the state machine: observe the current base, 
 
 NanoCodex 0.3 is an ephemeral coding child, not the central orchestrator. Ordinary work defaults to `gpt-5.6-luna` with low reasoning; web search is disabled unless a later explicit policy adds a researched task path. Built-in read-only subagents are enabled for parallel inspection, review, and test diagnosis. The parent child-agent alone edits and owns Git and GitHub stack operations. GPT-5.6 Sol is reserved for an explicit escalation rather than paid on every request.
 
+Cloudflare may restart a Sandbox during a runtime rollout. A disappeared process, the known rollout signal, an upstream 5xx, or an empty runner response is treated as infrastructure interruption: the durable coordinator releases the attempt lease and retries up to three times. A structured NanoCodex implementation, validation, or policy failure is not retried blindly and instead moves the work item to review.
+
 The child receives the full checkout and normal engineering tools. Its output wrapper retains only bounded provenance (model, response IDs, tool names) plus independently verified Git/GitHub artifacts. Transcripts, tool arguments, diffs, credentials, and shell output are not copied into the public ledger.
 
 ## Truth boundary
