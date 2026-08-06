@@ -207,7 +207,7 @@ type OsWorkspaceResponseRestoreParams = { type: "os-workspace-response"; workIte
 type OsExecutionBridgeProps = { source: string };
 type OsExecutionRequest = { workItemId: string; issueNumber: number };
 
-const MAX_MESSAGE_LENGTH = 2_000;
+const MAX_MESSAGE_LENGTH = 500;
 const MAX_REQUEST_LENGTH = 500;
 const MAX_STORED_MESSAGES = 200;
 const MAX_STORED_ANNOTATIONS = 100;
