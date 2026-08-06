@@ -77,10 +77,15 @@ jobs:
             attempt=$((attempt + 1))
           done
           echo "validate-node did not register for the immutable candidate head"; exit 1
-      - uses: actions/checkout@v4
-        with:
-          ref: refs/pull/${{ inputs.pull_request }}/merge
-          fetch-depth: 0
+      - name: Check out the immutable stack tip
+        run: |
+          if [ "$ALREADY_MERGED" = true ]; then
+            git fetch origin main
+            git checkout --detach "$MERGED_SHA"
+          else
+            git fetch origin "pull/${PR}/merge:refs/remotes/origin/app-harness-os-merge-${PR}"
+            git checkout --detach "origin/app-harness-os-merge-${PR}"
+          fi
       - uses: actions/setup-node@v4
         with:
           node-version: 22
