@@ -8,8 +8,6 @@ const STACK_BRANCH = /^app-harness-os\/(\d+)\/g(\d+)$/u;
 const APP_LOGIN = "app-harness-native-git-callil[bot]";
 const STATUS_PREFIX = "app-harness-os/validate-node/pr-";
 const WORKFLOW_PATH = ".github/workflows/os-stack-ci.yml";
-const ACCENT = /--accent:\s*(#[0-9a-f]{3}(?:[0-9a-f]{3})?|#[0-9a-f]{4}(?:[0-9a-f]{4})?)\s*;/iu;
-const ALLOWED_ACCENTS = new Set(["#3478f6", "#10a37f", "#8b5cf6", "#ef7d32"]);
 
 function required(name) {
 	const value = process.env[name];
@@ -38,7 +36,7 @@ function lineValue(body, pattern, label) {
 	return match[1];
 }
 
-export function validatePullRequest(pr, commit, files, options) {
+export function validatePullRequest(pr, commit, files, options, comparison) {
 	if (!pr || typeof pr !== "object") throw new Error("Pull request response is invalid.");
 	const head = pr.head;
 	const base = pr.base;
@@ -60,8 +58,9 @@ export function validatePullRequest(pr, commit, files, options) {
 	const open = pr.state === "open";
 	const merged = options.allowMerged && pr.state === "closed" && Boolean(pr.merged_at) && SHA.test(pr.merge_commit_sha ?? "");
 	if (!open && !merged) throw new Error("Candidate pull request is not open or an allowed completed merge.");
-	if (!commit || commit.sha?.toLowerCase() !== headSha || commit.parents?.length !== 1 || commit.parents[0]?.sha?.toLowerCase() !== baseSha) {
-		throw new Error("Candidate must be one immutable commit directly on its recorded base.");
+	if (!commit || commit.sha?.toLowerCase() !== headSha || !commit.parents?.length) throw new Error("Candidate head commit provenance is invalid.");
+	if (!comparison || comparison.base_commit?.sha?.toLowerCase() !== baseSha || comparison.merge_base_commit?.sha?.toLowerCase() !== baseSha || comparison.status !== "ahead" || !Number.isInteger(comparison.ahead_by) || comparison.ahead_by < 1) {
+		throw new Error("Candidate must be an immutable non-empty history based on its recorded parent.");
 	}
 	validateCandidateFiles(files);
 
@@ -85,25 +84,15 @@ export function validatePullRequest(pr, commit, files, options) {
 }
 
 export function validateCandidateFiles(files) {
-	if (!Array.isArray(files) || files.length !== 1) throw new Error("Visual candidates must change exactly one file.");
-	const file = files[0];
-	if (file.filename !== "public/index.html" || file.status !== "modified" || file.additions !== 1 || file.deletions !== 1 || file.changes !== 2) {
-		throw new Error("Visual candidates may only replace one line in public/index.html.");
+	if (!Array.isArray(files) || files.length < 1 || files.length > 100) throw new Error("Candidate file provenance is empty or incomplete.");
+	const seen = new Set();
+	for (const file of files) {
+		if (!file || typeof file.filename !== "string" || !file.filename || file.filename.startsWith("/") || file.filename.includes("\0") || file.filename.split("/").includes("..") || file.filename === ".git" || file.filename.startsWith(".git/")) throw new Error("Candidate contains an unsafe repository path.");
+		if (seen.has(file.filename)) throw new Error("Candidate file provenance contains duplicate paths.");
+		seen.add(file.filename);
+		if (!new Set(["added", "modified", "removed", "renamed", "copied", "changed", "unchanged"]).has(file.status)) throw new Error("Candidate file status is invalid.");
+		for (const field of ["additions", "deletions", "changes"]) if (!Number.isInteger(file[field]) || file[field] < 0) throw new Error("Candidate change counts are invalid.");
 	}
-	if (typeof file.patch !== "string") throw new Error("GitHub did not provide a complete candidate patch.");
-	const changed = file.patch.split("\n").filter((line) => (line.startsWith("+") && !line.startsWith("+++")) || (line.startsWith("-") && !line.startsWith("---")));
-	const removed = changed.filter((line) => line.startsWith("-"));
-	const added = changed.filter((line) => line.startsWith("+"));
-	if (removed.length !== 1 || added.length !== 1) throw new Error("Candidate patch must contain one removed and one added line.");
-	const oldAccent = removed[0].match(ACCENT);
-	const newAccent = added[0].match(ACCENT);
-	if (!oldAccent || !newAccent) throw new Error("Candidate patch must replace the accent declaration.");
-	if (!ALLOWED_ACCENTS.has(oldAccent[1].toLowerCase()) || !ALLOWED_ACCENTS.has(newAccent[1].toLowerCase()) || oldAccent[1].toLowerCase() === newAccent[1].toLowerCase()) {
-		throw new Error("Candidate accent transition is outside the allowlist.");
-	}
-	const before = removed[0].slice(1).replace(ACCENT, "--accent: <validated>;");
-	const after = added[0].slice(1).replace(ACCENT, "--accent: <validated>;");
-	if (before !== after) throw new Error("Candidate line changes content beyond the accent value.");
 }
 
 function evidenceMessage({ repo, pullRequest, headSha, baseSha, runId, state }) {
@@ -171,11 +160,16 @@ async function verifyPullRequestCommand() {
 	const repo = repository(required("GH_REPO"));
 	const pullRequest = integer(required("PR"), "PR");
 	const expectedHead = process.env.EXPECTED_HEAD ? exactSha(process.env.EXPECTED_HEAD, "EXPECTED_HEAD") : undefined;
-	const [pr, files] = await Promise.all([
+	const [pr, files, extraFiles] = await Promise.all([
 		api(`repos/${repo}/pulls/${pullRequest}`),
-		api(`repos/${repo}/pulls/${pullRequest}/files?per_page=100`),
+		api(`repos/${repo}/pulls/${pullRequest}/files?per_page=100&page=1`),
+		api(`repos/${repo}/pulls/${pullRequest}/files?per_page=100&page=2`),
 	]);
-	const commit = await api(`repos/${repo}/git/commits/${pr.head.sha}`);
+	if (extraFiles.length) throw new Error("Candidate exceeds the bounded file-provenance audit.");
+	const [commit, comparison] = await Promise.all([
+		api(`repos/${repo}/git/commits/${pr.head.sha}`),
+		api(`repos/${repo}/compare/${pr.base.sha}...${pr.head.sha}`),
+	]);
 	const result = validatePullRequest(pr, commit, files, {
 		repo,
 		expectedParent: process.env.EXPECTED_PARENT ?? "main",
@@ -185,7 +179,7 @@ async function verifyPullRequestCommand() {
 		expectedStack: process.env.EXPECTED_STACK,
 		allowMerged: process.env.ALLOW_MERGED === "true",
 		appLogin: process.env.APP_HARNESS_OS_APP_LOGIN,
-	});
+	}, comparison);
 	await output({
 		pull_request: result.pullRequest,
 		head_sha: result.headSha,

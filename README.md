@@ -27,9 +27,9 @@ For situated feedback, open the small **App Harness** button at the lower-right,
 
 Targeted requests include a sanitized, stable envelope based on an explicit `data-target-id`. It contains the element identity, semantic tag/role, a safe label or explicitly marked static text, page and room context, and its viewport rectangle. Input values, message bodies, query strings, and secrets are not included. See [targeting and integration](./docs/targeting.md).
 
-The optional App Harness overlay frames the host app rather than becoming its permanent chrome. It stays collapsed when not in use and supports target-aware requests plus durable comments and freehand feedback when opened; see [overlay canvas](./docs/overlay-canvas.md). Every submission creates a durable, shared activity item **and a GitHub issue**. The on-demand Activity list exposes the actual issue and pull-request URLs. With the Cloudflare OS provider enabled, bounded text requests are labelled `cloudflare-os-planning` and reach a model planner; only its schema-validated allowlisted plan can start native Git. The deterministic visual/copy path remains a disabled-provider fallback; drawing-only feedback is recorded for triage.
+The optional App Harness overlay frames the host app rather than becoming its permanent chrome. It stays collapsed when not in use and supports target-aware requests plus durable comments and freehand feedback when opened; see [overlay canvas](./docs/overlay-canvas.md). Every submission creates a durable, shared activity item **and a GitHub issue**. The on-demand Activity list exposes the actual issue and pull-request URLs. With the Cloudflare OS provider enabled, bounded text requests are labelled `cloudflare-os-planning` and reach a model planner; an approved, schema-validated repository task can start NanoCodex in an isolated Cloudflare Sandbox. The deterministic visual/copy path remains a disabled-provider fallback; drawing-only feedback is recorded for triage.
 
-### Current autonomous policy
+### Deterministic fallback policy
 
 The app may autonomously execute only these exact, benign requests:
 
@@ -40,8 +40,8 @@ Everything else is held as **requires review**. The runner never interprets raw 
 
 For an allowed request, the Durable Object first opens a linked GitHub issue, then GitHub Actions creates a candidate branch and pull request, runs `npm run cf-typegen` and `npx tsc --noEmit`, automatically promotes the policy-approved candidate, then deploys with Wrangler. Authenticated callbacks update the durable public record through **received**, **interpreting**, **preparing candidate**, **validating**, **deploying**, and **completed**. For all other feedback, the issue is marked **awaiting coding-agent triage**—it does not imply that a branch, pull request, or coding agent exists.
 
-### Explicit boundary
+### Fallback boundary
 
-The autonomous runner cannot change data, authentication or authorization, credentials, dependencies, Worker configuration, backend logic, workflow policy, or arbitrary source files. It can only make the allowlisted visual/content transformations above. Service credentials authenticate the private runner and callback, and are never exposed to the chat UI or its requests.
+The deterministic fallback cannot change data, authentication or authorization, credentials, dependencies, Worker configuration, backend logic, workflow policy, or arbitrary source files. The NanoCodex provider is a separate path with full repository tools, ephemeral credentials, bounded audit output, and mandatory CI gates. Service credentials authenticate the private runner and callback, and are never exposed to the chat UI or persisted model output.
 
 The next provider is [Cloudflare OS](./docs/cloudflare-os-provider.md): an isolated Sandbox workspace with narrow Gatekeeper capabilities and a Durable Object audit ledger. Dependent changes must use the [stacked-PR scheduler](./docs/stacked-prs.md), never independent auto-rebase loops.

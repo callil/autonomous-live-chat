@@ -6,7 +6,7 @@
     "deploy": "wrangler deploy",
     "cf-typegen": "wrangler types",
     "typecheck": "tsc --noEmit",
-    "test:documentation-policy": "node scripts/test-documentation-policy.mjs"
+    "test:runner-contract": "node scripts/test-nanocodex-runner.mjs"
   },
   "devDependencies": {
     "@cloudflare/sandbox": "0.12.4",

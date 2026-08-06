@@ -91,7 +91,7 @@ function validatedPlan(value: unknown): ({ decision: "approved"; rationale: stri
 	if (!["visual", "content", "data", "behavior", "infrastructure"].includes(classification.changeType as string) || !["localized", "bounded", "broad"].includes(classification.scope as string) || !["low", "medium", "high"].includes(classification.risk as string) || !["ui", "copy", "data", "behavior", "infrastructure"].includes(classification.affectedSurface as string) || typeof classification.reversible !== "boolean" || !["eligible", "needs_review"].includes(classification.executionEligibility as string) || !["visual", "content", "behavior", "data", "infrastructure"].includes(classification.ciProfile as string)) return null;
 	const safeClassification = classification as unknown as Classification;
 	if (plan.decision === "approved") {
-		if (safeClassification.executionEligibility !== "eligible" || safeClassification.changeType !== "content" || safeClassification.scope !== "localized" || safeClassification.risk !== "low" || !safeClassification.reversible || safeClassification.ciProfile !== "content") return null;
+		if (safeClassification.executionEligibility !== "eligible") return null;
 		return { decision: "approved", rationale: plan.rationale.trim(), classification: safeClassification };
 	}
 	if (plan.decision === "needs_review") return { decision: "needs_review", rationale: plan.rationale.trim(), classification: safeClassification };
@@ -119,10 +119,10 @@ function responseText(value: unknown): string | null {
 async function askModel(manifest: SafeManifest, env: Env): Promise<Response> {
 	const instructions = [
 		"You are the App Harness Cloudflare OS planning agent.",
-		"Classify whether this is an unambiguous, localized documentation-only request. You never write or propose a patch.",
-		"Never approve source code, workflows, package files, credentials, configuration, lockfiles, or a request outside README.md and docs/.",
-		"If the request is not an unambiguous, localized documentation update, return needs_review.",
-		"An approved change must classify as content, localized, low risk, affectedSurface ui or copy, reversible true, execution eligible, and content CI profile. Classification can never waive the file policy.",
+		"Classify whether the repository request is sufficiently clear and supported for an autonomous coding run. You never write or propose a patch.",
+		"Repository tasks may include source, tests, workflows, configuration, migrations, and infrastructure code; select the matching CI profile.",
+		"Return needs_review for illegal, harmful, offensive, intentionally availability-destroying, ambiguous, credential-seeking, or externally unsupported work.",
+		"Approval means executionEligibility eligible. Risk, scope, reversibility, and CI profile must describe the real task and do not waive CI or deployment policy.",
 		"Do not include user data beyond a brief rationale.",
 	].join(" ");
 	try {
@@ -159,7 +159,7 @@ async function askModel(manifest: SafeManifest, env: Env): Promise<Response> {
 			model: { id: result.id, model: env.MODEL_ID },
 			rationale: plan.rationale,
 			classification: plan.classification,
-			plan: { change: { kind: "documentation-task" } },
+			plan: { change: { kind: "repository-task" } },
 		});
 	} catch {
 		return Response.json({ state: "agent-unavailable", classification: "model-response-unavailable" }, { status: 502 });

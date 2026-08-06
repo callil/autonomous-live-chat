@@ -53,7 +53,10 @@ jobs:
         run: |
           test "$EXPECTED_PARENT" = main
           test "$EXPECTED_GENERATION" = 1
-          test "$CI_PROFILE" = visual
+          case "$CI_PROFILE" in
+            visual|content|behavior|data|infrastructure) ;;
+            *) echo "Unsupported CI profile: $CI_PROFILE"; exit 1 ;;
+          esac
       - name: Check out trusted promotion verifier from main
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -134,6 +137,7 @@ jobs:
           npm run test:native-git-preflight
           npm run test:os-provider-bridge
           npm run test:coordinator
+          npm --prefix os-native-git-runner run test:runner-contract
           node scripts/test-os-stack-gate.mjs
           git diff --check
 

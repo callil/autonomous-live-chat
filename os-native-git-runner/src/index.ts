@@ -1,4 +1,11 @@
 import { getSandbox, isDurableObjectCodeUpdateReset, isPlatformTransientError, type Sandbox } from "@cloudflare/sandbox";
+import {
+	buildNanocodexInstructions,
+	NANOCODEX_DEFAULT_MODEL,
+	NANOCODEX_VERSION,
+	normalizeAgentSummary,
+	safeAgentFailure,
+} from "./runner-contract.js";
 
 export { Sandbox } from "@cloudflare/sandbox";
 
@@ -11,18 +18,14 @@ type Env = {
 	GITHUB_APP_PRIVATE_KEY: string;
 	NATIVE_GIT_ENABLED: string;
 	OPENAI_API_KEY: string;
-	MODEL_ID: string;
+	MODEL_ID?: string;
+	SANDBOX_CLOUDFLARE_API_TOKEN?: string;
+	SANDBOX_CLOUDFLARE_ACCOUNT_ID?: string;
 };
 
-type NativeGitJob = {
-	jobId?: unknown;
-	repository?: unknown;
-	generation?: unknown;
-	candidate?: unknown;
-};
-
+type NativeGitJob = { jobId?: unknown; repository?: unknown; generation?: unknown; candidate?: unknown };
 type CandidatePlan = {
-	change: { kind: "documentation-task"; request: string };
+	change: { kind: "repository-task"; request: string };
 	stack: {
 		stackId: string;
 		nodeId: string;
@@ -33,10 +36,11 @@ type CandidatePlan = {
 		issueNumber: number;
 	};
 };
+type AgentSummary = { model: string; responseIds: string[]; tools: string[] };
 
-const JOB_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/;
-const BRANCH = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,159}$/;
-const SHA = /^[0-9a-f]{40}$/i;
+const JOB_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/u;
+const BRANCH = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,159}$/u;
+const SHA = /^[0-9a-f]{40}$/iu;
 const encoder = new TextEncoder();
 
 function base64Url(bytes: Uint8Array): string {
@@ -46,13 +50,11 @@ function base64Url(bytes: Uint8Array): string {
 }
 
 function authorized(request: Request, env: Env): boolean {
-	const value = request.headers.get("authorization");
-	return value === `Bearer ${env.APP_HARNESS_RUNNER_SECRET}`;
+	return request.headers.get("authorization") === `Bearer ${env.APP_HARNESS_RUNNER_SECRET}`;
 }
 
 function safeJob(input: NativeGitJob, env: Env): { jobId: string; repository: string; generation: number } | null {
-	if (typeof input.jobId !== "string" || !JOB_ID.test(input.jobId)) return null;
-	if (input.repository !== env.ALLOWED_REPOSITORY) return null;
+	if (typeof input.jobId !== "string" || !JOB_ID.test(input.jobId) || input.repository !== env.ALLOWED_REPOSITORY) return null;
 	if (!Number.isInteger(input.generation) || (input.generation as number) < 1) return null;
 	return { jobId: input.jobId, repository: input.repository, generation: input.generation as number };
 }
@@ -64,13 +66,11 @@ function safeBranch(value: unknown): string | null {
 
 function safeCandidate(input: unknown): CandidatePlan | null {
 	if (!input || typeof input !== "object") return null;
-	const candidate = input as Record<string, unknown>;
-	const change = candidate.change;
-	const stack = candidate.stack;
+	const { change, stack } = input as Record<string, unknown>;
 	if (!change || typeof change !== "object" || !stack || typeof stack !== "object") return null;
 	const rawChange = change as Record<string, unknown>;
 	const rawStack = stack as Record<string, unknown>;
-	if (rawChange.kind !== "documentation-task" || typeof rawChange.request !== "string" || rawChange.request.length > 500 || !rawChange.request.trim()) return null;
+	if (rawChange.kind !== "repository-task" || typeof rawChange.request !== "string" || !rawChange.request.trim() || rawChange.request.length > 500) return null;
 	const stackId = typeof rawStack.stackId === "string" && JOB_ID.test(rawStack.stackId) ? rawStack.stackId : null;
 	const nodeId = typeof rawStack.nodeId === "string" && JOB_ID.test(rawStack.nodeId) ? rawStack.nodeId : null;
 	const branch = safeBranch(rawStack.branch);
@@ -78,26 +78,15 @@ function safeCandidate(input: unknown): CandidatePlan | null {
 	const pullRequestBase = safeBranch(rawStack.pullRequestBase);
 	const parentBaseSha = rawStack.parentBaseSha === null ? null : typeof rawStack.parentBaseSha === "string" && SHA.test(rawStack.parentBaseSha) ? rawStack.parentBaseSha : undefined;
 	const issueNumber = rawStack.issueNumber;
-	if (!stackId || !nodeId || !branch || !parentBranch || !pullRequestBase || parentBaseSha === undefined || typeof issueNumber !== "number" || !Number.isInteger(issueNumber) || issueNumber < 1) return null;
-	// A stack node can only target its immediate parent. The root is the sole
-	// exception: it is based on main and receives its base SHA from checkout.
+	if (!stackId || !nodeId || !branch || !parentBranch || !pullRequestBase || parentBaseSha === undefined || !Number.isInteger(issueNumber) || (issueNumber as number) < 1) return null;
 	if (pullRequestBase !== parentBranch || (parentBranch !== "main" && parentBaseSha === null)) return null;
 	return {
-		change: { kind: "documentation-task", request: rawChange.request.trim() },
-		stack: { stackId, nodeId, branch, parentBranch, parentBaseSha, pullRequestBase, issueNumber },
+		change: { kind: "repository-task", request: rawChange.request.trim() },
+		stack: { stackId, nodeId, branch, parentBranch, parentBaseSha, pullRequestBase, issueNumber: issueNumber as number },
 	};
 }
 
-/** A patch may affect only prose files. Reject path tricks and binary/git metadata. */
-function safeDocumentationPatch(patch: string): boolean {
-	if (!patch.startsWith("--- a/") || patch.length > 12_000 || /\0|\.\.\//u.test(patch)) return false;
-	const paths = [...patch.matchAll(/^(?:--- a\/|\+\+\+ b\/)([^\n]+)$/gmu)].map((match) => match[1]);
-	return paths.length >= 2 && paths.every((path) => path === "README.md" || (path.startsWith("docs/") && path.endsWith(".md")));
-}
-
 function classifyGitTransportFailure(stderr: string): "github-unreachable" | "github-authorization-rejected" | "github-upstream-unavailable" | "git-transport-failed" {
-	// The raw transport output can include request context. Keep it inside the
-	// Sandbox and expose only a small, auditable category to the coordinator.
 	if (/could not resolve host|name or service not known|failed to connect|connection timed out/iu.test(stderr)) return "github-unreachable";
 	if (/http (?:401|403|404)\b|authentication failed|could not read username/iu.test(stderr)) return "github-authorization-rejected";
 	if (/http 5\d\d\b|service unavailable/iu.test(stderr)) return "github-upstream-unavailable";
@@ -113,24 +102,22 @@ function classifySandboxFailure(error: unknown): "sandbox-capacity-exhausted" | 
 
 const SANDBOX_CLEANUP_TIMEOUT_MS = 5_000;
 
-async function runBoundedSandboxCleanup(action: () => Promise<unknown>, failureClassification: string): Promise<void> {
+async function runBoundedSandboxCleanup(action: () => Promise<unknown>, classification: string): Promise<void> {
 	let timeout: ReturnType<typeof setTimeout> | undefined;
 	try {
 		const outcome = await Promise.race([
 			action().then(() => "complete" as const, () => "failed" as const),
 			new Promise<"timed-out">((resolve) => { timeout = setTimeout(() => resolve("timed-out"), SANDBOX_CLEANUP_TIMEOUT_MS); }),
 		]);
-		if (outcome !== "complete") console.warn("Sandbox cleanup did not complete", { classification: outcome === "timed-out" ? `${failureClassification}-timed-out` : failureClassification });
+		if (outcome !== "complete") console.warn("Sandbox cleanup did not complete", { classification: `${classification}-${outcome}` });
 	} finally {
 		if (timeout) clearTimeout(timeout);
 	}
 }
 
 async function destroySandboxSafely(sandbox: ReturnType<typeof getSandbox>, sessionId?: string): Promise<void> {
-	if (sessionId) {
-		await runBoundedSandboxCleanup(() => sandbox.deleteSession(sessionId), "sandbox-session-cleanup-failed");
-	}
-	await runBoundedSandboxCleanup(() => sandbox.destroy(), "sandbox-destroy-failed");
+	if (sessionId) await runBoundedSandboxCleanup(() => sandbox.deleteSession(sessionId), "sandbox-session-cleanup");
+	await runBoundedSandboxCleanup(() => sandbox.destroy(), "sandbox-destroy");
 }
 
 function pemToDer(pem: string): ArrayBuffer {
@@ -148,24 +135,22 @@ async function appJwt(env: Env): Promise<string> {
 	return `${header}.${payload}.${base64Url(signature)}`;
 }
 
-type GitHubInstallationPreparation =
-	| { token: string; classification?: never }
-	| { token?: never; classification: "github-installation-unavailable" | "github-installation-rejected" | "github-repository-not-allowed" };
+type Installation = { token: string; classification?: never } | { token?: never; classification: "github-installation-unavailable" | "github-installation-rejected" | "github-repository-not-allowed" };
 
-async function prepareGitHubInstallation(env: Env): Promise<GitHubInstallationPreparation> {
+async function prepareGitHubInstallation(env: Env): Promise<Installation> {
 	try {
 		const tokenResponse = await fetch(`https://api.github.com/app/installations/${encodeURIComponent(env.GITHUB_APP_INSTALLATION_ID)}/access_tokens`, {
 			method: "POST",
-			headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${await appJwt(env)}`, "User-Agent": "app-harness-os-native-git", "X-GitHub-Api-Version": "2022-11-28" },
+			headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${await appJwt(env)}`, "User-Agent": "app-harness-nanocodex", "X-GitHub-Api-Version": "2026-03-10" },
 		});
-		if (tokenResponse.status === 401 || tokenResponse.status === 403 || tokenResponse.status === 404) return { classification: "github-installation-rejected" };
+		if ([401, 403, 404].includes(tokenResponse.status)) return { classification: "github-installation-rejected" };
 		if (!tokenResponse.ok) return { classification: "github-installation-unavailable" };
 		const token = (await tokenResponse.json() as { token?: unknown }).token;
 		if (typeof token !== "string" || !token) return { classification: "github-installation-unavailable" };
 		const repositoryResponse = await fetch(`https://api.github.com/repos/${env.ALLOWED_REPOSITORY}`, {
-			headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${token}`, "User-Agent": "app-harness-os-native-git", "X-GitHub-Api-Version": "2022-11-28" },
+			headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${token}`, "User-Agent": "app-harness-nanocodex", "X-GitHub-Api-Version": "2026-03-10" },
 		});
-		if (repositoryResponse.status === 401 || repositoryResponse.status === 403 || repositoryResponse.status === 404) return { classification: "github-repository-not-allowed" };
+		if ([401, 403, 404].includes(repositoryResponse.status)) return { classification: "github-repository-not-allowed" };
 		return repositoryResponse.ok ? { token } : { classification: "github-installation-unavailable" };
 	} catch {
 		return { classification: "github-installation-unavailable" };
@@ -181,287 +166,174 @@ function gitAuthorizationEnv(token: string): Record<string, string> {
 	};
 }
 
-async function createStackPullRequest(
-	env: Env,
-	token: string,
-	job: { repository: string; generation: number },
-	candidate: CandidatePlan,
-	headSha: string,
-): Promise<{ url: string; number: number } | { classification: "pull-request-create-failed" }> {
+function githubHeaders(token: string): Record<string, string> {
+	return { Accept: "application/vnd.github+json", Authorization: `Bearer ${token}`, "Content-Type": "application/json", "User-Agent": "app-harness-nanocodex", "X-GitHub-Api-Version": "2026-03-10" };
+}
+
+function provenanceBody(existing: string, job: { generation: number }, candidate: CandidatePlan, headSha: string): string {
+	const start = "<!-- app-harness-provenance:start -->";
+	const end = "<!-- app-harness-provenance:end -->";
+	const prior = existing.replace(new RegExp(`${start}[\\s\\S]*?${end}`, "u"), "").trim();
+	return [
+		prior || `Refs #${candidate.stack.issueNumber}`,
+		"",
+		start,
+		"## App Harness candidate provenance",
+		`- Stack: \`${candidate.stack.stackId}\` generation ${job.generation}`,
+		`- Node: \`${candidate.stack.nodeId}\``,
+		`- Parent base: \`${candidate.stack.parentBranch}\`${candidate.stack.parentBaseSha ? ` at \`${candidate.stack.parentBaseSha}\`` : ""}`,
+		`- Candidate head: \`${headSha}\``,
+		`- Operator: NanoCodex ${NANOCODEX_VERSION}`,
+		"- CI is the merge and production deployment authority.",
+		end,
+	].join("\n");
+}
+
+async function findAndAnnotatePullRequest(token: string, job: { repository: string; generation: number }, candidate: CandidatePlan, headSha: string): Promise<{ url: string; number: number } | { classification: "candidate-pull-request-missing" | "pull-request-provenance-failed" }> {
 	try {
-		const existing = await fetch(`https://api.github.com/repos/${job.repository}/pulls?state=open&head=${encodeURIComponent(`callil:${candidate.stack.branch}`)}&base=${encodeURIComponent(candidate.stack.pullRequestBase)}`, {
-			headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${token}`, "User-Agent": "app-harness-os-native-git", "X-GitHub-Api-Version": "2022-11-28" },
+		const owner = job.repository.split("/")[0];
+		const response = await fetch(`https://api.github.com/repos/${job.repository}/pulls?state=open&head=${encodeURIComponent(`${owner}:${candidate.stack.branch}`)}&base=${encodeURIComponent(candidate.stack.pullRequestBase)}`, { headers: githubHeaders(token) });
+		if (!response.ok) return { classification: "candidate-pull-request-missing" };
+		const matches = await response.json() as Array<{ html_url?: unknown; number?: unknown; body?: unknown; head?: { sha?: unknown }; base?: { ref?: unknown } }>;
+		const pullRequest = matches.find((item) => item.head?.sha === headSha && item.base?.ref === candidate.stack.pullRequestBase);
+		if (!pullRequest || typeof pullRequest.html_url !== "string" || !Number.isInteger(pullRequest.number)) return { classification: "candidate-pull-request-missing" };
+		const update = await fetch(`https://api.github.com/repos/${job.repository}/pulls/${pullRequest.number as number}`, {
+			method: "PATCH",
+			headers: githubHeaders(token),
+			body: JSON.stringify({ body: provenanceBody(typeof pullRequest.body === "string" ? pullRequest.body : "", job, candidate, headSha) }),
 		});
-		if (existing.ok) {
-			const pullRequests = await existing.json() as Array<{ html_url?: unknown; number?: unknown }>;
-			const current = pullRequests[0];
-			if (typeof current?.html_url === "string" && Number.isInteger(current.number)) return { url: current.html_url, number: current.number as number };
-		}
-		const response = await fetch(`https://api.github.com/repos/${job.repository}/pulls`, {
-			method: "POST",
-			headers: {
-				Accept: "application/vnd.github+json",
-				Authorization: `Bearer ${token}`,
-				"Content-Type": "application/json",
-				"User-Agent": "app-harness-os-native-git",
-				"X-GitHub-Api-Version": "2022-11-28",
-			},
-			body: JSON.stringify({
-				title: "App Harness: documentation candidate",
-				head: candidate.stack.branch,
-				base: candidate.stack.pullRequestBase,
-				body: [
-					`Refs #${candidate.stack.issueNumber}`,
-					"",
-					"## Cloudflare OS candidate provenance",
-					`- Stack: \`${candidate.stack.stackId}\` generation ${job.generation}`,
-					`- Node: \`${candidate.stack.nodeId}\``,
-					`- Parent base: \`${candidate.stack.parentBranch}\``,
-					`- Candidate head: \`${headSha}\``,
-					"- Runner applied only a validated README/docs unified patch, then ran the content checks.",
-				].join("\n"),
-			}),
-		});
-		if (!response.ok) return { classification: "pull-request-create-failed" };
-		const pullRequest = (await response.json()) as { html_url?: unknown; number?: unknown };
-		if (typeof pullRequest.html_url !== "string" || !Number.isInteger(pullRequest.number)) return { classification: "pull-request-create-failed" };
+		if (!update.ok) return { classification: "pull-request-provenance-failed" };
 		return { url: pullRequest.html_url, number: pullRequest.number as number };
 	} catch {
-		return { classification: "pull-request-create-failed" };
+		return { classification: "pull-request-provenance-failed" };
 	}
 }
 
-async function createSessionAfterRuntimeUpdate(
-	sandbox: ReturnType<typeof getSandbox>,
-	options: Parameters<ReturnType<typeof getSandbox>["createSession"]>[0],
-) {
+async function createSessionAfterRuntimeUpdate(sandbox: ReturnType<typeof getSandbox>, options: Parameters<ReturnType<typeof getSandbox>["createSession"]>[0]) {
 	for (let attempt = 0; attempt < 4; attempt += 1) {
-		try {
-			return await sandbox.createSession(options);
-		} catch (error) {
-			const transient = isPlatformTransientError(error) || isDurableObjectCodeUpdateReset(error);
-			if (!transient || attempt === 3) throw error;
+		try { return await sandbox.createSession(options); } catch (error) {
+			if (!(isPlatformTransientError(error) || isDurableObjectCodeUpdateReset(error)) || attempt === 3) throw error;
 			await new Promise((resolve) => setTimeout(resolve, 750 * (attempt + 1)));
 		}
 	}
 	throw new Error("Sandbox session retry exhausted.");
 }
 
-type ToolAudit = { name: string; ok: boolean };
-const DOC_AGENT_TOOLS = [
-	{ type: "function", name: "list_docs", strict: true, description: "List the allowed documentation files.", parameters: { type: "object", additionalProperties: false, properties: {} } },
-	{ type: "function", name: "read_doc", strict: true, description: "Read one allowed documentation file before editing it.", parameters: { type: "object", additionalProperties: false, required: ["path"], properties: { path: { type: "string", pattern: "^(README\\.md|docs/[A-Za-z0-9._-]+\\.md)$" } } } },
-	{ type: "function", name: "apply_patch", strict: true, description: "Apply a standard unified diff limited to the allowed docs. You must read every edited file first.", parameters: { type: "object", additionalProperties: false, required: ["patch"], properties: { patch: { type: "string", maxLength: 12000 } } } },
-	{ type: "function", name: "inspect_diff", strict: true, description: "Inspect the current candidate diff.", parameters: { type: "object", additionalProperties: false, properties: {} } },
-	{ type: "function", name: "run_checks", strict: true, description: "Run the fixed documentation checks.", parameters: { type: "object", additionalProperties: false, properties: {} } },
-	{ type: "function", name: "finish", strict: true, description: "Finish only after checks pass and the diff is the intended small docs-only change.", parameters: { type: "object", additionalProperties: false, properties: {} } },
-] as const;
-
-function allowedDocPath(path: unknown): path is string {
-	return path === "README.md" || (typeof path === "string" && /^docs\/[A-Za-z0-9._-]+\.md$/u.test(path));
+function parseAgent(stdout: string, model: string): { summary: AgentSummary; ok: boolean; classification?: string } | null {
+	if (stdout.length > 16_000) return null;
+	try {
+		const raw = JSON.parse(stdout.trim()) as Record<string, unknown>;
+		const summary = normalizeAgentSummary(raw, model) as AgentSummary | null;
+		if (!summary || summary.model !== model) return null;
+		return { summary, ok: raw.ok === true, ...(raw.ok === true ? {} : { classification: safeAgentFailure(raw.classification) }) };
+	} catch { return null; }
 }
 
-/** Model gets no shell/network tool. It can only call this fixed repository tool set. */
-async function runDocumentationAgent(session: Awaited<ReturnType<typeof createSessionAfterRuntimeUpdate>>, checkout: string, task: string, env: Env): Promise<{ ok: boolean; audit: ToolAudit[]; responseIds: string[]; model: string; classification?: string }> {
-	if (!env.OPENAI_API_KEY || !env.MODEL_ID) return { ok: false, audit: [], responseIds: [], model: env.MODEL_ID, classification: "agent-credential-unavailable" };
-	const audit: ToolAudit[] = [];
-	const responseIds: string[] = [];
-	const read = new Set<string>();
-	let inspectedAfterWrite = false;
-	let checkedAfterWrite = false;
-	let input: unknown[] = [{ role: "user", content: [{ type: "input_text", text: `Update the repository documentation for this request: ${task}. First inspect real files. You may change README.md or docs/*.md only. Use tools; do not explain outside tools.` }] }];
-	for (let round = 0; round < 8; round += 1) {
-		let response: Response;
-		try { response = await fetch("https://api.openai.com/v1/responses", { method: "POST", headers: { Authorization: `Bearer ${env.OPENAI_API_KEY}`, "Content-Type": "application/json" }, body: JSON.stringify({ model: env.MODEL_ID, store: false, input, tools: DOC_AGENT_TOOLS, tool_choice: "required" }) }); } catch { return { ok: false, audit, responseIds, model: env.MODEL_ID, classification: "agent-request-failed" }; }
-		if (!response.ok) return { ok: false, audit, responseIds, model: env.MODEL_ID, classification: "agent-request-failed" };
-		const body = await response.json() as { id?: unknown; output?: Array<Record<string, unknown>> };
-		if (typeof body.id === "string" && /^[A-Za-z0-9_-]{1,120}$/u.test(body.id)) responseIds.push(body.id);
-		const responseOutput = body.output ?? [];
-		const calls = responseOutput.filter((item) => item.type === "function_call");
-		if (!calls.length) return { ok: false, audit, responseIds, model: env.MODEL_ID, classification: "agent-no-tool-call" };
-		const outputs: unknown[] = [];
-		for (const call of calls) {
-			const name = call.name; let args: Record<string, unknown> = {}; try { args = JSON.parse(String(call.arguments ?? "{}")) as Record<string, unknown>; } catch { /* rejected below */ }
-			let value: Record<string, unknown>;
-			if (name === "list_docs") {
-				const result = await session.exec(`find ${checkout} -maxdepth 2 -type f \\( -name README.md -o -path '${checkout}/docs/*.md' \\) -print | sed 's#${checkout}/##' | sort`, { timeout: 15_000 });
-				value = { ok: result.success, files: result.success ? result.stdout.trim().split("\n").filter(Boolean) : [] };
-			} else if (name === "read_doc" && allowedDocPath(args.path)) {
-				const result = await session.readFile(`${checkout}/${args.path}`); if (result.success) read.add(args.path); value = { ok: result.success, content: result.success ? result.content.slice(0, 16000) : "read failed" };
-			} else if (name === "apply_patch" && typeof args.patch === "string" && safeDocumentationPatch(args.patch)) {
-				const paths = [...args.patch.matchAll(/^(?:--- a\/|\+\+\+ b\/)([^\n]+)$/gmu)].map((m) => m[1]);
-				if (!paths.every((path) => read.has(path))) value = { ok: false, error: "Read every edited path before writing." };
-				else { const write = await session.writeFile(`${checkout}/candidate.patch`, args.patch); const result = write.success ? await session.exec(`git -C ${checkout} apply --whitespace=error-all candidate.patch`, { timeout: 15_000 }) : null; if (result?.success) { inspectedAfterWrite = false; checkedAfterWrite = false; } value = { ok: Boolean(result?.success), error: result?.success ? undefined : "Patch did not apply; inspect the diff/files and retry." }; }
-			} else if (name === "inspect_diff") { const result = await session.exec(`git -C ${checkout} diff -- README.md docs`, { timeout: 15_000 }); if (result.success) inspectedAfterWrite = true; value = { ok: result.success, diff: result.stdout.slice(0, 16000) };
-			} else if (name === "run_checks") { const check = await session.exec(`git -C ${checkout} diff --check && git -C ${checkout} diff --name-only | grep -E '^(README\\.md|docs/[^/]+\\.md)$`, { timeout: 15_000 }); if (check.success && inspectedAfterWrite) checkedAfterWrite = true; value = { ok: check.success && inspectedAfterWrite, error: inspectedAfterWrite ? (check.success ? undefined : "Docs-only diff check failed.") : "Inspect the diff after the latest write first." };
-			} else if (name === "finish") { const check = await session.exec(`git -C ${checkout} diff --check && git -C ${checkout} diff --quiet -- README.md docs; test $? -eq 1`, { timeout: 15_000 }); value = { ok: check.success && inspectedAfterWrite && checkedAfterWrite, finished: check.success && inspectedAfterWrite && checkedAfterWrite };
-			} else value = { ok: false, error: "Unknown or invalid tool call." };
-			audit.push({ name: typeof name === "string" ? name : "invalid", ok: value.ok === true });
-			outputs.push({ type: "function_call_output", call_id: call.call_id, output: JSON.stringify(value) });
-			if (name === "finish" && value.ok) return { ok: true, audit, responseIds, model: env.MODEL_ID };
-		}
-		input = [...input, ...responseOutput, ...outputs];
-	}
-	return { ok: false, audit, responseIds, model: env.MODEL_ID, classification: "agent-round-limit" };
-}
-
-/**
- * A deliberately tiny production Sandbox runner. The only currently live
-	 * operation is a fixed command probe, used to verify isolated shell execution.
- *
- * The job endpoint uses a GitHub App private key held only by this Worker to
- * mint a short-lived installation token for the one allowed repository. The
- * token is never returned, logged, included in a command string, or sent to a
- * model/OS caller; only the isolated Sandbox Git process receives it.
- */
 export default {
 	async fetch(request: Request, env: Env): Promise<Response> {
 		const url = new URL(request.url);
-		if (request.method !== "POST" || !authorized(request, env)) {
-			return new Response("Not found", { status: 404 });
-		}
+		if (request.method !== "POST" || !authorized(request, env)) return new Response("Not found", { status: 404 });
 
 		if (url.pathname === "/v1/probe") {
-			const sandbox = getSandbox(env.Sandbox, "app-harness-runner-probe", {
-				enableDefaultSession: false,
-			});
+			const sandbox = getSandbox(env.Sandbox, "app-harness-runner-probe", { enableDefaultSession: false });
 			try {
-				const session = await createSessionAfterRuntimeUpdate(sandbox, { id: "probe", cwd: "/workspace", commandTimeoutMs: 15_000 });
-				const result = await session.exec("git --version", { timeout: 15_000 });
-				return Response.json({ ok: result.success, exitCode: result.exitCode, stdout: result.stdout.trim().slice(0, 160), runner: "cloudflare-sandbox" });
+				const session = await createSessionAfterRuntimeUpdate(sandbox, { id: "probe", cwd: "/workspace", commandTimeoutMs: 20_000 });
+				const result = await session.exec("git --version && nanocodex --version && gh stack --help >/dev/null", { timeout: 20_000 });
+				return Response.json({ ok: result.success, exitCode: result.exitCode, stdout: result.stdout.trim().slice(0, 200), runner: "cloudflare-sandbox-nanocodex" });
 			} catch (error) {
 				return Response.json({ ok: false, state: "runner-unavailable", classification: classifySandboxFailure(error) }, { status: 503 });
-			} finally {
-				await destroySandboxSafely(sandbox, "probe");
-			}
+			} finally { await destroySandboxSafely(sandbox, "probe"); }
 		}
 
-		if (url.pathname === "/v1/native-git/jobs") {
-			let body: NativeGitJob;
-			try {
-				body = await request.json() as NativeGitJob;
-			} catch {
-				return Response.json({ error: "Invalid job payload." }, { status: 400 });
-			}
-			const job = safeJob(body, env);
-			if (!job) return Response.json({ error: "Job is outside the runner's scope." }, { status: 403 });
-			const candidate = body.candidate === undefined ? null : safeCandidate(body.candidate);
-			if (body.candidate !== undefined && !candidate) {
-				return Response.json({ error: "Candidate plan is outside the runner's fixed policy." }, { status: 403 });
-			}
-			if (env.NATIVE_GIT_ENABLED !== "true" || !env.GITHUB_APP_ID || !env.GITHUB_APP_INSTALLATION_ID || !env.GITHUB_APP_PRIVATE_KEY) {
-				return Response.json({
-					jobId: job.jobId,
-					state: "credential-bridge-required",
-					message: "The isolated runner is live, but native Git stays disabled until the repository-scoped GitHub App capability is configured.",
-				});
-			}
-			const installation = await prepareGitHubInstallation(env);
-			if ("classification" in installation) {
-				return Response.json({ jobId: job.jobId, state: "checkout-failed", classification: installation.classification });
-			}
+		if (url.pathname !== "/v1/native-git/jobs") return new Response("Not found", { status: 404 });
+		let body: NativeGitJob;
+		try { body = await request.json() as NativeGitJob; } catch { return Response.json({ error: "Invalid job payload." }, { status: 400 }); }
+		const job = safeJob(body, env);
+		if (!job) return Response.json({ error: "Job is outside the runner's scope." }, { status: 403 });
+		const candidate = body.candidate === undefined ? null : safeCandidate(body.candidate);
+		if (body.candidate !== undefined && !candidate) return Response.json({ error: "Candidate plan is outside the runner contract." }, { status: 403 });
+		const model = env.MODEL_ID || NANOCODEX_DEFAULT_MODEL;
+		if (env.NATIVE_GIT_ENABLED !== "true" || !env.GITHUB_APP_ID || !env.GITHUB_APP_INSTALLATION_ID || !env.GITHUB_APP_PRIVATE_KEY || !env.OPENAI_API_KEY) {
+			return Response.json({ jobId: job.jobId, state: "credential-bridge-required", message: "The isolated runner requires separately injected OpenAI and repository-scoped GitHub App capabilities." });
+		}
+		const installation = await prepareGitHubInstallation(env);
+		if ("classification" in installation) return Response.json({ jobId: job.jobId, state: "checkout-failed", classification: installation.classification });
 
-			const sandbox = getSandbox(env.Sandbox, `app-harness-${job.jobId}-g${job.generation}`, { enableDefaultSession: false });
-			// A retried HTTP request must not collide with an interrupted prior
-			// attempt. The session ID is opaque and short lived; the durable job ID
-			// remains the audit identity.
-			const sessionId = `candidate-${job.generation}-${crypto.randomUUID().replaceAll("-", "").slice(0, 16)}`;
-			const checkoutDirectory = `/workspace/${sessionId}-repository`;
-			let session;
-			try {
-				session = await createSessionAfterRuntimeUpdate(sandbox, {
-					id: sessionId,
-					cwd: "/workspace",
-					commandTimeoutMs: 120_000,
-				});
-			} catch (error) {
-				await destroySandboxSafely(sandbox, sessionId);
-				return Response.json({ jobId: job.jobId, state: "runner-unavailable", classification: classifySandboxFailure(error) });
-			}
-			try {
-				// The SDK applies these only to this one process. The one-hour
-				// installation token is never included in a command string, repository
-				// URL, session-global environment, audit event, or response.
-				const gitEnv = gitAuthorizationEnv(installation.token);
-				const cloneBranch = candidate?.stack.parentBranch ?? "main";
-				const clone = await session.exec(
-					`git clone --depth 1 --branch ${cloneBranch} https://github.com/callil/autonomous-live-chat.git ${checkoutDirectory}`,
-					{
-						timeout: 120_000,
-						env: gitEnv,
-					},
-				);
-				if (!clone.success) {
-					return Response.json({
-						jobId: job.jobId,
-						state: "checkout-failed",
-						exitCode: clone.exitCode,
-						classification: classifyGitTransportFailure(clone.stderr),
-					});
-				}
-				const base = await session.exec(`git -C ${checkoutDirectory} rev-parse HEAD`, { timeout: 15_000 });
-				const baseSha = base.stdout.trim();
-				if (!base.success || !SHA.test(baseSha)) {
-					return Response.json({ jobId: job.jobId, state: "checkout-failed", classification: "checkout-head-unavailable" });
-				}
-				if (!candidate) return Response.json({ jobId: job.jobId, state: "checked-out", head: baseSha, baseSha });
-				if (candidate.stack.parentBaseSha && candidate.stack.parentBaseSha !== baseSha) {
-					return Response.json({
-						jobId: job.jobId,
-						state: "needs-restack",
-						baseSha,
-						classification: "parent-base-sha-mismatch",
-						stack: { id: candidate.stack.stackId, generation: job.generation, nodeId: candidate.stack.nodeId, parentBranch: candidate.stack.parentBranch },
-					});
-				}
-
-				const agent = await runDocumentationAgent(session, checkoutDirectory, candidate.change.request, env);
-				if (!agent.ok) return Response.json({ jobId: job.jobId, state: "candidate-failed", classification: agent.classification ?? "agent-tool-loop-failed", agent: { model: agent.model, responseIds: agent.responseIds, tools: agent.audit.map((entry) => entry.name) } });
-
-				const commandStages: Array<[string, string, Record<string, string> | undefined]> = [
-					["branch", `git -C ${checkoutDirectory} checkout -b ${candidate.stack.branch}`, undefined],
-					["identity", `git -C ${checkoutDirectory} config user.name \"App Harness OS\"`, undefined],
-					["identity", `git -C ${checkoutDirectory} config user.email \"app-harness-os@users.noreply.github.com\"`, undefined],
-					["validate", `git -C ${checkoutDirectory} diff --check`, undefined],
-					["policy", `git -C ${checkoutDirectory} diff --name-only | grep -E '^(README\\.md|docs/[^/]+\\.md)$'`, undefined],
-					["stage", `git -C ${checkoutDirectory} add -- README.md docs`, undefined],
-					["commit", `git -C ${checkoutDirectory} commit -m \"App Harness: update documentation\"`, undefined],
-					// The branch name is derived solely from the durable stack ID, issue, and
-					// generation. Retrying this same job may update only that same candidate.
-					["push", `git -C ${checkoutDirectory} push --force --set-upstream origin ${candidate.stack.branch}`, gitEnv],
-				];
-				for (const [stage, command, commandEnv] of commandStages) {
-					const result = await session.exec(command, { timeout: 120_000, ...(commandEnv ? { env: commandEnv } : {}) });
-					if (!result.success) {
-						return Response.json({ jobId: job.jobId, state: "candidate-failed", exitCode: result.exitCode, classification: `candidate-${stage}-failed` });
-					}
-				}
-				const head = await session.exec(`git -C ${checkoutDirectory} rev-parse HEAD`, { timeout: 15_000 });
-				const headSha = head.stdout.trim();
-				if (!head.success || !SHA.test(headSha)) return Response.json({ jobId: job.jobId, state: "candidate-failed", classification: "candidate-head-unavailable" });
-				const pullRequest = await createStackPullRequest(env, installation.token, job, candidate, headSha);
-				if ("classification" in pullRequest) return Response.json({ jobId: job.jobId, state: "candidate-failed", classification: pullRequest.classification });
-				return Response.json({
-					jobId: job.jobId,
-					state: "pull-request-opened",
-					baseSha,
-					headSha,
-					pullRequest,
-					stack: {
-						id: candidate.stack.stackId,
-						generation: job.generation,
-						nodeId: candidate.stack.nodeId,
-						branch: candidate.stack.branch,
-						parentBranch: candidate.stack.parentBranch,
-						pullRequestBase: candidate.stack.pullRequestBase,
-					},
-					agent: { model: agent.model, responseIds: agent.responseIds, tools: agent.audit.map((entry) => entry.name) },
-				});
-			} finally {
-				await destroySandboxSafely(sandbox, sessionId);
-			}
+		const sandbox = getSandbox(env.Sandbox, `app-harness-${job.jobId}-g${job.generation}`, { enableDefaultSession: false });
+		const sessionId = `candidate-${job.generation}-${crypto.randomUUID().replaceAll("-", "").slice(0, 16)}`;
+		const checkoutDirectory = `/workspace/${sessionId}-repository`;
+		let session;
+		try {
+			session = await createSessionAfterRuntimeUpdate(sandbox, { id: sessionId, cwd: "/workspace", commandTimeoutMs: 1_200_000 });
+		} catch (error) {
+			await destroySandboxSafely(sandbox, sessionId);
+			return Response.json({ jobId: job.jobId, state: "runner-unavailable", classification: classifySandboxFailure(error) });
 		}
 
-		return new Response("Not found", { status: 404 });
+		try {
+			const gitEnv = gitAuthorizationEnv(installation.token);
+			const cloneBranch = candidate?.stack.parentBranch ?? "main";
+			const clone = await session.exec(`git clone --branch ${cloneBranch} https://github.com/${job.repository}.git ${checkoutDirectory}`, { timeout: 120_000, env: gitEnv });
+			if (!clone.success) return Response.json({ jobId: job.jobId, state: "checkout-failed", exitCode: clone.exitCode, classification: classifyGitTransportFailure(clone.stderr) });
+			const base = await session.exec(`git -C ${checkoutDirectory} rev-parse HEAD`, { timeout: 15_000 });
+			const baseSha = base.stdout.trim();
+			if (!base.success || !SHA.test(baseSha)) return Response.json({ jobId: job.jobId, state: "checkout-failed", classification: "checkout-head-unavailable" });
+			if (!candidate) return Response.json({ jobId: job.jobId, state: "checked-out", head: baseSha, baseSha });
+			if (candidate.stack.parentBaseSha && candidate.stack.parentBaseSha !== baseSha) {
+				return Response.json({ jobId: job.jobId, state: "needs-restack", baseSha, classification: "parent-base-sha-mismatch", stack: { id: candidate.stack.stackId, generation: job.generation, nodeId: candidate.stack.nodeId, parentBranch: candidate.stack.parentBranch } });
+			}
+
+			const remote = await session.exec(`git -C ${checkoutDirectory} ls-remote --heads origin refs/heads/${candidate.stack.branch}`, { timeout: 30_000, env: gitEnv });
+			if (!remote.success) return Response.json({ jobId: job.jobId, state: "candidate-failed", classification: classifyGitTransportFailure(remote.stderr) });
+			const remoteSha = remote.stdout.trim().split(/\s+/u)[0];
+			const checkout = SHA.test(remoteSha)
+				? await session.exec(`git -C ${checkoutDirectory} fetch origin refs/heads/${candidate.stack.branch}:refs/remotes/origin/${candidate.stack.branch} && git -C ${checkoutDirectory} checkout -B ${candidate.stack.branch} refs/remotes/origin/${candidate.stack.branch}`, { timeout: 120_000, env: gitEnv })
+				: await session.exec(`git -C ${checkoutDirectory} checkout -b ${candidate.stack.branch}`, { timeout: 30_000 });
+			if (!checkout.success) return Response.json({ jobId: job.jobId, state: "candidate-failed", classification: "candidate-branch-failed" });
+
+			const agentEnv: Record<string, string> = {
+				...gitEnv,
+				OPENAI_API_KEY: env.OPENAI_API_KEY,
+				OPENAI_MODEL: model,
+				GH_TOKEN: installation.token,
+				GITHUB_TOKEN: installation.token,
+				GH_REPO: job.repository,
+				CI: "true",
+				NANOCODEX_VERSION,
+			};
+			if (env.SANDBOX_CLOUDFLARE_API_TOKEN) agentEnv.CLOUDFLARE_API_TOKEN = env.SANDBOX_CLOUDFLARE_API_TOKEN;
+			if (env.SANDBOX_CLOUDFLARE_ACCOUNT_ID) agentEnv.CLOUDFLARE_ACCOUNT_ID = env.SANDBOX_CLOUDFLARE_ACCOUNT_ID;
+			const prompt = `Implement the linked repository task exactly as requested: ${candidate.change.request}`;
+			const instructions = buildNanocodexInstructions({ repository: job.repository, issueNumber: candidate.stack.issueNumber, branch: candidate.stack.branch, stackId: candidate.stack.stackId, generation: job.generation });
+			const requestPath = `/tmp/${sessionId}-nanocodex-request.json`;
+			const requestWrite = await session.writeFile(requestPath, JSON.stringify({ prompt, instructions, cwd: checkoutDirectory, model }));
+			if (!requestWrite.success) return Response.json({ jobId: job.jobId, state: "candidate-failed", classification: "nanocodex-input-write-failed" });
+			const execution = await session.exec(`node /opt/app-harness/agent-entrypoint.mjs < ${requestPath}`, {
+				cwd: checkoutDirectory,
+				env: agentEnv,
+				timeout: 1_200_000,
+			});
+			const agent = parseAgent(execution.stdout, model);
+			if (!execution.success || !agent?.ok) return Response.json({ jobId: job.jobId, state: "candidate-failed", classification: agent?.classification ?? "nanocodex-output-invalid", agent: agent?.summary ?? { model, responseIds: [], tools: [] } });
+
+			const status = await session.exec(`git -C ${checkoutDirectory} status --porcelain`, { timeout: 15_000 });
+			const head = await session.exec(`git -C ${checkoutDirectory} rev-parse HEAD`, { timeout: 15_000 });
+			const headSha = head.stdout.trim();
+			if (!status.success || status.stdout.trim()) return Response.json({ jobId: job.jobId, state: "candidate-failed", classification: "candidate-working-tree-dirty", agent: agent.summary });
+			if (!head.success || !SHA.test(headSha) || headSha === baseSha) return Response.json({ jobId: job.jobId, state: "candidate-failed", classification: "candidate-head-unavailable", agent: agent.summary });
+			const pushed = await session.exec(`git -C ${checkoutDirectory} ls-remote --heads origin refs/heads/${candidate.stack.branch}`, { timeout: 30_000, env: gitEnv });
+			if (!pushed.success || pushed.stdout.trim().split(/\s+/u)[0] !== headSha) return Response.json({ jobId: job.jobId, state: "candidate-failed", classification: "candidate-head-not-pushed", agent: agent.summary });
+			const pullRequest = await findAndAnnotatePullRequest(installation.token, job, candidate, headSha);
+			if ("classification" in pullRequest) return Response.json({ jobId: job.jobId, state: "candidate-failed", classification: pullRequest.classification, agent: agent.summary });
+			return Response.json({
+				jobId: job.jobId,
+				state: "pull-request-opened",
+				baseSha,
+				headSha,
+				pullRequest,
+				stack: { id: candidate.stack.stackId, generation: job.generation, nodeId: candidate.stack.nodeId, branch: candidate.stack.branch, parentBranch: candidate.stack.parentBranch, pullRequestBase: candidate.stack.pullRequestBase },
+				agent: agent.summary,
+			});
+		} finally { await destroySandboxSafely(sandbox, sessionId); }
 	},
 };

@@ -11,12 +11,10 @@ const repo = "callil/autonomous-live-chat";
 const headSha = "8".repeat(40);
 const baseSha = "7".repeat(40);
 const mergeSha = "9".repeat(40);
-const patch = [
-	"@@ -6 +6 @@",
-	"-:root { --accent: #10a37f; color: #0d0d0d; }",
-	"+:root { --accent: #8b5cf6; color: #0d0d0d; }",
-].join("\n");
-const files = [{ filename: "public/index.html", status: "modified", additions: 1, deletions: 1, changes: 2, patch }];
+const files = [
+	{ filename: "src/feature.ts", status: "modified", additions: 12, deletions: 3, changes: 15 },
+	{ filename: "migrations/0002_feature.sql", status: "added", additions: 8, deletions: 0, changes: 8 },
+];
 const pullRequest = {
 	number: 20,
 	state: "open",
@@ -31,7 +29,8 @@ const pullRequest = {
 		`- Candidate head: \`${headSha}\``,
 	].join("\n"),
 };
-const commit = { sha: headSha, parents: [{ sha: baseSha }] };
+const commit = { sha: headSha, parents: [{ sha: "6".repeat(40) }] };
+const comparison = { status: "ahead", ahead_by: 3, base_commit: { sha: baseSha }, merge_base_commit: { sha: baseSha } };
 const options = {
 	repo,
 	expectedParent: "main",
@@ -42,7 +41,7 @@ const options = {
 	allowMerged: false,
 };
 
-const valid = validatePullRequest(pullRequest, commit, files, options);
+const valid = validatePullRequest(pullRequest, commit, files, options, comparison);
 assert.equal(valid.headSha, headSha);
 assert.equal(valid.issue, 19);
 assert.equal(valid.generation, 1);
@@ -53,6 +52,7 @@ const merged = validatePullRequest(
 	commit,
 	files,
 	{ ...options, allowMerged: true },
+	comparison,
 );
 assert.equal(merged.alreadyMerged, true);
 assert.equal(merged.mergeSha, mergeSha);
@@ -63,14 +63,14 @@ for (const mutation of [
 	{ head: { ...pullRequest.head, ref: "app-harness-os/20/g1" } },
 	{ base: { ...pullRequest.base, ref: "release" } },
 ]) {
-	assert.throws(() => validatePullRequest({ ...pullRequest, ...mutation }, commit, files, options));
+	assert.throws(() => validatePullRequest({ ...pullRequest, ...mutation }, commit, files, options, comparison));
 }
-assert.throws(() => validatePullRequest(pullRequest, { ...commit, parents: [{ sha: "6".repeat(40) }] }, files, options));
+assert.throws(() => validatePullRequest(pullRequest, commit, files, options, { ...comparison, merge_base_commit: { sha: "5".repeat(40) } }));
 
 validateCandidateFiles(files);
-assert.throws(() => validateCandidateFiles([...files, { ...files[0], filename: "package.json" }]));
-assert.throws(() => validateCandidateFiles([{ ...files[0], patch: patch.replace("color: #0d0d0d; }", "color: red; }") }]));
-assert.throws(() => validateCandidateFiles([{ ...files[0], patch: patch.replace("#8b5cf6", "#12345") }]));
+assert.throws(() => validateCandidateFiles([{ ...files[0], filename: "../outside" }]));
+assert.throws(() => validateCandidateFiles([{ ...files[0], filename: ".git/config" }]));
+assert.throws(() => validateCandidateFiles([{ ...files[0], changes: -1 }]));
 
 const evidenceInput = { repo, pullRequest: 20, headSha, baseSha, runId: 123456, state: "success", secret: "test-attestation-secret" };
 const description = createEvidence(evidenceInput);
