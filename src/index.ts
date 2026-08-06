@@ -1133,7 +1133,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 			const main = await mainResponse.json() as { object?: { sha?: unknown } };
 			if (typeof main.object?.sha !== "string" || !SHA.test(main.object.sha)) continue;
 			const workflow = await this.getWorkflow(stored.workflowId);
-			if (!workflow || workflow.phase !== "requires_review") continue;
+			if (!workflow || (workflow.phase !== "requires_review" && workflow.phase !== "failed")) continue;
 			const current = await this.getWorkItem(stored.id);
 			if (!current || current.phase !== "needs_review" || ![AUTO_RESTACK_MESSAGE, LEGACY_RUNNER_RPC_MESSAGE].includes(current.activity.at(-1)?.message ?? "") || !current.osNativeGit || !current.githubIssue) continue;
 			const now = Date.now();
