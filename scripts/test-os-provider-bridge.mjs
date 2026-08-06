@@ -21,6 +21,9 @@ const workerSource = await readFile(new URL("../src/index.ts", import.meta.url),
 const workerConfig = await readFile(new URL("../wrangler.jsonc", import.meta.url), "utf8");
 assert.match(workerSource, /await this\.ctx\.restore\(/u);
 assert.match(workerSource, /\[restore\]\(params: unknown\)/u);
+assert.match(workerSource, /blockConcurrencyWhile\(\(\) => this\.scheduleCoordinatorAlarm\(\)\)/u);
+assert.match(workerSource, /this\.ctx\.waitUntil\(this\.appendGitHubIssueStatus/u);
+assert.ok(workerSource.indexOf("await this.ctx.storage.setAlarm(now + 25)") < workerSource.indexOf("this.ctx.waitUntil(this.appendGitHubIssueStatus"));
 assert.doesNotMatch(workerSource, /OS_RESPONSE_TARGETS/u);
 assert.match(workerConfig, /allow_irrevocable_stub_storage/u);
 assert.match(workerConfig, /"entrypoint": "NativeGitRunner"/u);

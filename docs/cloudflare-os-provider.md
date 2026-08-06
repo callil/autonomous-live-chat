@@ -34,6 +34,8 @@ Cloudflare may restart a Sandbox during a runtime rollout. A disappeared process
 
 The App Harness calls the runner through a named `NativeGitRunner` service-binding RPC entrypoint. The binding itself is the Cloudflare capability, so this private hop has no duplicated shared bearer secret to rotate or desynchronize. The runner's public verification endpoints remain separately authenticated.
 
+The coordinator always persists work and arms its alarm before attempting public status delivery. GitHub comments are asynchronous observability and cannot hold the execution lease. On Durable Object startup, pending effects re-arm the dispatcher from stored state.
+
 The child receives the full checkout and normal engineering tools. Its output wrapper retains only bounded provenance (model, response IDs, tool names) plus independently verified Git/GitHub artifacts. Transcripts, tool arguments, diffs, credentials, and shell output are not copied into the public ledger.
 
 ## Truth boundary
