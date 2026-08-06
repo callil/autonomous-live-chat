@@ -48,9 +48,9 @@ function equal(left: Uint8Array, right: Uint8Array): boolean {
 }
 
 async function validateAssertion(request: Request, env: Env): Promise<Assertion | null> {
-	const header = request.headers.get("authorization");
-	if (!header?.startsWith("Bearer ")) return null;
-	const [payloadPart, signaturePart, extra] = header.slice(7).split(".");
+	const header = request.headers.get("x-app-harness-assertion");
+	if (!header) return null;
+	const [payloadPart, signaturePart, extra] = header.split(".");
 	if (!payloadPart || !signaturePart || extra) return null;
 	const payloadBytes = decodeBase64Url(payloadPart);
 	const signature = decodeBase64Url(signaturePart);
@@ -111,6 +111,7 @@ export default {
 		try {
 			const headers = new Headers(request.headers);
 			headers.delete("authorization");
+			headers.delete("x-app-harness-assertion");
 			headers.delete("host");
 			headers.set("authorization", `Basic ${btoa(`x-access-token:${await installationToken(env)}`)}`);
 			headers.set("user-agent", "app-harness-os-git-proxy");

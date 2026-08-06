@@ -67,7 +67,7 @@ async function prepareApprovedProxy(job: { jobId: string; repository: string; ge
 	const assertion = await signedProxyAssertion(job, env.GIT_PROXY_ASSERTION_SECRET);
 	try {
 		const response = await fetch(`${env.GIT_PROXY_ORIGIN}/${job.repository}.git/info/refs?service=git-upload-pack`, {
-			headers: { Authorization: `Bearer ${assertion}`, "Git-Protocol": "version=2" },
+			headers: { "X-App-Harness-Assertion": assertion, "Git-Protocol": "version=2" },
 		});
 		if (response.ok) return { assertion };
 		if (response.status === 401 || response.status === 403 || response.status === 404) return { classification: "proxy-authorization-rejected" };
@@ -173,7 +173,7 @@ export default {
 				await session.setEnvVars({
 					GIT_CONFIG_COUNT: "1",
 					GIT_CONFIG_KEY_0: "http.extraHeader",
-					GIT_CONFIG_VALUE_0: `Authorization: Bearer ${proxy.assertion}`,
+					GIT_CONFIG_VALUE_0: `X-App-Harness-Assertion: ${proxy.assertion}`,
 				});
 				const clone = await session.exec(
 					"git clone --depth 1 https://app-harness-os-git-proxy.coda-a.workers.dev/callil/autonomous-live-chat.git /workspace/repository",
