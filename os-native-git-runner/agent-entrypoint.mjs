@@ -7,14 +7,14 @@ const NANOCODEX_MODEL = "gpt-5.6-sol";
 const MAX_LINE_BYTES = 1_048_576;
 
 function emit(value) {
-	process.stdout.write(`${JSON.stringify(value)}\n`);
+	return new Promise((resolve) => process.stdout.write(`${JSON.stringify(value)}\n`, resolve));
 }
 
 let input = "";
 for await (const chunk of process.stdin) {
 	input += chunk;
 	if (input.length > 24_000) {
-		emit({ ok: false, classification: "nanocodex-input-too-large" });
+		await emit({ ok: false, classification: "nanocodex-input-too-large" });
 		process.exit(2);
 	}
 }
@@ -22,7 +22,7 @@ for await (const chunk of process.stdin) {
 let request;
 try { request = JSON.parse(input); } catch { request = null; }
 if (!request || typeof request.prompt !== "string" || !request.prompt.trim() || typeof request.instructions !== "string" || !request.instructions.trim() || typeof request.cwd !== "string" || !request.cwd.startsWith("/workspace/") || typeof request.model !== "string" || !MODEL.test(request.model) || request.model !== NANOCODEX_MODEL) {
-	emit({ ok: false, classification: "nanocodex-input-invalid" });
+	await emit({ ok: false, classification: "nanocodex-input-invalid" });
 	process.exit(2);
 }
 
@@ -67,11 +67,11 @@ for await (const chunk of child.stdout) {
 if (pending.length) acceptLine(pending);
 
 const code = await new Promise((resolve) => child.once("close", resolve));
-emit({
+await emit({
 	ok: code === 0 && terminal === "completed",
 	model: request.model,
 	responseIds: [...responseIds],
 	tools: [...tools],
 	classification: code === 0 && terminal === "completed" ? undefined : terminal === "failed" ? "nanocodex-run-failed" : "nanocodex-process-failed",
 });
-process.exit(code === 0 && terminal === "completed" ? 0 : 1);
+process.exitCode = code === 0 && terminal === "completed" ? 0 : 1;

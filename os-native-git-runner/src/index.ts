@@ -108,6 +108,55 @@ function classifySandboxFailure(error: unknown): "sandbox-capacity-exhausted" | 
 
 const SANDBOX_CLEANUP_TIMEOUT_MS = 5_000;
 const NANOCODEX_EXECUTION_TIMEOUT_MS = 720_000;
+const NANOCODEX_PROCESS_POLL_MS = 5_000;
+
+type SandboxSession = Awaited<ReturnType<ReturnType<typeof getSandbox>["createSession"]>>;
+type BackgroundExecution = { success: boolean; exitCode: number; stdout: string; stderr: string };
+
+async function runNanocodexInBackground(
+	session: SandboxSession,
+	command: string,
+	options: { cwd: string; env: Record<string, string>; processId: string },
+	context: { jobId: string; generation: number },
+): Promise<BackgroundExecution> {
+	const process = await session.startProcess(command, {
+		cwd: options.cwd,
+		env: options.env,
+		processId: options.processId,
+		autoCleanup: false,
+		timeout: NANOCODEX_EXECUTION_TIMEOUT_MS,
+	});
+	const startedAt = Date.now();
+	let polls = 0;
+	while (Date.now() - startedAt < NANOCODEX_EXECUTION_TIMEOUT_MS) {
+		const current = await session.getProcess(process.id);
+		if (!current) return { success: false, exitCode: 1, stdout: "", stderr: "NanoCodex background process disappeared." };
+		const status = current.status;
+		if (["completed", "failed", "killed", "error"].includes(status)) {
+			const logs = await current.getLogs();
+			const exitCode = current.exitCode ?? 1;
+			return {
+				success: status === "completed" && exitCode === 0,
+				exitCode,
+				stdout: logs.stdout,
+				stderr: logs.stderr,
+			};
+		}
+		polls += 1;
+		if (polls === 1 || polls % 12 === 0) {
+			console.log("NanoCodex background process active", {
+				jobId: context.jobId,
+				generation: context.generation,
+				processId: process.id,
+				elapsedSeconds: Math.floor((Date.now() - startedAt) / 1_000),
+			});
+		}
+		await new Promise((resolve) => setTimeout(resolve, NANOCODEX_PROCESS_POLL_MS));
+	}
+	await process.kill("SIGTERM").catch(() => undefined);
+	const logs = await process.getLogs().catch(() => ({ stdout: "", stderr: "" }));
+	return { success: false, exitCode: 124, stdout: logs.stdout, stderr: logs.stderr || "NanoCodex execution timed out." };
+}
 
 async function runBoundedSandboxCleanup(action: () => Promise<unknown>, classification: string): Promise<void> {
 	let timeout: ReturnType<typeof setTimeout> | undefined;
@@ -317,11 +366,12 @@ export default {
 			const requestPath = `/tmp/${sessionId}-nanocodex-request.json`;
 			const requestWrite = await session.writeFile(requestPath, JSON.stringify({ prompt, instructions, cwd: checkoutDirectory, model }));
 			if (!requestWrite.success) return Response.json({ jobId: job.jobId, state: "candidate-failed", classification: "nanocodex-input-write-failed" });
-			const execution = await session.exec(`node /opt/app-harness/agent-entrypoint.mjs < ${requestPath}`, {
-				cwd: checkoutDirectory,
-				env: agentEnv,
-				timeout: NANOCODEX_EXECUTION_TIMEOUT_MS,
-			});
+			const execution = await runNanocodexInBackground(
+				session,
+				`node /opt/app-harness/agent-entrypoint.mjs < ${requestPath}`,
+				{ cwd: checkoutDirectory, env: agentEnv, processId: `nanocodex-${sessionId}` },
+				{ jobId: job.jobId, generation: job.generation },
+			);
 			const agent = parseAgent(execution.stdout, model);
 			if (!execution.success || !agent?.ok) return Response.json({ jobId: job.jobId, state: "candidate-failed", classification: agent?.classification ?? "nanocodex-output-invalid", agent: agent?.summary ?? { model, responseIds: [], tools: [] } });
 
