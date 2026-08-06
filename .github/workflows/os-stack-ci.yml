@@ -1,0 +1,49 @@
+name: Validate App Harness OS stack node
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: app-harness-stack-${{ github.event.pull_request.head.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate-node:
+    if: startsWith(github.event.pull_request.head.ref, 'app-harness-os/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify orchestrator-owned stack relationship
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          node -e '
+            const { execFileSync } = require("node:child_process");
+            const pr = JSON.parse(execFileSync("gh", ["pr", "view", process.env.PR, "--json", "headRefName,baseRefName"], { encoding: "utf8" }));
+            if (!/^app-harness-os\/\d+\/g\d+$/.test(pr.headRefName)) throw new Error("PR head is outside the OS stack namespace");
+            if (!(pr.baseRefName === "main" || /^app-harness-os\/\d+\/g\d+$/.test(pr.baseRefName))) throw new Error("PR base is not main or an immediate OS stack parent");
+          '
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/pull/${{ github.event.pull_request.number }}/merge
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Mandatory baseline
+        run: npx tsc --noEmit
+      - name: Visual CI profile (actual static visual safeguard)
+        run: node scripts/check-visual-candidate.mjs
+      - name: Publish validation evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: gh pr comment "$PR" --body "<!-- app-harness-os-ci:${{ github.run_id }} -->
+          App Harness OS stack-node validation passed: baseline TypeScript plus the actual visual-token/reduced-motion static check. Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"

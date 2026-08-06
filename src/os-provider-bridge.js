@@ -82,11 +82,12 @@ export function createOsNativeGitJob({ manifest, plan }) {
 /** Map only actual runner responses into truthful Durable Object states. */
 export function classifyOsRunnerResponse(value) {
 	const state = value && typeof value === "object" ? value.state : undefined;
+	const classification = value && typeof value === "object" && typeof value.classification === "string" && /^[a-z0-9-]{1,80}$/u.test(value.classification) ? value.classification : null;
 	if (state === "checked-out") return { phase: "building", detail: "Cloudflare OS isolated workspace checked out the allowed repository.", terminal: false };
 	if (state === "pull-request-opened") return { phase: "building", detail: "Cloudflare OS native Git candidate branch was pushed and its pull request was opened.", terminal: false };
 	if (state === "needs-restack") return { phase: "needs_review", detail: "Cloudflare OS detected a changed parent base and marked the stack for a single root-led restack.", terminal: true };
 	if (state === "credential-bridge-required") return { phase: "needs_review", detail: "Cloudflare OS runner is reachable, but native Git is blocked until the repository credential bridge is enabled.", terminal: true };
-	if (state === "checkout-failed" || state === "candidate-failed") return { phase: "needs_review", detail: "Cloudflare OS native candidate execution failed. No deployment was created.", terminal: true };
+	if (state === "checkout-failed" || state === "candidate-failed") return { phase: "needs_review", detail: `Cloudflare OS native candidate execution failed${classification ? ` (${classification})` : ""}. No deployment was created.`, terminal: true };
 	return { phase: "needs_review", detail: "Cloudflare OS runner returned an unrecognized status. No native Git action is claimed.", terminal: true };
 }
 

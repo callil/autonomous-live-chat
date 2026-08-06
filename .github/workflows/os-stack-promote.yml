@@ -1,0 +1,70 @@
+name: Promote App Harness OS stack node
+
+on:
+  workflow_dispatch:
+    inputs:
+      pull_request: { required: true, type: string }
+      stack_id: { required: true, type: string }
+      generation: { required: true, type: string }
+      issue_number: { required: true, type: string }
+      parent_branch: { required: true, type: string }
+      head_sha: { required: true, type: string }
+      room: { required: true, type: string }
+      workflow_id: { required: true, type: string }
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: app-harness-stack-${{ inputs.stack_id }}-generation-${{ inputs.generation }}
+  cancel-in-progress: false
+
+jobs:
+  promote-root:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.AUTONOMY_GITHUB_TOKEN }}
+      PR: ${{ inputs.pull_request }}
+      STACK_ID: ${{ inputs.stack_id }}
+      GENERATION: ${{ inputs.generation }}
+      ISSUE: ${{ inputs.issue_number }}
+      EXPECTED_PARENT: ${{ inputs.parent_branch }}
+      EXPECTED_HEAD: ${{ inputs.head_sha }}
+      AUTONOMY_REQUEST_ID: ${{ inputs.workflow_id }}
+      AUTONOMY_ROOM: ${{ inputs.room }}
+      AUTONOMY_CALLBACK_URL: ${{ secrets.AUTONOMY_CALLBACK_URL }}
+      AUTONOMY_GITHUB_TOKEN: ${{ secrets.AUTONOMY_GITHUB_TOKEN }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+    steps:
+      - name: Verify immutable root stack provenance
+        run: |
+          node -e '
+            const { execFileSync } = require("node:child_process");
+            const pr = JSON.parse(execFileSync("gh", ["pr", "view", process.env.PR, "--json", "headRefName,baseRefName,headRefOid,state"], { encoding: "utf8" }));
+            if (pr.state !== "OPEN" || pr.baseRefName !== process.env.EXPECTED_PARENT || pr.headRefOid !== process.env.EXPECTED_HEAD || !/^app-harness-os\/\d+\/g\d+$/.test(pr.headRefName)) throw new Error("stale or invalid stack provenance");
+          '
+      - name: Wait for current stack-node CI
+        run: gh pr checks "$PR" --watch --required
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Current stack-tip integration gate
+        run: |
+          npx tsc --noEmit
+          node scripts/check-visual-candidate.mjs
+      - name: Merge the validated current generation
+        run: |
+          gh issue comment "$ISSUE" --body "<!-- app-harness-os-stack-${STACK_ID}-g${GENERATION}-promoting -->
+          Stack `${STACK_ID}` generation ${GENERATION} passed its node and stack-tip gates. Promoting PR #${PR}."
+          gh pr merge "$PR" --squash --delete-branch
+      - name: Deploy merged main
+        run: npx wrangler deploy
+      - name: Publish durable completion callback
+        run: node scripts/autonomy-callback.mjs completed "Cloudflare OS stack ${STACK_ID} generation ${GENERATION} validated, merged, and deployed." "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"

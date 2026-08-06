@@ -24,6 +24,7 @@ type SafeManifest = {
 };
 
 type AccentColor = "blue" | "green" | "purple" | "orange";
+type Classification = { changeType: "visual" | "content" | "data" | "behavior" | "infrastructure"; scope: "localized" | "bounded" | "broad"; risk: "low" | "medium" | "high"; affectedSurface: "ui" | "copy" | "data" | "behavior" | "infrastructure"; reversible: boolean; executionEligibility: "eligible" | "needs_review"; ciProfile: "visual" | "content" | "behavior" | "data" | "infrastructure" };
 
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/;
 const COLORS = new Set<AccentColor>(["blue", "green", "purple", "orange"]);
@@ -67,23 +68,36 @@ function planSchema() {
 	return {
 		type: "object",
 		additionalProperties: false,
-		required: ["decision", "color", "rationale"],
+		required: ["decision", "color", "rationale", "classification"],
 		properties: {
 			decision: { type: "string", enum: ["approved", "needs_review"] },
 			color: { type: ["string", "null"], enum: ["blue", "green", "purple", "orange", null] },
 			rationale: { type: "string", maxLength: 240 },
+			classification: { type: "object", additionalProperties: false, required: ["changeType", "scope", "risk", "affectedSurface", "reversible", "executionEligibility", "ciProfile"], properties: {
+				changeType: { type: "string", enum: ["visual", "content", "data", "behavior", "infrastructure"] },
+				scope: { type: "string", enum: ["localized", "bounded", "broad"] },
+				risk: { type: "string", enum: ["low", "medium", "high"] },
+				affectedSurface: { type: "string", enum: ["ui", "copy", "data", "behavior", "infrastructure"] },
+				reversible: { type: "boolean" },
+				executionEligibility: { type: "string", enum: ["eligible", "needs_review"] },
+				ciProfile: { type: "string", enum: ["visual", "content", "behavior", "data", "infrastructure"] },
+			} },
 		},
 	};
 }
 
-function validatedPlan(value: unknown): { decision: "approved"; color: AccentColor; rationale: string } | { decision: "needs_review"; rationale: string } | null {
+function validatedPlan(value: unknown): ({ decision: "approved"; color: AccentColor; rationale: string } | { decision: "needs_review"; rationale: string }) & { classification: Classification } | null {
 	if (!value || typeof value !== "object") return null;
 	const plan = value as Record<string, unknown>;
-	if (typeof plan.rationale !== "string" || !plan.rationale.trim() || plan.rationale.length > 240) return null;
+	if (typeof plan.rationale !== "string" || !plan.rationale.trim() || plan.rationale.length > 240 || !plan.classification || typeof plan.classification !== "object") return null;
+	const classification = plan.classification as Record<string, unknown>;
+	if (!["visual", "content", "data", "behavior", "infrastructure"].includes(classification.changeType as string) || !["localized", "bounded", "broad"].includes(classification.scope as string) || !["low", "medium", "high"].includes(classification.risk as string) || !["ui", "copy", "data", "behavior", "infrastructure"].includes(classification.affectedSurface as string) || typeof classification.reversible !== "boolean" || !["eligible", "needs_review"].includes(classification.executionEligibility as string) || !["visual", "content", "behavior", "data", "infrastructure"].includes(classification.ciProfile as string)) return null;
+	const safeClassification = classification as unknown as Classification;
 	if (plan.decision === "approved" && typeof plan.color === "string" && COLORS.has(plan.color as AccentColor)) {
-		return { decision: "approved", color: plan.color as AccentColor, rationale: plan.rationale.trim() };
+		if (safeClassification.executionEligibility !== "eligible") return null;
+		return { decision: "approved", color: plan.color as AccentColor, rationale: plan.rationale.trim(), classification: safeClassification };
 	}
-	if (plan.decision === "needs_review" && plan.color === null) return { decision: "needs_review", rationale: plan.rationale.trim() };
+	if (plan.decision === "needs_review" && plan.color === null) return { decision: "needs_review", rationale: plan.rationale.trim(), classification: safeClassification };
 	return null;
 }
 
@@ -111,6 +125,7 @@ async function askModel(manifest: SafeManifest, env: Env): Promise<Response> {
 		"Return a plan only for an unambiguous request to set this app's accent color to blue, green, purple, or orange.",
 		"You may not propose source edits, shell commands, repository URLs, credentials, dependencies, configuration changes, authentication changes, or any operation outside that single allowlisted change.",
 		"If the bounded manifest does not request exactly that change, return needs_review with color null.",
+		"Always classify with the bounded taxonomy. An approved accent change is visual, localized, low risk, affects ui, reversible, execution eligible, and uses the visual CI profile. Classification can never waive the allowlist.",
 		"Do not include user data beyond a brief rationale.",
 	].join(" ");
 	try {
@@ -146,6 +161,7 @@ async function askModel(manifest: SafeManifest, env: Env): Promise<Response> {
 			state: "planned",
 			model: { id: result.id, model: env.MODEL_ID },
 			rationale: plan.rationale,
+			classification: plan.classification,
 			plan: { change: { kind: "accent-color", color: plan.color } },
 		});
 	} catch {

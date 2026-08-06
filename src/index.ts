@@ -114,7 +114,10 @@ type HarnessWorkItem = {
 		stackId: string;
 		generation: number;
 		model?: { id: string; model: string };
+		classification?: OsModelClassification;
 		plan?: { kind: "accent-color"; color: "blue" | "green" | "purple" | "orange" };
+		attempts?: number;
+		startedAt?: number;
 		baseSha?: string;
 		headSha?: string;
 	};
@@ -152,6 +155,7 @@ const WORKFLOW_KEY = "workflow";
 const ANNOTATIONS_KEY = "harness-annotations";
 const WORK_ITEMS_KEY = "harness-work-items";
 const MAX_STORED_WORK_ITEMS = 100;
+const OS_RUNNER_LEASE_MS = 180_000;
 const LIVE_APP_URL = "https://autonomous-live-chat.coda-a.workers.dev/?room=main";
 const TERMINAL_PHASES: ReadonlySet<WorkflowPhase> = new Set([
 	"completed",
@@ -176,22 +180,35 @@ type OsAgentPlanResponse = {
 	model?: unknown;
 	plan?: unknown;
 	rationale?: unknown;
+	classification?: unknown;
 };
 
-function acceptedOsAgentPlan(value: unknown): { model: { id: string; model: string }; plan: { kind: "accent-color"; color: "blue" | "green" | "purple" | "orange" }; rationale: string } | null {
+type OsModelClassification = {
+	changeType: "visual" | "content" | "data" | "behavior" | "infrastructure";
+	scope: "localized" | "bounded" | "broad";
+	risk: "low" | "medium" | "high";
+	affectedSurface: "ui" | "copy" | "data" | "behavior" | "infrastructure";
+	reversible: boolean;
+	executionEligibility: "eligible" | "needs_review";
+	ciProfile: "visual" | "content" | "behavior" | "data" | "infrastructure";
+};
+
+function acceptedOsAgentPlan(value: unknown): { model: { id: string; model: string }; plan: { kind: "accent-color"; color: "blue" | "green" | "purple" | "orange" }; rationale: string; classification: OsModelClassification } | null {
 	if (!value || typeof value !== "object") return null;
 	const response = value as OsAgentPlanResponse;
 	if (response.state !== "planned" || !response.model || typeof response.model !== "object" || !response.plan || typeof response.plan !== "object" || typeof response.rationale !== "string") return null;
 	const model = response.model as Record<string, unknown>;
 	const plan = response.plan as Record<string, unknown>;
 	const change = plan.change;
+	const classification = response.classification as Record<string, unknown> | null;
 	if (!change || typeof change !== "object") return null;
 	const candidate = change as Record<string, unknown>;
-	if (typeof model.id !== "string" || typeof model.model !== "string" || candidate.kind !== "accent-color" || !["blue", "green", "purple", "orange"].includes(candidate.color as string)) return null;
+	if (!classification || typeof model.id !== "string" || typeof model.model !== "string" || candidate.kind !== "accent-color" || !["blue", "green", "purple", "orange"].includes(candidate.color as string) || !["visual", "content", "data", "behavior", "infrastructure"].includes(classification.changeType as string) || !["localized", "bounded", "broad"].includes(classification.scope as string) || !["low", "medium", "high"].includes(classification.risk as string) || !["ui", "copy", "data", "behavior", "infrastructure"].includes(classification.affectedSurface as string) || typeof classification.reversible !== "boolean" || classification.executionEligibility !== "eligible" || !["visual", "content", "behavior", "data", "infrastructure"].includes(classification.ciProfile as string)) return null;
 	return {
 		model: { id: model.id, model: model.model },
 		plan: { kind: "accent-color", color: candidate.color as "blue" | "green" | "purple" | "orange" },
 		rationale: response.rationale.slice(0, 240),
+		classification: classification as unknown as OsModelClassification,
 	};
 }
 
@@ -538,6 +555,8 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		workItem.osNativeGit.state = "planned";
 		workItem.osNativeGit.model = agentPlan.model;
 		workItem.osNativeGit.plan = agentPlan.plan;
+		workItem.osNativeGit.classification = agentPlan.classification;
+		await this.applyOsClassificationLabels(workItem, agentPlan.classification);
 		this.transitionWorkItem(workItem, "queued", `Cloudflare OS model ${agentPlan.model.model} produced a bounded candidate plan; native Git is queued durably.`);
 		workflow.phase = "preparing_candidate";
 		workflow.updatedAt = Date.now();
@@ -552,7 +571,9 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		const workflow = await this.ctx.storage.get<WorkflowRecord>(WORKFLOW_KEY);
 		if (!workflow || TERMINAL_PHASES.has(workflow.phase)) return;
 		const workItem = await this.workItemForWorkflow(workflow);
-		if (workItem?.osNativeGit?.state === "planned" && workItem.osNativeGit.plan) await this.ctx.storage.setAlarm(Date.now() + 50);
+		if (!workItem?.osNativeGit?.plan) return;
+		const runner = workItem.osNativeGit;
+		if (runner.state === "planned" || (runner.state === "running" && (!runner.startedAt || Date.now() - runner.startedAt > OS_RUNNER_LEASE_MS))) await this.ctx.storage.setAlarm(Date.now() + 50);
 	}
 
 	private async resumeOsNativeGitRunner(): Promise<void> {
@@ -560,7 +581,12 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		if (!workflow || TERMINAL_PHASES.has(workflow.phase)) return;
 		const workItems = await this.getWorkItems();
 		const workItem = workflow.workItemId ? workItems.find((item) => item.id === workflow.workItemId) : undefined;
-		if (!workItem?.githubIssue || !workItem.osNativeGit?.plan || workItem.osNativeGit.state !== "planned") return;
+		if (!workItem?.githubIssue || !workItem.osNativeGit?.plan) return;
+		if (workItem.osNativeGit.state === "running" && workItem.osNativeGit.startedAt && Date.now() - workItem.osNativeGit.startedAt <= OS_RUNNER_LEASE_MS) {
+			await this.ctx.storage.setAlarm(workItem.osNativeGit.startedAt + OS_RUNNER_LEASE_MS + 50);
+			return;
+		}
+		if (!["planned", "running"].includes(workItem.osNativeGit.state)) return;
 		if (!this.env.OS_NATIVE_GIT_RUNNER || !this.env.OS_NATIVE_GIT_RUNNER_SECRET) {
 			workItem.osNativeGit.state = "blocked";
 			this.transitionWorkItem(workItem, "needs_review", "Cloudflare OS runner binding is unavailable. The model plan is retained; no native Git action was attempted.");
@@ -571,17 +597,39 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		const manifest = createOsPlanningManifest({ workItemId: workItem.id, issueUrl: workItem.githubIssue.url, request: workflow.request, target: workflow.target, room: "main", generation: workItem.osNativeGit.generation });
 		const job = createOsNativeGitJob({ manifest, plan: workItem.osNativeGit.plan });
 		workItem.osNativeGit.state = "running";
+		workItem.osNativeGit.startedAt = Date.now();
+		workItem.osNativeGit.attempts = (workItem.osNativeGit.attempts ?? 0) + 1;
 		this.transitionWorkItem(workItem, "building", "Cloudflare OS isolated native Git runner started the durable candidate job.");
 		await Promise.all([this.ctx.storage.put(WORKFLOW_KEY, workflow), this.saveWorkItems(workItems)]);
 
-		const response = await this.env.OS_NATIVE_GIT_RUNNER.fetch(new Request("https://runner.internal/v1/native-git/jobs", {
-			method: "POST",
-			headers: {
-				Authorization: `Bearer ${this.env.OS_NATIVE_GIT_RUNNER_SECRET}`,
-				"Content-Type": "application/json",
-			},
-			body: JSON.stringify(job),
-		}));
+		let response: Response;
+		try {
+			response = await this.env.OS_NATIVE_GIT_RUNNER.fetch(new Request("https://runner.internal/v1/native-git/jobs", {
+				method: "POST",
+				headers: {
+					Authorization: `Bearer ${this.env.OS_NATIVE_GIT_RUNNER_SECRET}`,
+					"Content-Type": "application/json",
+				},
+				body: JSON.stringify(job),
+			}));
+		} catch {
+			const attempts = workItem.osNativeGit.attempts ?? 1;
+			if (attempts >= 3) {
+				workItem.osNativeGit.state = "blocked";
+				this.transitionWorkItem(workItem, "needs_review", "Cloudflare OS runner did not return after three durable attempts. The model plan is retained; no pull request or deployment is claimed.");
+				workflow.phase = "requires_review";
+			} else {
+				workItem.osNativeGit.state = "planned";
+				workItem.osNativeGit.startedAt = undefined;
+				this.transitionWorkItem(workItem, "queued", `Cloudflare OS runner attempt ${attempts} did not return. The durable job will retry.`);
+				workflow.phase = "preparing_candidate";
+				await this.ctx.storage.setAlarm(Date.now() + attempts * 5_000);
+			}
+			workflow.updatedAt = Date.now();
+			await Promise.all([this.ctx.storage.put(WORKFLOW_KEY, workflow), this.saveWorkItems(workItems)]);
+			this.broadcastWorkflow(workflow);
+			return;
+		}
 		let body: unknown = null;
 		try { body = await response.json(); } catch { /* handled as unrecognized below */ }
 		const outcome = classifyOsRunnerResponse(body);
@@ -598,7 +646,47 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		workflow.activity.push({ phase: workflow.phase, message: outcome.detail, at: workflow.updatedAt });
 		await Promise.all([this.ctx.storage.put(WORKFLOW_KEY, workflow), this.saveWorkItems(workItems)]);
 		await this.appendGitHubIssueStatus(workItem, outcome.detail);
+		if (workItem.githubPullRequestUrl && workItem.osNativeGit.baseSha && workItem.osNativeGit.headSha) await this.dispatchOsStackPromotion(workflow, workItem);
 		this.broadcastWorkflow(workflow);
+	}
+
+	private async dispatchOsStackPromotion(workflow: WorkflowRecord, workItem: HarnessWorkItem): Promise<void> {
+		const runner = workItem.osNativeGit;
+		const match = workItem.githubPullRequestUrl?.match(/\/pull\/(\d+)$/u);
+		if (!runner || !match || !workItem.githubIssue || !runner.baseSha || !runner.headSha) return;
+		const response = await fetch(`https://api.github.com/repos/${this.env.GITHUB_REPOSITORY}/actions/workflows/os-stack-promote.yml/dispatches`, {
+			method: "POST",
+			headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${this.env.GITHUB_AUTOMATION_TOKEN}`, "Content-Type": "application/json", "User-Agent": "app-harness-os", "X-GitHub-Api-Version": "2022-11-28" },
+			body: JSON.stringify({ ref: "main", inputs: { pull_request: match[1], stack_id: runner.stackId, generation: String(runner.generation), issue_number: String(workItem.githubIssue.number), parent_branch: "main", head_sha: runner.headSha, room: "main", workflow_id: workflow.id } }),
+		});
+		if (!response.ok) {
+			this.transitionWorkItem(workItem, "needs_review", "Native candidate pull request exists, but the stack promotion gate could not be dispatched. No merge or deployment was attempted.");
+			workflow.phase = "requires_review";
+			await Promise.all([this.ctx.storage.put(WORKFLOW_KEY, workflow), this.saveWorkItems(await this.getWorkItems())]);
+			await this.appendGitHubIssueStatus(workItem, "Stack promotion dispatch failed after the native candidate PR opened; no merge or deployment was attempted.");
+			return;
+		}
+		await this.appendGitHubIssueStatus(workItem, `Stack scheduled: ${runner.stackId} generation ${runner.generation}, root parent main, base ${runner.baseSha}. Candidate: ${workItem.githubPullRequestUrl}`);
+	}
+
+	private async applyOsClassificationLabels(workItem: HarnessWorkItem, classification: OsModelClassification): Promise<void> {
+		if (!workItem.githubIssue) return;
+		const labels = [
+			`change-${classification.changeType}`,
+			`scope-${classification.scope}`,
+			`risk-${classification.risk}`,
+			`surface-${classification.affectedSurface}`,
+			classification.reversible ? "reversible-yes" : "reversible-no",
+			`execution-${classification.executionEligibility}`,
+			`ci-${classification.ciProfile}`,
+		];
+		try {
+			await fetch(`https://api.github.com/repos/${this.env.GITHUB_REPOSITORY}/issues/${workItem.githubIssue.number}/labels`, {
+				method: "POST",
+				headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${this.env.GITHUB_AUTOMATION_TOKEN}`, "Content-Type": "application/json", "User-Agent": "app-harness-os", "X-GitHub-Api-Version": "2022-11-28" },
+				body: JSON.stringify({ labels }),
+			});
+		} catch { /* labels improve discoverability but never alter execution authority */ }
 	}
 
 	private async dispatchAutonomousRun(workflow: WorkflowRecord): Promise<void> {
