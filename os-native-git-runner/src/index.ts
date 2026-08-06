@@ -42,6 +42,7 @@ const JOB_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/u;
 const BRANCH = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,159}$/u;
 const SHA = /^[0-9a-f]{40}$/iu;
 const encoder = new TextEncoder();
+const RUNNER_IMAGE_REVISION = "nanocodex-0-3-0-gh-stack-0-1-0";
 
 function base64Url(bytes: Uint8Array): string {
 	let binary = "";
@@ -235,7 +236,9 @@ export default {
 		if (request.method !== "POST" || !authorized(request, env)) return new Response("Not found", { status: 404 });
 
 		if (url.pathname === "/v1/probe") {
-			const sandbox = getSandbox(env.Sandbox, "app-harness-runner-probe", { enableDefaultSession: false });
+			// A versioned Sandbox identity prevents a surviving Durable Object from
+			// serving the previous container image after a runner image release.
+			const sandbox = getSandbox(env.Sandbox, `app-harness-runner-probe-${RUNNER_IMAGE_REVISION}`, { enableDefaultSession: false });
 			try {
 				const session = await createSessionAfterRuntimeUpdate(sandbox, { id: "probe", cwd: "/workspace", commandTimeoutMs: 20_000 });
 				const result = await session.exec("git --version && nanocodex --version && gh stack --help >/dev/null", { timeout: 20_000 });
@@ -259,7 +262,7 @@ export default {
 		const installation = await prepareGitHubInstallation(env);
 		if ("classification" in installation) return Response.json({ jobId: job.jobId, state: "checkout-failed", classification: installation.classification });
 
-		const sandbox = getSandbox(env.Sandbox, `app-harness-${job.jobId}-g${job.generation}`, { enableDefaultSession: false });
+		const sandbox = getSandbox(env.Sandbox, `app-harness-${RUNNER_IMAGE_REVISION}-${job.jobId}-g${job.generation}`, { enableDefaultSession: false });
 		const sessionId = `candidate-${job.generation}-${crypto.randomUUID().replaceAll("-", "").slice(0, 16)}`;
 		const checkoutDirectory = `/workspace/${sessionId}-repository`;
 		let session;
