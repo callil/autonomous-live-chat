@@ -10,6 +10,7 @@ const job = createOsNativeGitJob({ manifest, plan: { kind: "documentation-task",
 assert.equal(job.repository, "callil/autonomous-live-chat");
 assert.equal(job.candidate.stack.parentBranch, "main");
 assert.equal(job.candidate.stack.parentBaseSha, null);
+assert.equal(job.candidate.change.kind, "documentation-task");
 assert.match(job.candidate.change.request, /Clarify/);
 assert.equal(classifyOsRunnerResponse({ state: "checked-out" }).phase, "building");
 assert.equal(classifyOsRunnerResponse({ state: "credential-bridge-required" }).terminal, true);
