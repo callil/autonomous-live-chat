@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import {
 	classifyOsRunnerResponse,
 	createOsNativeGitJob,
+	createStackNodeIntent,
 	createOsWorkspaceSubmission,
 	osExecutionDisposition,
 	osWorkspaceTurnDisposition,
@@ -66,6 +67,8 @@ assert.equal(job.candidate.stack.parentBaseSha, null);
 assert.equal(job.candidate.change.kind, "repository-task");
 assert.match(job.candidate.change.request, /Clarify/);
 assert.equal(pinnedJob.candidate.stack.parentBaseSha, "a".repeat(40));
+assert.equal(createStackNodeIntent(issue), "Implement App Harness issue #42 from its durable work record.");
+assert.ok(createStackNodeIntent(issue).length < 280);
 assert.equal(classifyOsRunnerResponse({ state: "checked-out" }).phase, "building");
 assert.equal(classifyOsRunnerResponse({ state: "credential-bridge-required" }).terminal, true);
 assert.equal(classifyOsRunnerResponse({ state: "pull-request-opened" }).terminal, false);

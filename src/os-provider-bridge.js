@@ -114,6 +114,12 @@ export function createOsNativeGitJob({ workItemId, issue, request, generation = 
 	};
 }
 
+/** Keep stack topology metadata bounded; the full request remains in durable work state. */
+export function createStackNodeIntent(issue) {
+	const linkedIssue = safeIssue(issue);
+	return `Implement App Harness issue #${linkedIssue.number} from its durable work record.`;
+}
+
 /** Map only actual runner responses into truthful Durable Object states. */
 export function classifyOsRunnerResponse(value) {
 	const state = value && typeof value === "object" ? value.state : undefined;

@@ -17,6 +17,7 @@ import { createGithubIdentityClient } from "./github-identity-client.js";
 import {
 	classifyOsRunnerResponse,
 	createOsNativeGitJob,
+	createStackNodeIntent,
 	createOsWorkspaceSubmission,
 	osExecutionDisposition,
 	osWorkspaceTurnDisposition,
@@ -795,7 +796,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 			lane: "room-main",
 			issue: workItem.githubIssue,
 			baseSha: body.object.sha,
-			nodes: [{ id: "root", intent: workflow.request, branchPrefix: `app-harness-os/${workItem.githubIssue.number}` }],
+			nodes: [{ id: "root", intent: createStackNodeIntent(workItem.githubIssue), branchPrefix: `app-harness-os/${workItem.githubIssue.number}` }],
 		});
 		workItem.osNativeGit.baseSha = body.object.sha.toLowerCase();
 		await this.completeClaim(claim, { workflow, workItem, ledger, nextKind: "run-os", nextStage: "queued" });
