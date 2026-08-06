@@ -30,6 +30,9 @@ assert.match(workerConfig, /"entrypoint": "NativeGitRunner"/u);
 assert.doesNotMatch(workerSource, /OS_NATIVE_GIT_RUNNER_SECRET/u);
 assert.match(workerSource, /\.enqueueJob\(runnerJob\)/u);
 assert.match(workerSource, /\.getJob\(workItem\.osNativeGit\.jobId\)/u);
+assert.match(workerSource, /workItem\.osNativeGit\.jobId = runnerJob\.jobId/u);
+assert.match(workerSource, /attemptToken: runnerAttemptToken/u);
+assert.doesNotMatch(workerSource, /type: "runner-candidate-recorded"[\s\S]{0,300}attemptToken: claim\.leaseToken/u);
 assert.doesNotMatch(workerSource, /\.runJob\(runnerJob\)/u);
 
 // Every request reuses one repository workspace/chat. The durable work item is

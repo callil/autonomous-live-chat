@@ -230,6 +230,7 @@ const SHA = /^[0-9a-f]{40}$/iu;
 const LIVE_APP_URL = "https://autonomous-live-chat.coda-a.workers.dev/?room=main";
 const AUTO_RESTACK_MESSAGE = "Cloudflare OS detected a changed parent base and marked the stack for a single root-led restack.";
 const LEGACY_RUNNER_RPC_MESSAGE = 'Coordinator effect run-os failed after 3 attempts (The RPC receiver does not implement the method "runJob".).';
+const DURABLE_POLL_TOKEN_MESSAGE = "Coordinator effect poll-os failed after 3 attempts (Runner candidate reconciliation failed (runner-attempt-mismatch).).";
 const OS_WORKSPACE_CALLER_EMAIL = "callil.capuozzo@gmail.com";
 const TERMINAL_PHASES: ReadonlySet<WorkflowPhase> = new Set([
 	"completed",
@@ -295,6 +296,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		this.ctx.blockConcurrencyWhile(() => this.scheduleCoordinatorAlarm());
 		this.ctx.waitUntil(this.recoverAutoRestackStops());
 		this.ctx.waitUntil(this.recoverSynchronousRunnerLeases());
+		this.ctx.waitUntil(this.recoverDurablePollTokenStops());
 	}
 
 	[restore](params: unknown): RpcTarget {
@@ -838,6 +840,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 			generation: ledger.generation,
 			parentBaseSha: ledger.generationBaseSha,
 		});
+		workItem.osNativeGit.jobId = runnerJob.jobId;
 		const body = await (this.env.OS_NATIVE_GIT_RUNNER as OsNativeGitRunnerGateway).enqueueJob(runnerJob);
 		const queued = body && typeof body === "object" ? body as Record<string, unknown> : {};
 		if (queued.state !== "queued" && queued.state !== "running" && queued.state !== "terminal") throw new Error("Native Git runner did not durably accept the job.");
@@ -866,6 +869,8 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		const workItem = await this.getWorkItem(claim.job.workItemId);
 		let ledger = await this.ctx.storage.get<StackLedger>(this.ledgerKey(claim.job.workItemId));
 		if (!workflow || !workItem?.githubIssue || !workItem.osNativeGit?.workspace || !ledger) throw new Error("Native Git result reconciliation lost its durable state.");
+		const runnerAttemptToken = ledger.runner.stage === "running" ? ledger.runner.attemptToken : null;
+		if (!runnerAttemptToken) throw new Error("Native Git result reconciliation lost its stack runner attempt.");
 		const value = body && typeof body === "object" ? body as Record<string, unknown> : {};
 		const agent = normalizeAgentProvenance(value.agent);
 		if (agent) workItem.osNativeGit.agent = agent;
@@ -899,7 +904,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 			return;
 		}
 		if (value.state !== "pull-request-opened" || typeof value.baseSha !== "string" || typeof value.headSha !== "string" || !value.pullRequest || typeof value.pullRequest !== "object") {
-			const failed = applyStackEvent(ledger, { type: "runner-attempt-failed", eventId: `runner-failed-${claim.effect.attempts}`, generation: ledger.generation, attemptToken: claim.leaseToken });
+			const failed = applyStackEvent(ledger, { type: "runner-attempt-failed", eventId: `runner-failed-g${ledger.generation}`, generation: ledger.generation, attemptToken: runnerAttemptToken });
 			if (failed.disposition === "applied") ledger = failed.ledger;
 			await this.terminateClaim(claim, workflow, workItem, "requires_review", outcome.detail, ledger);
 			return;
@@ -908,10 +913,10 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		if (!Number.isInteger(pullRequest.number) || typeof pullRequest.url !== "string") throw new Error("Runner pull request provenance is invalid.");
 		const recorded = applyStackEvent(ledger, {
 			type: "runner-candidate-recorded",
-			eventId: `runner-candidate-${claim.effect.attempts}`,
+			eventId: `runner-candidate-g${ledger.generation}`,
 			generation: ledger.generation,
 			nodeId: "root",
-			attemptToken: claim.leaseToken,
+			attemptToken: runnerAttemptToken,
 			parentBranch: "main",
 			parentBaseSha: value.baseSha,
 			headSha: value.headSha,
@@ -1175,6 +1180,73 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 			this.broadcastWorkflow(workflow);
 			await this.scheduleCoordinatorAlarm();
 			this.ctx.waitUntil(this.appendGitHubIssueStatus(current, "Open root stack resumed automatically against the current main SHA."));
+		}
+	}
+
+	/**
+	 * One-time protocol migration for dispatcher jobs whose result was fenced by
+	 * the poll effect's delivery token instead of the runner attempt token. The
+	 * remote RunnerJob remains authoritative and is resumed without rerunning it.
+	 */
+	private async recoverDurablePollTokenStops(): Promise<void> {
+		if (!this.env.OS_NATIVE_GIT_RUNNER) return;
+		const workItems = (await this.ctx.storage.get<HarnessWorkItem[]>(WORK_ITEMS_KEY)) ?? [];
+		for (const stored of workItems) {
+			if (stored.phase !== "needs_review" || stored.activity.at(-1)?.message !== DURABLE_POLL_TOKEN_MESSAGE || !stored.workflowId || !stored.githubIssue || !stored.osNativeGit?.workspace) continue;
+			const issueResponse = await fetch(`https://api.github.com/repos/${this.env.GITHUB_REPOSITORY}/issues/${stored.githubIssue.number}`, {
+				headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${this.env.GITHUB_AUTOMATION_TOKEN}`, "User-Agent": "app-harness-os", "X-GitHub-Api-Version": "2022-11-28" },
+			});
+			if (!issueResponse.ok || (await issueResponse.json() as { state?: unknown }).state !== "open") continue;
+			const workflow = await this.getWorkflow(stored.workflowId);
+			const current = await this.getWorkItem(stored.id);
+			const blockedLedger = await this.ctx.storage.get<StackLedger>(this.ledgerKey(stored.id));
+			if (!workflow || !current?.osNativeGit || !current.githubIssue || !blockedLedger || blockedLedger.generation !== 1 || (workflow.phase !== "requires_review" && workflow.phase !== "failed")) continue;
+			let remote: Record<string, unknown> = {};
+			try {
+				const value = await (this.env.OS_NATIVE_GIT_RUNNER as OsNativeGitRunnerGateway).getJob(current.osNativeGit.jobId);
+				if (value && typeof value === "object") remote = value as Record<string, unknown>;
+			} catch {
+				continue;
+			}
+			if (!["queued", "running", "terminal"].includes(String(remote.state))) continue;
+			const recoveryToken = `dispatcher-poll-recovery-g${blockedLedger.generation}`;
+			const freshLedger = createStackLedger({
+				id: current.osNativeGit.stackId,
+				repository: this.env.GITHUB_REPOSITORY,
+				lane: "room-main",
+				issue: current.githubIssue,
+				baseSha: blockedLedger.generationBaseSha,
+				nodes: [{ id: "root", intent: createStackNodeIntent(current.githubIssue), branchPrefix: `app-harness-os/${current.githubIssue.number}` }],
+			});
+			const started = applyStackEvent(freshLedger, { type: "runner-attempt-started", eventId: "dispatcher-poll-recovery", generation: freshLedger.generation, nodeId: "root", attemptToken: recoveryToken });
+			if (started.disposition !== "applied") continue;
+			const now = Date.now();
+			const effectId = this.effectId(workflow.id, "poll-os");
+			const job = createCoordinatorJob({ workflowId: workflow.id, workItemId: current.id, pipeline: "os-native-git", firstEffectId: effectId, now });
+			const effect = createCoordinatorEffect({ id: effectId, jobId: job.id, workItemId: current.id, kind: "poll-os", now });
+			workflow.phase = "preparing_candidate";
+			workflow.result = undefined;
+			workflow.updatedAt = now;
+			workflow.activity.push({ phase: workflow.phase, message: "Durable native Git result polling resumed after the dispatcher protocol upgrade.", at: now });
+			current.osNativeGit.state = "running";
+			this.transitionWorkItem(current, "building", "Durable native Git result polling resumed after the dispatcher protocol upgrade.");
+			const resumed = await this.ctx.storage.transaction(async (txn) => {
+				const latest = await txn.get<HarnessWorkItem>(this.workItemKey(current.id));
+				if (!latest || latest.phase !== "needs_review" || latest.activity.at(-1)?.message !== DURABLE_POLL_TOKEN_MESSAGE) return false;
+				await Promise.all([
+					txn.put(this.workflowKey(workflow.id), workflow),
+					txn.put(this.workItemKey(current.id), current),
+					txn.put(this.jobKey(job.id), job),
+					txn.put(this.outboxKey(effect.id), effect),
+					txn.put(this.ledgerKey(current.id), started.ledger),
+				]);
+				return true;
+			});
+			if (!resumed) continue;
+			await Promise.all([this.saveWorkflow(workflow), this.saveWorkItem(current)]);
+			this.broadcastWorkflow(workflow);
+			await this.scheduleCoordinatorAlarm();
+			this.ctx.waitUntil(this.appendGitHubIssueStatus(current, "Durable native Git result polling resumed after the dispatcher protocol upgrade."));
 		}
 	}
 
