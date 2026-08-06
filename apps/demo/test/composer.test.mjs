@@ -11,6 +11,7 @@ assert.doesNotThrow(() => new Function(clientScript), "the browser client script
 
 assert.doesNotMatch(html, /maxlength=/u);
 assert.doesNotMatch(html, /message-count/u);
+assert.match(html, /<h1>Shape this app together<\/h1>/u);
 const browserSafeTextPolicy = html.match(/TARGET_SAFE_TEXT_CHARACTERS = (\d+)/u);
 assert.equal(Number(browserSafeTextPolicy?.[1]), AUTHORING_ENVELOPE_POLICY.safeTextCharacters, "the no-build demo mirrors the shared privacy envelope exactly");
 assert.doesNotMatch(worker, /MAX_(?:MESSAGE_LENGTH|REQUEST_LENGTH|STORED_MESSAGES|STORED_ANNOTATIONS|STORED_WORK_ITEMS)/u);
