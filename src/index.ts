@@ -198,9 +198,6 @@ type OsWorkspaceResponse = { text: string };
 type OsWorkspaceResponseTargetProps = { room: string; workItemId: string };
 type OsExecutionBridgeProps = { source: string };
 type OsExecutionRequest = { workItemId: string; issueNumber: number };
-type WorkerExports = {
-	OsWorkspaceResponseTarget(input: { props: OsWorkspaceResponseTargetProps }): unknown;
-};
 
 const MAX_MESSAGE_LENGTH = 2_000;
 const MAX_REQUEST_LENGTH = 500;
@@ -739,7 +736,11 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 			stackId: `stack-${workItem.id}`,
 			generation: 1,
 		};
-		const responseTarget = (this.ctx.exports as unknown as WorkerExports).OsWorkspaceResponseTarget({ props: { room: "main", workItemId: workItem.id } });
+		// A loopback binding configured with dynamic props may be represented by an
+		// RPC thenable at runtime. Resolve it before forwarding the persistent
+		// callback capability to Cloudflare OS; passing the unresolved thenable is
+		// rejected by Workers RPC as a non-serializable `RpcPromise`.
+		const responseTarget = await this.ctx.exports.OsWorkspaceResponseTarget({ props: { room: "main", workItemId: workItem.id } });
 		const submission = createOsWorkspaceSubmission({
 			workItemId: workItem.id,
 			issue: workItem.githubIssue,
