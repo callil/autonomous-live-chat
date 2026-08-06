@@ -20,9 +20,13 @@
     }
   ],
   "durable_objects": {
-    "bindings": [{ "class_name": "Sandbox", "name": "Sandbox" }]
+    "bindings": [
+      { "class_name": "Sandbox", "name": "Sandbox" },
+      { "class_name": "RunnerJob", "name": "RUNNER_JOB" }
+    ]
   },
   "migrations": [
-    { "new_sqlite_classes": ["Sandbox"], "tag": "v1" }
+    { "new_sqlite_classes": ["Sandbox"], "tag": "v1" },
+    { "new_sqlite_classes": ["RunnerJob"], "tag": "v2" }
   ]
 }
