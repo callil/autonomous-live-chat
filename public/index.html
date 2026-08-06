@@ -3,341 +3,21 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="theme-color" content="#f7f7f5" />
+    <meta name="theme-color" content="#ffffff" />
     <title>App Harness</title>
-    <style>
-      :root { --accent: #8b5cf6; color: #0d0d0d; background: #fff; font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-      * { box-sizing: border-box; }
-      body { margin: 0; min-width: 320px; background: #fff; }
-      button, textarea { font: inherit; }
-      .app { min-height: 100vh; display: grid; grid-template-columns: 52px minmax(0, 1fr); }
-      .sidebar { border-right: 1px solid #ececec; padding: 10px 6px; display: flex; flex-direction: column; align-items: center; gap: 8px; }
-      .rail-button { width: 38px; height: 38px; border: 0; border-radius: 8px; background: transparent; color: #202123; cursor: pointer; display: grid; place-items: center; font-size: 20px; line-height: 1; }
-      .rail-button:hover, .rail-button[aria-current="page"], .rail-button[aria-pressed="true"] { background: #f1f1f1; }
-      .brand { font-size: 15px; font-weight: 750; letter-spacing: -.06em; }
-      .request-button { font-size: 20px; }
-      main { min-width: 0; display: flex; flex-direction: column; }
-      .topbar { height: 52px; display: flex; align-items: center; justify-content: space-between; padding: 0 20px; }
-      .room-title { font-size: 14px; font-weight: 600; }
-      .connection { color: #868686; font-size: 11px; display: flex; gap: 6px; align-items: center; }
-      .dot, .status-dot { width: 7px; height: 7px; background: #999; border-radius: 999px; display: inline-block; }
-      .dot.live { background: var(--accent); }
-      .conversation { width: min(100%, 720px); margin: 0 auto; padding: 44px 24px 158px; flex: 1; }
-      .empty { color: #777; font-size: 14px; margin-top: 18vh; text-align: center; }
-      .messages { display: grid; gap: 22px; }
-      .message { max-width: 660px; }
-      .author { color: #555; font-size: 12px; font-weight: 600; margin: 0 0 5px; }
-      .text { font-size: 15px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
-      .composer-wrap { position: fixed; bottom: 0; left: 52px; right: 0; background: linear-gradient(to top, #fff 74%, rgba(255,255,255,0)); padding: 28px 24px 20px; }
-      .composer { width: min(100%, 768px); margin: 0 auto; border: 1px solid #d8d8d8; border-radius: 14px; box-shadow: 0 3px 14px rgba(0,0,0,.07); background: #fff; padding: 9px 10px; display: flex; align-items: end; gap: 8px; }
-      textarea { border: 0; outline: 0; resize: none; min-height: 25px; max-height: 180px; flex: 1; padding: 5px 4px; color: #171717; font-size: 15px; line-height: 1.45; background: transparent; }
-      textarea::placeholder { color: #8e8e8e; }
-      .send { border: 0; width: 32px; height: 32px; border-radius: 8px; background: #202123; color: #fff; cursor: pointer; display: grid; place-items: center; font-size: 16px; }
-      .send:disabled { background: #e5e5e5; color: #aaa; cursor: default; }
-      .hint { width: min(100%, 768px); margin: 8px auto 0; text-align: center; color: #999; font-size: 11px; }
-      .request-input { border: 1px solid #d9d9d9; border-radius: 9px; display: block; min-height: 92px; padding: 9px; width: 100%; }
-      .dialog-actions { display: flex; justify-content: end; gap: 8px; margin-top: 12px; }
-      .secondary, .primary { border: 0; border-radius: 8px; cursor: pointer; font-size: 13px; padding: 8px 11px; }
-      .secondary { background: #f2f2f2; color: #333; }
-      .primary { background: #202123; color: #fff; }
-      .request-error { color: #b42318; font-size: 12px; margin: 8px 0 0; min-height: 17px; }
-      .harness-frame { inset: 0; pointer-events: none; position: fixed; z-index: 10; }
-      .harness-launcher, .authoring-popover, .annotation-panel, .target-composer, .comment-pin, .submission-toast { pointer-events: auto; }
-      .harness-launcher { align-items: center; background: #202123; border: 0; border-radius: 999px; bottom: 104px; box-shadow: 0 7px 19px rgba(0,0,0,.17), 0 1px 2px rgba(0,0,0,.18); color: #fff; cursor: pointer; display: flex; font-size: 16px; font-weight: 750; height: 42px; justify-content: center; position: fixed; right: 18px; transition: background .15s ease, scale .15s ease; width: 42px; z-index: 5; }
-      .harness-launcher:hover, .harness-launcher[aria-expanded="true"] { background: #353537; }
-      .harness-launcher:active { scale: .96; }
-      .authoring-popover { background: rgba(255,255,255,.98); border: 1px solid rgba(0,0,0,.11); border-radius: 13px; bottom: 156px; box-shadow: 0 12px 34px rgba(0,0,0,.15), 0 2px 5px rgba(0,0,0,.06); color: #333; padding: 8px; position: fixed; right: 18px; width: 230px; z-index: 4; }
-      .authoring-popover[hidden] { display: none; }
-      .authoring-heading { align-items: center; color: #686868; display: flex; font-size: 11px; font-weight: 650; justify-content: space-between; letter-spacing: .01em; padding: 1px 2px 7px 5px; }
-      .authoring-tools { display: grid; gap: 4px; grid-template-columns: 1.18fr 1fr 1fr; }
-      .authoring-notice { color: #606060; font-size: 11px; line-height: 1.35; margin: 7px 4px 1px; }
-      .authoring-notice[hidden] { display: none; }
-      .harness-tool { align-items: center; background: #f4f4f4; border: 0; border-radius: 8px; color: #303030; cursor: pointer; display: inline-flex; font-size: 12px; gap: 5px; height: 34px; justify-content: center; padding: 0 7px; transition: background .15s ease, scale .15s ease; }
-      .harness-tool:hover, .harness-tool[aria-pressed="true"] { background: #eaeaea; }
-      .harness-tool[aria-pressed="true"] { box-shadow: inset 0 -2px 0 var(--accent); color: #111; }
-      .harness-tool:active, .annotation-toggle:active, .harness-dismiss:active { scale: .96; }
-      .harness-tool svg { height: 15px; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.7; width: 15px; }
-      .annotation-toggle { background: transparent; border: 0; border-radius: 7px; color: #666; cursor: pointer; display: flex; font: inherit; font-size: 11px; height: 28px; justify-content: space-between; margin-top: 5px; padding: 0 7px; transition: background .15s ease, scale .15s ease; width: 100%; }
-      .annotation-toggle:hover { background: #f1f1f1; color: #333; }
-      .annotation-panel { background: rgba(255,255,255,.99); border: 1px solid rgba(0,0,0,.11); border-radius: 13px; bottom: 156px; box-shadow: 0 12px 34px rgba(0,0,0,.15), 0 2px 5px rgba(0,0,0,.06); color: #333; padding: 10px; position: fixed; right: 18px; width: min(320px, calc(100vw - 24px)); z-index: 6; }
-      .annotation-panel[hidden] { display: none; }
-      .annotation-panel-header { align-items: center; display: flex; font-size: 12px; font-weight: 650; justify-content: space-between; margin-bottom: 7px; }
-      .annotation-list, .work-item-list { display: grid; gap: 5px; list-style: none; margin: 0; max-height: 132px; overflow: auto; padding: 0; }
-      .annotation-item { align-items: center; border-top: 1px solid #f0f0f0; display: flex; font-size: 12px; gap: 8px; min-height: 31px; padding: 6px 0; }
-      .annotation-item span { flex: 1; line-height: 1.3; }
-      .work-item { border-top: 1px solid #f0f0f0; display: grid; font-size: 12px; gap: 3px; padding: 7px 0; }
-      .work-item-header { align-items: baseline; display: flex; gap: 7px; justify-content: space-between; }
-      .work-item-summary { color: #333; font-weight: 600; line-height: 1.3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-      .work-item-phase { color: #8a5a00; font-size: 10px; font-variant-numeric: tabular-nums; text-transform: uppercase; white-space: nowrap; }
-      .work-item-phase.completed { color: #11764c; } .work-item-phase.needs_review, .work-item-phase.rejected { color: #a34300; }
-      .work-item-note { color: #767676; line-height: 1.35; }
-      .work-item-links { display: flex; gap: 8px; font-size: 11px; }
-      .work-item-links a { color: #555; text-decoration: underline; text-underline-offset: 2px; }
-      .activity-divider { border: 0; border-top: 1px solid #e9e9e9; margin: 10px 0; }
-      .annotation-remove, .annotation-close, .annotation-clear { border: 0; border-radius: 6px; cursor: pointer; font-size: 11px; padding: 5px 7px; }
-      .annotation-remove, .annotation-close { background: #f1f1f1; color: #444; }
-      .annotation-clear { background: #202123; color: #fff; margin-top: 9px; }
-      .harness-dismiss { align-items: center; background: transparent; border: 0; border-radius: 6px; color: #888; cursor: pointer; display: inline-flex; font-size: 16px; height: 24px; justify-content: center; padding: 0; transition: background .15s ease, scale .15s ease; width: 24px; }
-      .harness-dismiss:hover { background: #f1f1f1; color: #333; }
-      .drawing-layer { height: 100%; inset: 0; pointer-events: none; position: fixed; visibility: hidden; width: 100%; z-index: 1; }
-      .draw-mode-active .drawing-layer { cursor: crosshair; pointer-events: auto; }
-      .authoring-open .drawing-layer, .authoring-open .comment-layer { visibility: visible; }
-      .drawing-path { fill: none; pointer-events: none; stroke: var(--accent); stroke-linecap: round; stroke-linejoin: round; stroke-width: 3; }
-      .comment-layer { inset: 0; pointer-events: none; position: fixed; visibility: hidden; z-index: 2; }
-      .comment-pin { align-items: center; background: #202123; border: 2px solid #fff; border-radius: 999px; box-shadow: 0 2px 7px rgba(0,0,0,.22); color: #fff; cursor: default; display: flex; font-size: 10px; height: 18px; justify-content: center; position: fixed; transform: translate(-50%, -50%); width: 18px; }
-      .target-mode-active [data-target-id] { cursor: crosshair; }
-      .comment-mode-active [data-target-id] { cursor: crosshair; }
-      .target-hovered { outline: 1px solid #5c5c5c; outline-offset: 3px; box-shadow: none; }
-      .target-selected { outline: 2px solid #202123; outline-offset: 3px; box-shadow: none; }
-      .submission-toast { background: rgba(32,33,35,.96); border-radius: 10px; bottom: 112px; box-shadow: 0 8px 24px rgba(0,0,0,.16); color: #fff; font-size: 12px; line-height: 1.35; max-width: min(360px, calc(100vw - 24px)); padding: 9px 12px; position: fixed; right: 18px; z-index: 7; }
-      .submission-toast[hidden] { display: none; }
-      .target-composer { animation: composer-rise .16s ease-out; bottom: 118px; left: 50%; position: fixed; transform: translateX(-50%); z-index: 5; width: min(420px, calc(100vw - 24px)); padding: 12px; border: 1px solid #d7d7d7; border-radius: 12px; background: #fff; box-shadow: 0 12px 34px rgba(0,0,0,.15); }
-      .target-composer[hidden] { display: none; }
-      .target-context { color: #666; display: block; font-size: 12px; line-height: 1.4; margin: 0 0 9px; }
-      .target-composer .request-input { min-height: 74px; }
-      @keyframes composer-rise { from { opacity: .2; transform: translateY(5px) translateX(-50%); } to { opacity: 1; transform: translateY(0) translateX(-50%); } }
-      @media (prefers-reduced-motion: reduce) { .target-composer { animation: none; } }
-      @media (max-width: 720px) { .app { grid-template-columns: 44px minmax(0, 1fr); } .sidebar { padding: 7px 3px; } .rail-button { width: 36px; height: 36px; } .composer-wrap { bottom: 0; left: 44px; padding: 24px 14px 14px; } .conversation { padding: 32px 18px 138px; } .topbar { padding: 0 18px; } .target-composer { bottom: 104px; width: min(420px, calc(100vw - 16px)); } .harness-launcher { bottom: 92px; right: 12px; } .authoring-popover, .annotation-panel { bottom: 140px; right: 12px; } .submission-toast { bottom: 144px; right: 12px; } }
-
-      /* Operator surface: bb-inspired density, stable rows, flat achromatic chrome. */
-      :root {
-        --accent: #8b5cf6;
-        --canvas: #f8f8f6;
-        --surface: #ffffff;
-        --sidebar: #f2f2ef;
-        --ink: #20201e;
-        --muted: #6f706b;
-        --faint: #92938e;
-        --hairline: rgba(24, 24, 22, .085);
-        --hover: rgba(31, 31, 29, .055);
-        --active: rgba(31, 31, 29, .085);
-        --danger: #b42318;
-        --success: #18734b;
-        --attention: #9b6500;
-        color: var(--ink);
-        background: var(--canvas);
-        font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-        font-size: 14px;
-        font-synthesis: none;
-        -webkit-font-smoothing: antialiased;
-        -moz-osx-font-smoothing: grayscale;
-      }
-      body { height: 100dvh; overflow: hidden; background: var(--canvas); }
-      button, textarea { color: inherit; }
-      button:focus-visible, textarea:focus-visible, a:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 72%, white); outline-offset: 2px; }
-      button { -webkit-tap-highlight-color: transparent; }
-      button:active { transform: scale(.96); }
-      .app { height: 100dvh; min-height: 0; grid-template-columns: 238px minmax(0, 1fr); background: var(--canvas); }
-      .sidebar { min-width: 0; padding: 8px; align-items: stretch; gap: 0; overflow: hidden; background: var(--sidebar); border-right: 1px solid var(--hairline); }
-      .sidebar-top { display: flex; align-items: center; height: 42px; padding: 0 7px; gap: 9px; }
-      .brand-mark { display: grid; place-items: center; width: 24px; height: 24px; flex: 0 0 auto; border-radius: 7px; background: #242422; color: #fff; font: 700 10px/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: -.06em; box-shadow: 0 0 0 1px rgba(0,0,0,.08), 0 1px 2px rgba(0,0,0,.14); }
-      .brand-wordmark { min-width: 0; flex: 1; font-size: 13px; font-weight: 620; letter-spacing: -.015em; white-space: nowrap; }
-      .sidebar-icon-button { position: relative; width: 32px; height: 32px; flex: 0 0 auto; display: grid; place-items: center; border: 0; border-radius: 7px; color: var(--muted); background: transparent; cursor: pointer; transition-property: background-color, color, transform; transition-duration: 140ms; transition-timing-function: cubic-bezier(.23,1,.32,1); }
-      .sidebar-icon-button:hover { color: var(--ink); background: var(--hover); }
-      .sidebar-icon-button svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.65; }
-      .sidebar-section { margin-top: 13px; min-height: 0; }
-      .sidebar-section.work-section { display: flex; flex: 1; flex-direction: column; overflow: hidden; }
-      .sidebar-label { display: flex; align-items: center; justify-content: space-between; height: 24px; padding: 0 9px; color: var(--faint); font-size: 10px; font-weight: 650; letter-spacing: .065em; text-transform: uppercase; }
-      .sidebar-count { font-variant-numeric: tabular-nums; letter-spacing: 0; }
-      .room-row { width: 100%; min-height: 36px; display: flex; align-items: center; gap: 9px; padding: 0 10px; border: 0; border-radius: 8px; background: var(--active); color: var(--ink); cursor: pointer; font-size: 12.5px; text-align: left; transition-property: background-color, transform; transition-duration: 140ms; transition-timing-function: cubic-bezier(.23,1,.32,1); }
-      .room-row:hover { background: rgba(31,31,29,.105); }
-      .room-glyph { width: 18px; color: var(--muted); font: 500 15px/1 ui-monospace, SFMono-Regular, Menlo, monospace; text-align: center; }
-      .room-name { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 540; }
-      .room-presence { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 10.5px; font-variant-numeric: tabular-nums; }
-      .room-presence .dot { width: 5px; height: 5px; }
-      .sidebar-work-list { display: grid; gap: 2px; min-height: 0; margin: 2px 0 0; padding: 0 1px 16px; overflow: auto; list-style: none; scrollbar-width: thin; }
-      .sidebar-work-item { position: relative; display: grid; grid-template-columns: 12px minmax(0, 1fr) auto; gap: 7px; align-items: start; min-height: 43px; padding: 7px 8px; border-radius: 8px; color: var(--muted); transition-property: background-color; transition-duration: 130ms; }
-      .sidebar-work-item:hover { background: var(--hover); }
-      .sidebar-work-item a { position: absolute; inset: 0; border-radius: inherit; }
-      .work-state-dot { width: 6px; height: 6px; margin-top: 5px; border-radius: 50%; background: #a3a39e; box-shadow: 0 0 0 2px var(--sidebar); }
-      .work-state-dot.building, .work-state-dot.queued, .work-state-dot.triaged, .work-state-dot.received { background: var(--attention); }
-      .work-state-dot.completed { background: var(--success); }
-      .work-state-dot.needs_review, .work-state-dot.rejected { background: var(--danger); }
-      .sidebar-work-copy { min-width: 0; }
-      .sidebar-work-summary { display: block; overflow: hidden; color: var(--ink); font-size: 11.5px; line-height: 1.3; text-overflow: ellipsis; white-space: nowrap; }
-      .sidebar-work-note { display: block; margin-top: 2px; overflow: hidden; color: var(--faint); font-size: 10.5px; line-height: 1.3; text-overflow: ellipsis; white-space: nowrap; }
-      .sidebar-work-phase { margin-top: 1px; color: var(--faint); font: 500 9.5px/1.3 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .015em; text-transform: lowercase; }
-      .sidebar-empty { padding: 8px 10px; color: var(--faint); font-size: 11px; line-height: 1.45; text-wrap: pretty; }
-      .sidebar-footer { display: flex; align-items: center; gap: 8px; min-height: 38px; padding: 3px 8px 1px; border-top: 1px solid var(--hairline); color: var(--muted); font-size: 10.5px; }
-      .author-avatar { display: grid; place-items: center; width: 22px; height: 22px; flex: 0 0 auto; border-radius: 50%; background: #dfdfda; color: #4d4e49; font-size: 9px; font-weight: 700; text-transform: uppercase; }
-      .sidebar-author { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-      main { min-height: 0; background: var(--surface); }
-      .topbar { height: 48px; flex: 0 0 auto; padding: 0 18px 0 20px; border-bottom: 1px solid var(--hairline); background: rgba(255,255,255,.94); }
-      .room-heading { min-width: 0; display: flex; align-items: center; gap: 8px; }
-      .room-title { font-size: 12.5px; font-weight: 590; letter-spacing: -.005em; }
-      .room-meta { color: var(--faint); font: 500 10.5px/1 ui-monospace, SFMono-Regular, Menlo, monospace; }
-      .connection { min-height: 28px; padding: 0 8px; border-radius: 7px; color: var(--muted); font-size: 10.5px; font-variant-numeric: tabular-nums; transition-property: background-color; transition-duration: 140ms; }
-      .connection:hover { background: var(--hover); }
-      .dot, .status-dot { width: 6px; height: 6px; background: #aaa; }
-      .dot.live { background: var(--success); box-shadow: 0 0 0 2px rgba(24,115,75,.11); }
-      .conversation { width: min(100%, 760px); min-height: 0; margin: 0 auto; padding: 27px 32px 184px; overflow: visible; }
-      main { overflow-y: auto; scrollbar-width: thin; scrollbar-color: rgba(0,0,0,.16) transparent; }
-      .room-intro { display: grid; grid-template-columns: 34px minmax(0, 1fr); gap: 12px; padding: 2px 0 24px; border-bottom: 1px solid var(--hairline); margin-bottom: 25px; }
-      .room-intro-mark { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 10px; color: #fff; background: #242422; box-shadow: 0 0 0 1px rgba(0,0,0,.08), 0 2px 4px rgba(0,0,0,.10); }
-      .room-intro-mark svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
-      .room-intro h1 { margin: 0; color: var(--ink); font-size: 14px; line-height: 1.35; font-weight: 620; letter-spacing: -.01em; text-wrap: balance; }
-      .room-intro p { max-width: 580px; margin: 4px 0 0; color: var(--muted); font-size: 12.5px; line-height: 1.5; text-wrap: pretty; }
-      .room-intro kbd { display: inline-flex; min-width: 18px; height: 18px; align-items: center; justify-content: center; padding: 0 5px; border-radius: 5px; background: #f0f0ed; box-shadow: inset 0 0 0 1px rgba(0,0,0,.06), 0 1px 1px rgba(0,0,0,.05); color: var(--muted); font: 500 9.5px/1 ui-monospace, SFMono-Regular, Menlo, monospace; }
-      .empty { margin: 0; padding: 18px 0; color: var(--faint); font-size: 12px; text-align: left; }
-      .messages { gap: 26px; }
-      .message { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 10px; width: 100%; max-width: none; scroll-margin-bottom: 170px; }
-      .message-avatar { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 9px; background: #efefec; box-shadow: inset 0 0 0 1px rgba(0,0,0,.045); color: #5c5d58; font-size: 9.5px; font-weight: 700; text-transform: uppercase; }
-      .message-body { min-width: 0; padding-top: 1px; }
-      .message-meta { display: flex; align-items: baseline; gap: 7px; min-height: 18px; }
-      .author { margin: 0; color: var(--ink); font-size: 11.5px; font-weight: 620; }
-      .message-time { color: var(--faint); font: 500 9.5px/1 ui-monospace, SFMono-Regular, Menlo, monospace; font-variant-numeric: tabular-nums; }
-      .text { color: #33332f; font-size: 13.5px; line-height: 1.58; text-wrap: pretty; }
-      .composer-wrap { left: 238px; padding: 26px 24px 17px; background: linear-gradient(to top, #fff 74%, rgba(255,255,255,0)); }
-      .composer { width: min(100%, 760px); min-height: 56px; padding: 8px 8px 8px 12px; align-items: flex-end; gap: 8px; border: 0; border-radius: 14px; background: #fff; box-shadow: 0 0 0 1px rgba(24,24,22,.13), 0 1px 2px rgba(24,24,22,.06), 0 7px 24px -11px rgba(24,24,22,.24); transition-property: box-shadow; transition-duration: 160ms; transition-timing-function: cubic-bezier(.23,1,.32,1); }
-      .composer:focus-within { box-shadow: 0 0 0 1px rgba(24,24,22,.22), 0 1px 2px rgba(24,24,22,.07), 0 9px 28px -12px rgba(24,24,22,.27); }
-      textarea { min-height: 36px; padding: 8px 4px 6px; color: var(--ink); font-size: 13.5px; line-height: 1.45; }
-      .composer textarea:focus-visible { outline: 0; }
-      textarea::placeholder { color: var(--faint); }
-      .send { width: 32px; height: 32px; border-radius: 9px; background: #262624; transition-property: background-color, color, transform; transition-duration: 140ms; transition-timing-function: cubic-bezier(.23,1,.32,1); }
-      .send svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
-      .send:hover:not(:disabled) { background: #0f0f0e; }
-      .send:disabled { background: #ecece9; color: #aaa; }
-      .hint { width: min(100%, 760px); margin-top: 8px; color: var(--faint); font-size: 10px; }
-      /* The harness is an injected authoring layer, not host-app chrome. */
-      .harness-frame, .target-composer {
-        --harness-accent: #6155f5;
-        --harness-accent-strong: #5045e8;
-        --harness-accent-wash: #efedff;
-        --harness-ink: #26233a;
-        --harness-muted: #716d88;
-        --harness-line: rgba(78, 64, 184, .18);
-        font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      }
-      .harness-launcher { width: 48px; height: 48px; bottom: 24px; right: 20px; border: 1px solid rgba(69,57,178,.32); border-radius: 50%; background: linear-gradient(145deg, #7268ff 0%, #5146e7 100%); color: #fff; box-shadow: 0 0 0 4px rgba(97,85,245,.10), 0 12px 30px rgba(64,49,174,.26), 0 3px 8px rgba(21,18,56,.18); transition-property: background-color, transform, box-shadow; transition-duration: 150ms; transition-timing-function: cubic-bezier(.23,1,.32,1); }
-      .harness-launcher::before { content: ""; position: absolute; inset: 3px; border: 1px solid rgba(255,255,255,.26); border-radius: inherit; pointer-events: none; }
-      .harness-launcher svg { position: absolute; width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; transition-property: opacity, transform, filter; transition-duration: 180ms; transition-timing-function: cubic-bezier(.2,0,0,1); }
-      .launcher-close-icon { opacity: 0; transform: scale(.25); filter: blur(4px); }
-      .harness-launcher[aria-expanded="true"] .launcher-open-icon { opacity: 0; transform: scale(.25); filter: blur(4px); }
-      .harness-launcher[aria-expanded="true"] .launcher-close-icon { opacity: 1; transform: scale(1); filter: blur(0); }
-      .launcher-badge { position: absolute; top: -5px; right: -5px; min-width: 18px; height: 18px; display: inline-flex; align-items: center; justify-content: center; padding: 0 4px; border: 2px solid #fff; border-radius: 999px; background: #ff8d28; color: #fff; font: 700 8px/1 ui-monospace, SFMono-Regular, Menlo, monospace; font-variant-numeric: tabular-nums; box-shadow: 0 2px 7px rgba(121,64,13,.25); }
-      .launcher-badge.needs_review, .launcher-badge.rejected { background: var(--danger); }
-      .launcher-badge[hidden] { display: none; }
-      .harness-launcher:hover, .harness-launcher[aria-expanded="true"] { background: linear-gradient(145deg, #7c72ff 0%, #4c41dc 100%); box-shadow: 0 0 0 5px rgba(97,85,245,.13), 0 14px 34px rgba(64,49,174,.30), 0 3px 8px rgba(21,18,56,.18); }
-      .harness-launcher:active { scale: 1; transform: scale(.96); }
-      .authoring-popover { bottom: 20px; right: 16px; width: min(372px, calc(100vw - 24px)); height: 56px; padding: 6px 105px 6px 76px; border: 1px solid var(--harness-line); border-radius: 18px; background: rgba(252,251,255,.97); color: var(--harness-ink); box-shadow: 0 0 0 4px rgba(97,85,245,.07), 0 20px 48px rgba(37,29,92,.20), 0 4px 12px rgba(37,29,92,.12); backdrop-filter: blur(14px) saturate(1.1); transform-origin: calc(100% - 28px) 50%; animation: toolbar-expand .2s cubic-bezier(.23,1,.32,1); }
-      .authoring-popover::before { content: ""; position: absolute; inset: 3px; border: 1px solid rgba(255,255,255,.9); border-radius: 14px; pointer-events: none; }
-      .authoring-heading { position: absolute; left: 10px; top: 8px; width: 58px; height: 40px; display: flex; align-items: center; justify-content: center; padding: 0 9px 0 0; border-right: 1px solid var(--harness-line); color: var(--harness-accent-strong); font: 700 8.5px/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .09em; text-transform: uppercase; }
-      .authoring-heading span::before { content: "✦"; display: block; margin-bottom: 3px; font-size: 10px; text-align: center; }
-      .authoring-heading .harness-dismiss { display: none; }
-      .authoring-tools { position: relative; height: 44px; grid-template-columns: repeat(3, 1fr); gap: 3px; }
-      .harness-tool { height: 44px; padding: 0 7px; gap: 5px; border: 1px solid transparent; border-radius: 11px; background: transparent; color: #5d5872; font-size: 9.5px; font-weight: 610; transition-property: background-color, border-color, color, transform, box-shadow; transition-duration: 140ms; transition-timing-function: cubic-bezier(.23,1,.32,1); }
-      .harness-tool:hover { border-color: rgba(97,85,245,.14); background: var(--harness-accent-wash); color: var(--harness-accent-strong); }
-      .harness-tool[aria-pressed="true"] { border-color: rgba(97,85,245,.22); background: var(--harness-accent); box-shadow: 0 4px 11px rgba(75,62,207,.23); color: #fff; }
-      .harness-tool svg { width: 15px; height: 15px; stroke-width: 1.8; }
-      .annotation-toggle { position: absolute; top: 8px; right: 56px; width: 40px; height: 40px; margin: 0; padding: 0; align-items: center; justify-content: center; color: var(--harness-accent-strong); border: 1px solid rgba(97,85,245,.14); border-radius: 12px; background: var(--harness-accent-wash); font-size: 0; transition-property: background-color, border-color, color, transform; transition-duration: 140ms; }
-      .annotation-toggle:hover { border-color: rgba(97,85,245,.25); background: #e7e3ff; color: #4035d4; }
-      .activity-count-badge { min-width: 19px; height: 19px; display: inline-flex; align-items: center; justify-content: center; padding: 0 5px; border-radius: 7px; background: #fff; color: var(--harness-accent-strong); box-shadow: 0 1px 3px rgba(65,52,169,.14); font: 700 9px/1 ui-monospace, SFMono-Regular, Menlo, monospace; font-variant-numeric: tabular-nums; }
-      .authoring-notice { position: absolute; right: 0; bottom: 67px; width: 266px; margin: 0; padding: 9px 11px; border: 1px solid var(--harness-line); border-radius: 11px; background: rgba(252,251,255,.98); color: var(--harness-ink); box-shadow: 0 13px 34px rgba(37,29,92,.18); font-size: 10.5px; }
-      .harness-dismiss { width: 28px; height: 28px; border-radius: 7px; font-size: 15px; transition-property: background-color, color, transform; transition-duration: 140ms; }
-      .annotation-panel { bottom: 84px; right: 20px; width: min(382px, calc(100vw - 24px)); max-height: min(590px, calc(100dvh - 120px)); padding: 13px; overflow: hidden; border: 1px solid var(--harness-line); border-radius: 16px; background: rgba(252,251,255,.985); color: var(--harness-ink); box-shadow: 0 0 0 4px rgba(97,85,245,.065), 0 22px 52px rgba(37,29,92,.20), 0 4px 12px rgba(37,29,92,.09); backdrop-filter: blur(16px) saturate(1.1); transform-origin: calc(100% - 24px) calc(100% + 20px); animation: harness-pop .18s cubic-bezier(.23,1,.32,1); }
-      .annotation-panel::before { content: "APP HARNESS"; display: inline-flex; align-items: center; min-height: 18px; margin: 0 0 8px; padding: 0 7px; border-radius: 6px; background: var(--harness-accent-wash); color: var(--harness-accent-strong); font: 700 8px/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .1em; }
-      .annotation-panel-header { min-height: 29px; margin-bottom: 4px; color: var(--harness-ink); font-size: 11.5px; }
-      .annotation-close, .annotation-remove { background: transparent; color: var(--harness-muted); transition-property: background-color, color, transform; transition-duration: 140ms; }
-      .annotation-close:hover, .annotation-remove:hover { background: var(--harness-accent-wash); color: var(--harness-accent-strong); }
-      .annotation-list, .work-item-list { gap: 0; max-height: 205px; scrollbar-width: thin; }
-      .work-item { gap: 4px; padding: 10px 4px; border-color: var(--harness-line); }
-      .work-item-summary { color: var(--harness-ink); font-size: 11.5px; }
-      .work-item-phase { color: #bd610c; font: 650 9px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .025em; }
-      .work-item-phase.completed { color: var(--success); }
-      .work-item-phase.needs_review, .work-item-phase.rejected { color: var(--danger); }
-      .work-item-note { color: var(--harness-muted); font-size: 10.5px; }
-      .work-item-links { gap: 10px; font-size: 10.5px; }
-      .work-item-links a { color: var(--harness-accent-strong); text-decoration-color: rgba(97,85,245,.28); }
-      .annotation-item { min-height: 34px; padding: 7px 4px; border-color: var(--harness-line); color: var(--harness-muted); font-size: 10.5px; }
-      .activity-divider { border-color: var(--harness-line); }
-      .annotation-clear { min-height: 32px; margin-top: 8px; padding: 0 10px; border: 1px solid rgba(97,85,245,.20); border-radius: 9px; background: var(--harness-accent-wash); color: var(--harness-accent-strong); font-size: 10.5px; font-weight: 620; transition-property: background-color, transform; transition-duration: 140ms; }
-      .annotation-clear:hover { background: #e6e2ff; }
-      .submission-toast { right: 20px; bottom: 84px; padding: 9px 11px; border: 1px solid var(--harness-line); border-radius: 11px; background: rgba(252,251,255,.98); color: var(--harness-ink); font-size: 10.5px; box-shadow: 0 13px 34px rgba(37,29,92,.18); }
-      .target-composer { bottom: 98px; width: min(460px, calc(100vw - 32px)); padding: 13px; border: 1px solid var(--harness-line); border-radius: 16px; background: rgba(252,251,255,.985); color: var(--harness-ink); box-shadow: 0 0 0 4px rgba(97,85,245,.065), 0 22px 52px rgba(37,29,92,.20), 0 4px 12px rgba(37,29,92,.09); backdrop-filter: blur(16px) saturate(1.1); animation: none; }
-      .target-composer::before { content: "APP HARNESS · TARGETED CHANGE"; display: inline-flex; min-height: 18px; align-items: center; margin: 0 0 9px; padding: 0 7px; border-radius: 6px; background: var(--harness-accent-wash); color: var(--harness-accent-strong); font: 700 8px/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .09em; }
-      .target-composer[data-kind="comment"]::before { content: "APP HARNESS · COMMENT"; }
-      .target-context { margin: 0 2px 8px; color: var(--harness-muted); font-size: 10.5px; }
-      .target-composer .request-input { min-height: 84px; padding: 9px; border: 1px solid var(--harness-line); border-radius: 10px; background: #fff; color: var(--harness-ink); font-size: 12.5px; box-shadow: inset 0 1px 2px rgba(37,29,92,.04); }
-      .dialog-actions { margin-top: 8px; }
-      .secondary, .primary { min-height: 32px; padding: 0 11px; border-radius: 8px; font-size: 10.5px; transition-property: background-color, transform; transition-duration: 140ms; }
-      .secondary { background: #f1effc; color: var(--harness-muted); }
-      .secondary:hover { background: #e8e5f8; color: var(--harness-ink); }
-      .primary { background: var(--harness-accent); box-shadow: 0 4px 11px rgba(75,62,207,.20); }
-      .primary:hover { background: var(--harness-accent-strong); }
-      .request-error { margin: 7px 2px 0; min-height: 15px; color: var(--danger); font-size: 10.5px; }
-      .request-error.acknowledged { color: var(--harness-muted); }
-      .target-hovered { outline: 2px solid rgba(97,85,245,.72); outline-offset: 3px; border-radius: 3px; box-shadow: 0 0 0 5px rgba(97,85,245,.08); }
-      .target-selected { outline: 2px solid var(--harness-accent); outline-offset: 3px; box-shadow: 0 0 0 5px rgba(97,85,245,.10); }
-      .drawing-path { stroke: var(--harness-accent); stroke-width: 2.5; filter: drop-shadow(0 1px 2px rgba(68,53,190,.22)); }
-      .comment-pin { width: 22px; height: 22px; border-width: 2px; background: var(--harness-accent); font-size: 9px; box-shadow: 0 0 0 3px rgba(97,85,245,.13), 0 4px 11px rgba(56,43,160,.28); }
-      @keyframes harness-pop { from { opacity: 0; transform: translateY(5px) scale(.97); } to { opacity: 1; transform: translateY(0) scale(1); } }
-      @keyframes toolbar-expand { from { opacity: 0; transform: scaleX(.18); } to { opacity: 1; transform: scaleX(1); } }
-      @media (prefers-reduced-motion: reduce) { .authoring-popover, .annotation-panel { animation: none; } * { scroll-behavior: auto !important; } }
-      @media (max-width: 820px) {
-        .app { grid-template-columns: 56px minmax(0, 1fr); }
-        .sidebar { padding: 7px; }
-        .sidebar-top { justify-content: center; padding: 0; }
-        .brand-wordmark, .sidebar-top .sidebar-icon-button, .sidebar-label, .room-name, .room-presence, .work-section, .sidebar-author { display: none; }
-        .room-row { justify-content: center; min-height: 38px; padding: 0; }
-        .sidebar-footer { justify-content: center; padding-inline: 0; }
-        .composer-wrap { left: 56px; padding-inline: 16px; }
-        .conversation { padding: 24px 22px 176px; }
-      }
-      @media (max-width: 560px) {
-        .app { display: block; }
-        .sidebar { display: none; }
-        .composer-wrap { left: 0; padding: 20px 12px 12px; }
-        .conversation { padding: 21px 16px 164px; }
-        .topbar { padding-inline: 14px; }
-        .room-meta { display: none; }
-        .room-intro { grid-template-columns: 30px minmax(0, 1fr); gap: 10px; }
-        .room-intro-mark { width: 30px; height: 30px; border-radius: 9px; }
-        .harness-launcher { right: 12px; bottom: 88px; }
-        .authoring-popover { right: 8px; bottom: 82px; width: min(372px, calc(100vw - 16px)); }
-        .annotation-panel { right: 12px; bottom: 148px; }
-        .submission-toast { right: 12px; bottom: 148px; }
-        .target-composer { bottom: 105px; }
-      }
-      @media (max-width: 390px) {
-        .authoring-popover { padding-left: 59px; padding-right: 101px; }
-        .authoring-heading { left: 8px; width: 44px; padding-right: 7px; }
-        .authoring-heading span { font-size: 0; }
-        .authoring-heading span::before { margin: 0; font-size: 15px; }
-        .harness-tool { padding-inline: 8px; }
-        .harness-tool span { display: none; }
-      }
-    </style>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400..650&amp;family=Geist+Mono:wght@400..600&amp;display=swap" rel="stylesheet" referrerpolicy="no-referrer" />
+    <link href="/app.css" rel="stylesheet" />
   </head>
   <body>
     <div class="app">
-      <aside class="sidebar" data-target-id="workspace-sidebar" data-target-label="Workspace navigation sidebar" aria-label="Workspace navigation">
-        <div class="sidebar-top" data-target-id="sidebar-brand" data-target-label="App Harness workspace header">
-          <div class="brand-mark" aria-hidden="true">AH</div>
-          <span class="brand-wordmark">App Harness</span>
-          <button class="sidebar-icon-button" id="sidebar-new-request" data-target-id="sidebar-new-request" data-target-label="Start a contextual request" type="button" aria-label="Start a contextual request" title="Start a contextual request">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
-          </button>
-        </div>
-        <section class="sidebar-section" aria-labelledby="rooms-label">
-          <div class="sidebar-label" id="rooms-label">Rooms</div>
-          <button class="room-row" data-target-id="rail-main-room" data-target-label="Main room control" type="button" aria-label="Main room" aria-current="page">
-            <span class="room-glyph" aria-hidden="true">#</span><span class="room-name">Main room</span><span class="room-presence"><i class="dot" id="sidebar-dot"></i><span id="sidebar-presence">—</span></span>
-          </button>
-        </section>
-        <section class="sidebar-section work-section" aria-labelledby="work-label">
-          <div class="sidebar-label" id="work-label"><span>Recent work</span><span class="sidebar-count" id="sidebar-work-count">0</span></div>
-          <ul class="sidebar-work-list" id="sidebar-work-list"></ul>
-        </section>
-        <footer class="sidebar-footer" data-target-id="sidebar-identity" data-target-label="Current participant">
-          <span class="author-avatar" id="sidebar-avatar" aria-hidden="true">G</span><span class="sidebar-author" id="sidebar-author">Guest</span>
-        </footer>
-      </aside>
       <main>
         <header class="topbar" data-target-id="room-header" data-target-label="Main room header"><span class="room-heading"><span class="room-title" data-target-id="room-title" data-target-text>Main room</span><span class="room-meta">shared workspace</span></span><span class="connection" data-target-id="connection-status" data-target-label="Connection status"><i class="dot" id="dot"></i><span id="connection">Connecting</span></span></header>
         <section class="conversation" aria-live="polite">
           <div class="room-intro" data-target-id="room-introduction" data-target-label="Main room introduction">
             <span class="room-intro-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3M8 12h8M12 8v8"/></svg></span>
-            <div><h1>Shape this app in public</h1><p>Talk with the room, or open the floating authoring tool to point at a specific part of the interface. Every submitted change becomes visible work.</p></div>
+            <div><h1>This app can change itself</h1><p>Chat with the room. Open App Harness to point at a specific element and request a change.</p></div>
           </div>
           <div class="empty" id="empty" data-target-id="empty-state" data-target-text>Start the conversation.</div><div class="messages" id="messages"></div>
         </section>
@@ -350,9 +30,9 @@
     <div class="harness-frame" aria-label="App Harness overlay">
       <svg class="drawing-layer" id="drawing-layer" aria-label="Drawing feedback layer"></svg>
       <div class="comment-layer" id="comment-layer" aria-label="Comment markers"></div>
-      <button class="harness-launcher" id="harness-launcher" data-target-id="harness-authoring-launcher" data-target-label="Open App Harness annotation tools" type="button" aria-label="Open App Harness annotation tools" aria-expanded="false" title="Annotate"><svg class="launcher-open-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3M8 12h8M12 8v8"/></svg><svg class="launcher-close-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg><span class="launcher-badge" id="launcher-badge" aria-hidden="true" hidden></span></button>
+      <button class="harness-launcher" id="harness-launcher" data-target-id="harness-authoring-launcher" data-target-label="Open App Harness annotation tools" type="button" aria-label="Open App Harness annotation tools" aria-expanded="false" title="Open App Harness"><svg class="launcher-open-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3M8 12h8M12 8v8"/></svg><svg class="launcher-close-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg><span class="launcher-badge" id="launcher-badge" aria-hidden="true" hidden></span></button>
       <section class="authoring-popover" id="authoring-popover" data-target-id="harness-authoring-popover" data-target-label="App Harness annotation tools" aria-label="App Harness annotation tools" hidden>
-        <div class="authoring-heading"><span>Annotate</span><button class="harness-dismiss" id="harness-dismiss" data-target-id="harness-close-authoring-tools" data-target-label="Close annotation tools" type="button" aria-label="Close annotation tools" title="Close">×</button></div>
+        <div class="authoring-heading"><span>App Harness</span><button class="harness-dismiss" id="harness-dismiss" data-target-id="harness-close-authoring-tools" data-target-label="Close annotation tools" type="button" aria-label="Close annotation tools" title="Close">×</button></div>
         <div class="authoring-tools">
         <button class="harness-tool target-tool" id="target-mode" data-target-id="harness-target-control" data-target-label="Inspect and target an element" type="button" aria-label="Inspect and target an element for a change request" aria-pressed="false" title="Inspect and target">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2v4M12 18v4M2 12h4M18 12h4M8 8l8 8M8 16l8-8"/><circle cx="12" cy="12" r="4"/></svg><span>Target</span>
@@ -363,7 +43,7 @@
         <p class="authoring-notice" id="authoring-notice" role="status" hidden></p>
         <button class="annotation-toggle" id="annotation-count" data-target-id="harness-annotation-activity-control" data-target-label="Open activity and annotation list" type="button" aria-label="Open activity and annotation list">Activity <span class="activity-count-badge" id="activity-count-label">0</span></button>
       </section>
-      <section class="annotation-panel" id="annotation-panel" data-target-id="harness-annotation-panel" data-target-label="Canvas annotation manager" aria-label="Canvas annotations" hidden>
+      <section class="annotation-panel" id="annotation-panel" data-target-id="harness-annotation-panel" data-target-label="Canvas annotation manager" aria-label="Activity and canvas annotations" hidden>
         <div class="annotation-panel-header"><span>Activity</span><button class="annotation-close" id="annotation-close" data-target-id="harness-close-annotation-manager" data-target-label="Close activity and annotation list" type="button" aria-label="Close activity and annotation list">Close</button></div>
         <ul class="work-item-list" id="work-item-list"></ul>
         <hr class="activity-divider" />
@@ -379,16 +59,15 @@
       <div class="dialog-actions"><button class="secondary" id="cancel-target-request" type="button">Cancel</button><button class="secondary" id="done-target-request" type="button" hidden>Done</button><button class="primary" id="submit-target-request" type="submit">Start</button></div><p class="request-error" id="target-request-error" role="alert"></p>
     </form>
     <script>
-      const messagesEl = document.querySelector('#messages'); const emptyEl = document.querySelector('#empty'); const input = document.querySelector('#input'); const send = document.querySelector('#send'); const form = document.querySelector('#form'); const dot = document.querySelector('#dot'); const sidebarDot = document.querySelector('#sidebar-dot'); const connection = document.querySelector('#connection'); const sidebarPresence = document.querySelector('#sidebar-presence');
-      const activityCount = document.querySelector('#activity-count-label'); const launcherBadge = document.querySelector('#launcher-badge'); const sidebarWorkCount = document.querySelector('#sidebar-work-count'); const sidebarWorkList = document.querySelector('#sidebar-work-list'); const annotationToggle = document.querySelector('#annotation-count'); const annotationPanel = document.querySelector('#annotation-panel'); const annotationList = document.querySelector('#annotation-list'); const workItemList = document.querySelector('#work-item-list'); const annotationClose = document.querySelector('#annotation-close'); const annotationClear = document.querySelector('#annotation-clear'); const submissionToast = document.querySelector('#submission-toast');
+      const messagesEl = document.querySelector('#messages'); const emptyEl = document.querySelector('#empty'); const input = document.querySelector('#input'); const send = document.querySelector('#send'); const form = document.querySelector('#form'); const dot = document.querySelector('#dot'); const connection = document.querySelector('#connection');
+      const activityCount = document.querySelector('#activity-count-label'); const launcherBadge = document.querySelector('#launcher-badge'); const annotationToggle = document.querySelector('#annotation-count'); const annotationPanel = document.querySelector('#annotation-panel'); const annotationList = document.querySelector('#annotation-list'); const workItemList = document.querySelector('#work-item-list'); const annotationClose = document.querySelector('#annotation-close'); const annotationClear = document.querySelector('#annotation-clear'); const submissionToast = document.querySelector('#submission-toast');
       const harnessLauncher = document.querySelector('#harness-launcher'); const authoringPopover = document.querySelector('#authoring-popover'); const authoringNotice = document.querySelector('#authoring-notice'); const harnessDismiss = document.querySelector('#harness-dismiss'); const targetModeButton = document.querySelector('#target-mode'); const commentModeButton = document.querySelector('#comment-mode'); const drawModeButton = document.querySelector('#draw-mode'); const targetComposer = document.querySelector('#target-composer'); const targetContext = document.querySelector('#target-context'); const targetRequestInput = document.querySelector('#target-request-input'); const targetRequestError = document.querySelector('#target-request-error'); const targetSubmit = document.querySelector('#submit-target-request'); const targetDone = document.querySelector('#done-target-request'); const drawingLayer = document.querySelector('#drawing-layer'); const commentLayer = document.querySelector('#comment-layer');
-      const author = localStorage.getItem('app-harness-author') || `Guest ${Math.floor(100 + Math.random() * 900)}`; localStorage.setItem('app-harness-author', author); document.querySelector('#sidebar-author').textContent = author; document.querySelector('#sidebar-avatar').textContent = initials(author);
+      const author = localStorage.getItem('app-harness-author') || `Guest ${Math.floor(100 + Math.random() * 900)}`; localStorage.setItem('app-harness-author', author);
       let socket; let reconnectTimer; let toastTimer; let overlayOpen = false; let targetMode = false; let commentMode = false; let drawMode = false; let composerKind = 'request'; let hoveredTarget; let selectedTarget; let selectedEnvelope; let annotations = []; let workItems = []; let pendingSubmissionId; let pendingSubmissionKind; let drawing = false; let draftPoints = []; let draftPath; const rendered = new Set();
       function initials(value) { return value.trim().split(/\s+/).slice(0, 2).map(part => part[0]).join('').slice(0, 2) || 'G'; }
-      function setConnection(text, live) { connection.textContent = text; dot.classList.toggle('live', live); sidebarDot.classList.toggle('live', live); sidebarPresence.textContent = text.replace(/\s*live$/i, '') || '—'; }
+      function setConnection(text, live) { connection.textContent = text; dot.classList.toggle('live', live); }
       function render(message) { if (rendered.has(message.id)) return; rendered.add(message.id); emptyEl.hidden = true; const row = document.createElement('article'); row.className = 'message'; row.dataset.targetId = `message-${message.id}`; row.dataset.targetLabel = `Message from ${message.author}`; const avatar = document.createElement('div'); avatar.className = 'message-avatar'; avatar.textContent = initials(message.author); avatar.setAttribute('aria-hidden', 'true'); const body = document.createElement('div'); body.className = 'message-body'; const meta = document.createElement('div'); meta.className = 'message-meta'; const name = document.createElement('div'); name.className = 'author'; name.textContent = message.author; const time = document.createElement('time'); time.className = 'message-time'; time.dateTime = new Date(message.createdAt).toISOString(); time.textContent = new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' }).format(message.createdAt); const text = document.createElement('div'); text.className = 'text'; text.textContent = message.text; meta.append(name, time); body.append(meta, text); row.append(avatar, body); messagesEl.append(row); row.scrollIntoView({ behavior: rendered.size > 1 ? 'smooth' : 'auto', block: 'end' }); }
       function targetName(target) { return target?.label || target?.text || target?.targetId?.replace(/[-_]+/g, ' ') || 'this element'; }
-      function renderWorkflow() { /* The durable activity record remains available to connected clients without becoming permanent authoring chrome. */ }
       function drawPath(points) { return points.map((point, index) => `${index ? 'L' : 'M'}${point.x} ${point.y}`).join(' '); }
       function annotationDescription(annotation) { return annotation.kind === 'comment' ? `Comment on ${targetName(annotation.target)}` : 'Freehand drawing'; }
       function deleteAnnotation(annotationId) { if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'harness:annotation:delete', annotationId })); }
@@ -397,19 +76,73 @@
       function showAuthoringNotice(message) { authoringNotice.textContent = message; authoringNotice.hidden = false; }
       function showSubmissionToast(message) { submissionToast.textContent = message; submissionToast.hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => { submissionToast.hidden = true; }, 5200); }
       function acknowledgeSubmission(item) { if (!pendingSubmissionId || item.clientSubmissionId !== pendingSubmissionId) return; const kind = pendingSubmissionKind; pendingSubmissionId = undefined; pendingSubmissionKind = undefined; const message = item.activity?.at(-1)?.message || `${phaseLabel(item.phase)}. Open Activity to follow it.`; if (kind === 'composer') { targetSubmit.hidden = true; targetDone.hidden = false; targetRequestError.classList.add('acknowledged'); targetRequestError.textContent = message; } else { showAuthoringNotice(message); } showSubmissionToast(message); }
-      function renderWorkItems(next) { workItems = next; workItemList.replaceChildren(); sidebarWorkList.replaceChildren(); workItems.forEach((item, index) => { const row = document.createElement('li'); row.className = 'work-item'; const header = document.createElement('div'); header.className = 'work-item-header'; const summary = document.createElement('span'); summary.className = 'work-item-summary'; summary.textContent = item.summary; const phase = document.createElement('span'); phase.className = `work-item-phase ${item.phase}`; phase.textContent = phaseLabel(item.phase); header.append(summary, phase); const note = document.createElement('span'); note.className = 'work-item-note'; note.textContent = item.activity?.at(-1)?.message || 'Recorded.'; row.append(header, note); if (item.githubIssue || item.githubPullRequestUrl) { const links = document.createElement('div'); links.className = 'work-item-links'; if (item.githubIssue) { const issue = document.createElement('a'); issue.href = item.githubIssue.url; issue.target = '_blank'; issue.rel = 'noreferrer'; issue.textContent = `Issue #${item.githubIssue.number}`; links.append(issue); } if (item.githubPullRequestUrl) { const pr = document.createElement('a'); pr.href = item.githubPullRequestUrl; pr.target = '_blank'; pr.rel = 'noreferrer'; pr.textContent = 'Pull request'; links.append(pr); } row.append(links); } workItemList.append(row); if (index < 8) { const sidebarRow = document.createElement('li'); sidebarRow.className = 'sidebar-work-item'; sidebarRow.dataset.targetId = `sidebar-work-${item.id}`; sidebarRow.dataset.targetLabel = `Work item: ${item.summary}`; const state = document.createElement('i'); state.className = `work-state-dot ${item.phase}`; state.setAttribute('aria-hidden', 'true'); const copy = document.createElement('span'); copy.className = 'sidebar-work-copy'; const sidebarSummary = document.createElement('span'); sidebarSummary.className = 'sidebar-work-summary'; sidebarSummary.textContent = item.summary; const sidebarNote = document.createElement('span'); sidebarNote.className = 'sidebar-work-note'; sidebarNote.textContent = item.activity?.at(-1)?.message || 'Recorded.'; copy.append(sidebarSummary, sidebarNote); const sidebarPhase = document.createElement('span'); sidebarPhase.className = 'sidebar-work-phase'; sidebarPhase.textContent = phaseLabel(item.phase); sidebarRow.append(state, copy, sidebarPhase); const href = item.githubPullRequestUrl || item.githubIssue?.url; if (href) { const link = document.createElement('a'); link.href = href; link.target = '_blank'; link.rel = 'noreferrer'; link.setAttribute('aria-label', `${item.summary} — ${phaseLabel(item.phase)}`); sidebarRow.append(link); } sidebarWorkList.append(sidebarRow); } acknowledgeSubmission(item); }); if (!workItems.length) { const empty = document.createElement('li'); empty.className = 'work-item'; empty.textContent = 'No activity in this room yet.'; workItemList.append(empty); const sidebarEmpty = document.createElement('li'); sidebarEmpty.className = 'sidebar-empty'; sidebarEmpty.textContent = 'Target something in the app to start the first visible change.'; sidebarWorkList.append(sidebarEmpty); } const activeItems = workItems.filter(item => !['completed', 'rejected'].includes(item.phase)); const attentionItem = activeItems.find(item => item.phase === 'needs_review') || activeItems[0]; launcherBadge.hidden = activeItems.length === 0; launcherBadge.textContent = activeItems.length > 9 ? '9+' : `${activeItems.length}`; launcherBadge.className = `launcher-badge ${attentionItem?.phase || ''}`; activityCount.textContent = `${workItems.length}`; sidebarWorkCount.textContent = `${workItems.length}`; }
-      function connect() { clearTimeout(reconnectTimer); const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'; socket = new WebSocket(`${protocol}//${location.host}/api/rooms/main`); socket.addEventListener('open', () => { setConnection('Live', true); resize(); }); socket.addEventListener('close', () => { setConnection('Reconnecting', false); resize(); reconnectTimer = setTimeout(connect, 1000); }); socket.addEventListener('error', () => socket.close()); socket.addEventListener('message', ({ data }) => { try { const event = JSON.parse(data); if (event.type === 'chat:snapshot') event.messages.forEach(render); if (event.type === 'chat:message') render(event.message); if (event.type === 'chat:presence') setConnection(`${event.count} live`, true); if (event.type === 'workflow:snapshot' || event.type === 'workflow:update') renderWorkflow(event.workflow); if (event.type === 'harness:annotations') renderAnnotations(event.annotations); if (event.type === 'harness:work-items') renderWorkItems(event.workItems); if (event.type === 'workflow:notice') { if (!targetComposer.hidden) { pendingSubmissionId = undefined; targetSubmit.hidden = false; targetDone.hidden = true; targetRequestError.textContent = event.message; } else { showSubmissionToast(event.message); } } } catch {} }); }
+      function renderWorkItems(next) {
+        workItems = next;
+        workItemList.replaceChildren();
+        workItems.forEach(item => {
+          const row = document.createElement('li');
+          row.className = 'work-item';
+          const header = document.createElement('div');
+          header.className = 'work-item-header';
+          const summary = document.createElement('span');
+          summary.className = 'work-item-summary';
+          summary.textContent = item.summary;
+          const phase = document.createElement('span');
+          phase.className = `work-item-phase ${item.phase}`;
+          phase.textContent = phaseLabel(item.phase);
+          header.append(summary, phase);
+          const note = document.createElement('span');
+          note.className = 'work-item-note';
+          note.textContent = item.activity?.at(-1)?.message || 'Recorded.';
+          row.append(header, note);
+          if (item.githubIssue || item.githubPullRequestUrl) {
+            const links = document.createElement('div');
+            links.className = 'work-item-links';
+            if (item.githubIssue) {
+              const issue = document.createElement('a');
+              issue.href = item.githubIssue.url;
+              issue.target = '_blank';
+              issue.rel = 'noreferrer';
+              issue.textContent = `Issue #${item.githubIssue.number}`;
+              links.append(issue);
+            }
+            if (item.githubPullRequestUrl) {
+              const pullRequest = document.createElement('a');
+              pullRequest.href = item.githubPullRequestUrl;
+              pullRequest.target = '_blank';
+              pullRequest.rel = 'noreferrer';
+              pullRequest.textContent = 'Pull request';
+              links.append(pullRequest);
+            }
+            row.append(links);
+          }
+          workItemList.append(row);
+          acknowledgeSubmission(item);
+        });
+        if (!workItems.length) {
+          const empty = document.createElement('li');
+          empty.className = 'work-item';
+          empty.textContent = 'No activity in this room yet.';
+          workItemList.append(empty);
+        }
+        const activeItems = workItems.filter(item => !['completed', 'rejected'].includes(item.phase));
+        const attentionItem = activeItems.find(item => item.phase === 'needs_review') || activeItems[0];
+        launcherBadge.hidden = activeItems.length === 0;
+        launcherBadge.textContent = activeItems.length > 9 ? '9+' : `${activeItems.length}`;
+        launcherBadge.className = `launcher-badge ${attentionItem?.phase || ''}`;
+        activityCount.textContent = `${workItems.length}`;
+      }
+      function connect() { clearTimeout(reconnectTimer); const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'; socket = new WebSocket(`${protocol}//${location.host}/api/rooms/main`); socket.addEventListener('open', () => { setConnection('Live', true); resize(); }); socket.addEventListener('close', () => { setConnection('Reconnecting', false); resize(); reconnectTimer = setTimeout(connect, 1000); }); socket.addEventListener('error', () => socket.close()); socket.addEventListener('message', ({ data }) => { try { const event = JSON.parse(data); if (event.type === 'chat:snapshot') event.messages.forEach(render); if (event.type === 'chat:message') render(event.message); if (event.type === 'chat:presence') setConnection(`${event.count} live`, true); if (event.type === 'harness:annotations') renderAnnotations(event.annotations); if (event.type === 'harness:work-items') renderWorkItems(event.workItems); if (event.type === 'workflow:notice') { if (!targetComposer.hidden) { pendingSubmissionId = undefined; targetSubmit.hidden = false; targetDone.hidden = true; targetRequestError.textContent = event.message; } else { showSubmissionToast(event.message); } } } catch {} }); }
       function resize() { input.style.height = 'auto'; input.style.height = `${Math.min(input.scrollHeight, 180)}px`; send.disabled = targetMode || commentMode || drawMode || !input.value.trim() || socket?.readyState !== WebSocket.OPEN; }
       function clearTargetSelection() { hoveredTarget?.classList.remove('target-hovered'); selectedTarget?.classList.remove('target-selected'); hoveredTarget = undefined; selectedTarget = undefined; selectedEnvelope = undefined; }
       function closeTargetComposer() { targetComposer.hidden = true; targetRequestInput.value = ''; targetRequestError.textContent = ''; targetRequestError.classList.remove('acknowledged'); targetSubmit.hidden = false; targetSubmit.disabled = false; targetSubmit.textContent = 'Start'; targetDone.hidden = true; pendingSubmissionId = undefined; pendingSubmissionKind = undefined; clearTargetSelection(); }
-      function setOverlayOpen(active) { overlayOpen = active; document.body.classList.toggle('authoring-open', active); authoringPopover.hidden = !active; harnessLauncher.setAttribute('aria-expanded', String(active)); harnessLauncher.setAttribute('aria-label', active ? 'Close App Harness annotation tools' : 'Open App Harness annotation tools'); harnessLauncher.title = active ? 'Close annotations' : 'Annotate'; if (!active) { setTargetMode(false); setCommentMode(false); setDrawMode(false); annotationPanel.hidden = true; } }
+      function setOverlayOpen(active) { overlayOpen = active; document.body.classList.toggle('authoring-open', active); authoringPopover.hidden = !active; harnessLauncher.setAttribute('aria-expanded', String(active)); harnessLauncher.setAttribute('aria-label', active ? 'Close App Harness annotation tools' : 'Open App Harness annotation tools'); harnessLauncher.title = active ? 'Close App Harness' : 'Open App Harness'; if (!active) { setTargetMode(false); setCommentMode(false); setDrawMode(false); annotationPanel.hidden = true; } }
       function setTargetMode(active) { targetMode = active; document.body.classList.toggle('target-mode-active', active); targetModeButton.setAttribute('aria-pressed', String(active)); if (active) { setCommentMode(false); setDrawMode(false); closeTargetComposer(); } else hoveredTarget?.classList.remove('target-hovered'); resize(); }
       function setCommentMode(active) { commentMode = active; document.body.classList.toggle('comment-mode-active', active); commentModeButton.setAttribute('aria-pressed', String(active)); if (active) { setTargetMode(false); setDrawMode(false); closeTargetComposer(); } else hoveredTarget?.classList.remove('target-hovered'); resize(); }
       function setDrawMode(active) { drawMode = active; document.body.classList.toggle('draw-mode-active', active); drawModeButton.setAttribute('aria-pressed', String(active)); if (active) { setTargetMode(false); setCommentMode(false); closeTargetComposer(); } resize(); }
       function safeVisibleText(element) { return element.hasAttribute('data-target-text') ? element.textContent.trim().replace(/\s+/g, ' ').slice(0, 120) : undefined; }
       function envelopeFor(element) { const rect = element.getBoundingClientRect(); const targetId = element.dataset.targetId; const role = element.getAttribute('role') || (element.tagName === 'BUTTON' ? 'button' : element.tagName === 'TEXTAREA' ? 'textbox' : undefined); return { targetId, selector: `[data-target-id="${targetId}"]`, tag: element.tagName.toLowerCase(), role, label: element.dataset.targetLabel || element.getAttribute('aria-label') || undefined, text: safeVisibleText(element), page: location.pathname, room: 'main', rect: { x: Math.round(rect.x * 100) / 100, y: Math.round(rect.y * 100) / 100, width: Math.round(rect.width * 100) / 100, height: Math.round(rect.height * 100) / 100 } }; }
-      function positionTargetComposer() { targetComposer.style.removeProperty('left'); targetComposer.style.removeProperty('top'); }
-      function selectTarget(element, kind) { hoveredTarget?.classList.remove('target-hovered'); selectedTarget?.classList.remove('target-selected'); selectedTarget = element; selectedEnvelope = envelopeFor(element); selectedTarget.classList.add('target-selected'); composerKind = kind; targetComposer.dataset.kind = kind; overlayOpen = false; document.body.classList.remove('authoring-open'); authoringPopover.hidden = true; annotationPanel.hidden = true; harnessLauncher.setAttribute('aria-expanded', 'false'); harnessLauncher.setAttribute('aria-label', 'Open App Harness annotation tools'); harnessLauncher.title = 'Annotate'; targetContext.textContent = `${kind === 'comment' ? 'Comment on' : 'Target'}: ${targetName(selectedEnvelope)}`; targetRequestInput.placeholder = kind === 'comment' ? 'Leave feedback for the agent' : 'Describe the change'; targetComposer.setAttribute('aria-label', kind === 'comment' ? 'Comment on selected element' : 'Targeted change request'); targetRequestError.textContent = ''; targetSubmit.hidden = false; targetSubmit.disabled = false; targetSubmit.textContent = kind === 'comment' ? 'Record' : 'Start'; targetDone.hidden = true; targetComposer.hidden = false; positionTargetComposer(); setTargetMode(false); setCommentMode(false); setTimeout(() => selectedTarget?.classList.remove('target-selected'), 180); targetRequestInput.focus(); }
+      function selectTarget(element, kind) { hoveredTarget?.classList.remove('target-hovered'); selectedTarget?.classList.remove('target-selected'); selectedTarget = element; selectedEnvelope = envelopeFor(element); selectedTarget.classList.add('target-selected'); composerKind = kind; targetComposer.dataset.kind = kind; overlayOpen = false; document.body.classList.remove('authoring-open'); authoringPopover.hidden = true; annotationPanel.hidden = true; harnessLauncher.setAttribute('aria-expanded', 'false'); harnessLauncher.setAttribute('aria-label', 'Open App Harness annotation tools'); harnessLauncher.title = 'Open App Harness'; targetContext.textContent = `${kind === 'comment' ? 'Comment on' : 'Target'}: ${targetName(selectedEnvelope)}`; targetRequestInput.placeholder = kind === 'comment' ? 'Leave feedback for the agent' : 'Describe the change'; targetComposer.setAttribute('aria-label', kind === 'comment' ? 'Comment on selected element' : 'Targeted change request'); targetRequestError.textContent = ''; targetSubmit.hidden = false; targetSubmit.disabled = false; targetSubmit.textContent = kind === 'comment' ? 'Record' : 'Start'; targetDone.hidden = true; targetComposer.hidden = false; setTargetMode(false); setCommentMode(false); setTimeout(() => selectedTarget?.classList.remove('target-selected'), 180); targetRequestInput.focus(); }
       function candidateFor(node) { return node instanceof Element ? node.closest('[data-target-id]') : null; }
       document.addEventListener('pointerover', event => { if (!targetMode && !commentMode) return; const candidate = candidateFor(event.target); if (candidate === hoveredTarget) return; hoveredTarget?.classList.remove('target-hovered'); hoveredTarget = candidate; hoveredTarget?.classList.add('target-hovered'); }, true);
       document.addEventListener('click', event => { if (!targetMode && !commentMode) return; const candidate = candidateFor(event.target); if (!candidate) return; event.preventDefault(); event.stopImmediatePropagation(); selectTarget(candidate, commentMode ? 'comment' : 'request'); }, true);
@@ -420,7 +153,7 @@
       function finishDrawing(event) { if (!drawing) return; drawing = false; drawingLayer.releasePointerCapture?.(event.pointerId); draftPath?.remove(); draftPath = undefined; if (draftPoints.length >= 2 && socket?.readyState === WebSocket.OPEN) { pendingSubmissionId = crypto.randomUUID(); pendingSubmissionKind = 'draw'; showAuthoringNotice('Saving drawing…'); socket.send(JSON.stringify({ type: 'harness:annotation', clientSubmissionId: pendingSubmissionId, annotation: { kind: 'draw', points: draftPoints, page: location.pathname } })); } draftPoints = []; }
       drawingLayer.addEventListener('pointerup', finishDrawing); drawingLayer.addEventListener('pointercancel', finishDrawing);
       document.addEventListener('keydown', event => { if (event.key === 'Escape') { const active = targetMode || commentMode || drawMode || !targetComposer.hidden; if (!targetComposer.hidden) closeTargetComposer(); setTargetMode(false); setCommentMode(false); setDrawMode(false); if (!active && overlayOpen) setOverlayOpen(false); return; } if ((targetMode || commentMode || drawMode) && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); event.stopImmediatePropagation(); } }, true);
-      input.addEventListener('input', resize); input.addEventListener('keydown', event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); form.requestSubmit(); } }); harnessLauncher.addEventListener('click', () => { if (!annotationPanel.hidden) { annotationPanel.hidden = true; setOverlayOpen(false); return; } setOverlayOpen(!overlayOpen); }); document.querySelector('#sidebar-new-request').addEventListener('click', () => { setOverlayOpen(true); setTargetMode(true); }); harnessDismiss.addEventListener('click', () => setOverlayOpen(false)); targetModeButton.addEventListener('click', () => setTargetMode(!targetMode)); commentModeButton.addEventListener('click', () => setCommentMode(!commentMode)); drawModeButton.addEventListener('click', () => setDrawMode(!drawMode)); annotationToggle.addEventListener('click', () => { annotationPanel.hidden = !annotationPanel.hidden; if (!annotationPanel.hidden) { overlayOpen = false; authoringPopover.hidden = true; harnessLauncher.setAttribute('aria-expanded', 'true'); harnessLauncher.setAttribute('aria-label', 'Close App Harness activity'); harnessLauncher.title = 'Close activity'; } }); annotationClose.addEventListener('click', () => { annotationPanel.hidden = true; harnessLauncher.setAttribute('aria-expanded', 'false'); harnessLauncher.setAttribute('aria-label', 'Open App Harness annotation tools'); harnessLauncher.title = 'Annotate'; }); annotationClear.addEventListener('click', () => { if (!annotations.length || socket?.readyState !== WebSocket.OPEN) return; if (confirm('Clear all canvas marks for this room? Chat messages will not be changed.')) socket.send(JSON.stringify({ type: 'harness:annotations:clear' })); }); document.querySelector('#cancel-target-request').addEventListener('click', closeTargetComposer); targetDone.addEventListener('click', closeTargetComposer);
+      input.addEventListener('input', resize); input.addEventListener('keydown', event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); form.requestSubmit(); } }); harnessLauncher.addEventListener('click', () => { if (!annotationPanel.hidden) { annotationPanel.hidden = true; setOverlayOpen(false); return; } setOverlayOpen(!overlayOpen); }); harnessDismiss.addEventListener('click', () => setOverlayOpen(false)); targetModeButton.addEventListener('click', () => setTargetMode(!targetMode)); commentModeButton.addEventListener('click', () => setCommentMode(!commentMode)); drawModeButton.addEventListener('click', () => setDrawMode(!drawMode)); annotationToggle.addEventListener('click', () => { annotationPanel.hidden = !annotationPanel.hidden; if (!annotationPanel.hidden) { overlayOpen = false; authoringPopover.hidden = true; harnessLauncher.setAttribute('aria-expanded', 'true'); harnessLauncher.setAttribute('aria-label', 'Close App Harness activity'); harnessLauncher.title = 'Close activity'; } }); annotationClose.addEventListener('click', () => { annotationPanel.hidden = true; harnessLauncher.setAttribute('aria-expanded', 'false'); harnessLauncher.setAttribute('aria-label', 'Open App Harness annotation tools'); harnessLauncher.title = 'Open App Harness'; }); annotationClear.addEventListener('click', () => { if (!annotations.length || socket?.readyState !== WebSocket.OPEN) return; if (confirm('Clear all canvas marks for this room? Chat messages will not be changed.')) socket.send(JSON.stringify({ type: 'harness:annotations:clear' })); }); document.querySelector('#cancel-target-request').addEventListener('click', closeTargetComposer); targetDone.addEventListener('click', closeTargetComposer);
       form.addEventListener('submit', event => { event.preventDefault(); if (targetMode || commentMode || drawMode) return; const text = input.value.trim(); if (!text || socket?.readyState !== WebSocket.OPEN) return; socket.send(JSON.stringify({ type: 'chat:send', author, text })); input.value = ''; resize(); });
       targetComposer.addEventListener('submit', event => { event.preventDefault(); targetRequestError.classList.remove('acknowledged'); const text = targetRequestInput.value.trim(); if (!text) { targetRequestError.textContent = composerKind === 'comment' ? 'Write a brief comment.' : 'Describe the change you want to make.'; return; } if (!selectedEnvelope || socket?.readyState !== WebSocket.OPEN) { targetRequestError.textContent = 'Connection is not ready yet.'; return; } pendingSubmissionId = crypto.randomUUID(); pendingSubmissionKind = 'composer'; targetSubmit.disabled = true; targetRequestError.textContent = composerKind === 'comment' ? 'Recording and creating an activity item…' : 'Submitting and creating an activity item…'; if (composerKind === 'comment') socket.send(JSON.stringify({ type: 'harness:annotation', clientSubmissionId: pendingSubmissionId, annotation: { kind: 'comment', target: selectedEnvelope, text } })); else socket.send(JSON.stringify({ type: 'workflow:request', clientSubmissionId: pendingSubmissionId, request: text, target: selectedEnvelope })); });
       connect(); resize();
