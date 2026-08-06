@@ -168,7 +168,11 @@ export default {
 			const checkoutDirectory = `/workspace/${sessionId}-repository`;
 			let session;
 			try {
-				session = await createSessionAfterRuntimeUpdate(sandbox, { id: sessionId, cwd: "/workspace", commandTimeoutMs: 120_000 });
+				session = await createSessionAfterRuntimeUpdate(sandbox, {
+					id: sessionId,
+					cwd: "/workspace",
+					commandTimeoutMs: 120_000,
+				});
 			} catch (error) {
 				if (isPlatformTransientError(error) || isDurableObjectCodeUpdateReset(error)) {
 					return Response.json({ jobId: job.jobId, state: "runner-unavailable", classification: "sandbox-runtime-updating" });
@@ -176,18 +180,20 @@ export default {
 				throw error;
 			}
 			try {
-				// Configure Git directly rather than interpolating a credential into a
-				// command. The one-hour installation token reaches only this session's
-				// environment, never a command string, audit event, or response.
-				await session.setEnvVars({
-					GIT_CONFIG_COUNT: "1",
-					GIT_CONFIG_KEY_0: "http.extraHeader",
-					GIT_CONFIG_VALUE_0: `Authorization: Basic ${btoa(`x-access-token:${installation.token}`)}`,
-					GIT_TERMINAL_PROMPT: "0",
-				});
+				// The SDK applies these only to this one process. The one-hour
+				// installation token is never included in a command string, repository
+				// URL, session-global environment, audit event, or response.
 				const clone = await session.exec(
 					`git clone --depth 1 https://github.com/callil/autonomous-live-chat.git ${checkoutDirectory}`,
-					{ timeout: 120_000 },
+					{
+						timeout: 120_000,
+						env: {
+							GIT_CONFIG_COUNT: "1",
+							GIT_CONFIG_KEY_0: "http.extraHeader",
+							GIT_CONFIG_VALUE_0: `Authorization: Basic ${btoa(`x-access-token:${installation.token}`)}`,
+							GIT_TERMINAL_PROMPT: "0",
+						},
+					},
 				);
 				if (!clone.success) {
 					return Response.json({
