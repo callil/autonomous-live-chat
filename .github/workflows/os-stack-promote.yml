@@ -26,6 +26,7 @@ jobs:
   promote-root:
     runs-on: ubuntu-latest
     env:
+      GH_REPO: ${{ github.repository }}
       GH_TOKEN: ${{ secrets.AUTONOMY_GITHUB_TOKEN }}
       PR: ${{ inputs.pull_request }}
       STACK_ID: ${{ inputs.stack_id }}
@@ -40,22 +41,31 @@ jobs:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CI_PROFILE: ${{ inputs.ci_profile }}
     steps:
+      # This must precede provenance and the failure callback: both use
+      # repository files, and provenance must be independent of a runner's
+      # implicit checkout state.
+      - uses: actions/checkout@v4
+        with:
+          ref: main
       - name: Verify immutable root stack provenance
         run: |
+          # shellcheck disable=SC2016
           node -e '
             const { execFileSync } = require("node:child_process");
-            const pr = JSON.parse(execFileSync("gh", ["pr", "view", process.env.PR, "--json", "headRefName,baseRefName,headRefOid,state"], { encoding: "utf8" }));
-            if (pr.state !== "OPEN" || pr.baseRefName !== process.env.EXPECTED_PARENT || pr.headRefOid !== process.env.EXPECTED_HEAD || !/^app-harness-os\/\d+\/g\d+$/.test(pr.headRefName)) throw new Error("stale or invalid stack provenance");
+            const pr = JSON.parse(execFileSync("gh", ["api", `repos/${process.env.GH_REPO}/pulls/${process.env.PR}`], { encoding: "utf8" }));
+            if (pr.state !== "open" || pr.base.ref !== process.env.EXPECTED_PARENT || pr.head.sha !== process.env.EXPECTED_HEAD || !/^app-harness-os\/\d+\/g\d+$/.test(pr.head.ref)) throw new Error("stale or invalid stack provenance");
           '
       - name: Require the supported effective CI profile
         run: test "$CI_PROFILE" = visual
       - name: Wait for the immutable stack-node validation check
         run: |
-          for attempt in $(seq 1 36); do
-            result="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${EXPECTED_HEAD}/check-runs" --jq '.check_runs[] | select(.name == "validate-node") | .conclusion' | tail -n 1)"
+          attempt=1
+          while [ "$attempt" -le 36 ]; do
+            result="$(gh api "repos/${GH_REPO}/commits/${EXPECTED_HEAD}/check-runs" --jq '.check_runs[] | select(.name == "validate-node") | .conclusion' | tail -n 1)"
             if [ "$result" = success ]; then exit 0; fi
             if [ -n "$result" ] && [ "$result" != null ]; then echo "validate-node concluded: $result"; exit 1; fi
             sleep 5
+            attempt=$((attempt + 1))
           done
           echo "validate-node did not register for the immutable candidate head"; exit 1
       - uses: actions/checkout@v4

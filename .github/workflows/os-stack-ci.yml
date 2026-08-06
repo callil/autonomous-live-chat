@@ -19,16 +19,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Verify orchestrator-owned stack relationship
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR: ${{ github.event.pull_request.number }}
         run: |
+          # shellcheck disable=SC2016
           node -e '
-            const { execFileSync } = require("node:child_process");
-            const pr = JSON.parse(execFileSync("gh", ["pr", "view", process.env.PR, "--json", "headRefName,baseRefName,baseRefOid"], { encoding: "utf8" }));
-            if (!/^app-harness-os\/\d+\/g\d+$/.test(pr.headRefName)) throw new Error("PR head is outside the OS stack namespace");
-            if (!(pr.baseRefName === "main" || /^app-harness-os\/\d+\/g\d+$/.test(pr.baseRefName))) throw new Error("PR base is not main or an immediate OS stack parent");
-            require("node:fs").appendFileSync(process.env.GITHUB_ENV, `APP_HARNESS_EXPECTED_BASE=${pr.baseRefOid}\n`);
+            const fs = require("node:fs");
+            const pr = JSON.parse(fs.readFileSync(process.env.GITHUB_EVENT_PATH, "utf8")).pull_request;
+            const headRefName = pr.head.ref;
+            const baseRefName = pr.base.ref;
+            const baseSha = pr.base.sha;
+            if (!/^app-harness-os\/\d+\/g\d+$/.test(headRefName)) throw new Error("PR head is outside the OS stack namespace");
+            if (!(baseRefName === "main" || /^app-harness-os\/\d+\/g\d+$/.test(baseRefName))) throw new Error("PR base is not main or an immediate OS stack parent");
+            fs.appendFileSync(process.env.GITHUB_ENV, `APP_HARNESS_EXPECTED_BASE=${baseSha}\n`);
           '
       - uses: actions/checkout@v4
         with:
@@ -52,5 +53,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
-        run: gh pr comment "$PR" --body "<!-- app-harness-os-ci:${{ github.run_id }} -->
-          App Harness OS stack-node validation passed: the repository baseline gates plus the scoped visual-token/reduced-motion static check. Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        run: |
+          printf '%s\n' \
+            '<!-- app-harness-os-ci:${{ github.run_id }} -->' \
+            'App Harness OS stack-node validation passed: the repository baseline gates plus the scoped visual-token/reduced-motion static check.' \
+            'Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}' \
+            > /tmp/app-harness-os-ci.md
+          gh pr comment "$PR" --body-file /tmp/app-harness-os-ci.md

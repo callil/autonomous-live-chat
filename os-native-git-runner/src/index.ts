@@ -103,6 +103,20 @@ function classifyGitTransportFailure(stderr: string): "github-unreachable" | "gi
 	return "git-transport-failed";
 }
 
+function classifySandboxFailure(error: unknown): "sandbox-capacity-exhausted" | "sandbox-runtime-updating" | "sandbox-unavailable" {
+	const message = error instanceof Error ? error.message : "";
+	if (/maximum number of running container instances exceeded|max_instances/iu.test(message)) return "sandbox-capacity-exhausted";
+	if (isPlatformTransientError(error) || isDurableObjectCodeUpdateReset(error)) return "sandbox-runtime-updating";
+	return "sandbox-unavailable";
+}
+
+async function destroySandboxSafely(sandbox: ReturnType<typeof getSandbox>, sessionId?: string): Promise<void> {
+	if (sessionId) {
+		try { await sandbox.deleteSession(sessionId); } catch { console.warn("Sandbox session cleanup failed", { classification: "sandbox-session-cleanup-failed" }); }
+	}
+	try { await sandbox.destroy(); } catch { console.warn("Sandbox container cleanup failed", { classification: "sandbox-destroy-failed" }); }
+}
+
 function pemToDer(pem: string): ArrayBuffer {
 	const body = pem.replace(/-----(BEGIN|END) [A-Z ]+-----/gu, "").replace(/\s+/gu, "");
 	const bytes = Uint8Array.from(atob(body), (char) => char.charCodeAt(0));
@@ -239,19 +253,15 @@ export default {
 			const sandbox = getSandbox(env.Sandbox, "app-harness-runner-probe", {
 				enableDefaultSession: false,
 			});
-			const session = await createSessionAfterRuntimeUpdate(sandbox, {
-				id: "probe",
-				cwd: "/workspace",
-				commandTimeoutMs: 15_000,
-			});
-			const result = await session.exec("git --version", { timeout: 15_000 });
-			await sandbox.deleteSession("probe");
-			return Response.json({
-				ok: result.success,
-				exitCode: result.exitCode,
-				stdout: result.stdout.trim().slice(0, 160),
-				runner: "cloudflare-sandbox",
-			});
+			try {
+				const session = await createSessionAfterRuntimeUpdate(sandbox, { id: "probe", cwd: "/workspace", commandTimeoutMs: 15_000 });
+				const result = await session.exec("git --version", { timeout: 15_000 });
+				return Response.json({ ok: result.success, exitCode: result.exitCode, stdout: result.stdout.trim().slice(0, 160), runner: "cloudflare-sandbox" });
+			} catch (error) {
+				return Response.json({ ok: false, state: "runner-unavailable", classification: classifySandboxFailure(error) }, { status: 503 });
+			} finally {
+				await destroySandboxSafely(sandbox, "probe");
+			}
 		}
 
 		if (url.pathname === "/v1/native-git/jobs") {
@@ -293,10 +303,8 @@ export default {
 					commandTimeoutMs: 120_000,
 				});
 			} catch (error) {
-				if (isPlatformTransientError(error) || isDurableObjectCodeUpdateReset(error)) {
-					return Response.json({ jobId: job.jobId, state: "runner-unavailable", classification: "sandbox-runtime-updating" });
-				}
-				throw error;
+				await destroySandboxSafely(sandbox, sessionId);
+				return Response.json({ jobId: job.jobId, state: "runner-unavailable", classification: classifySandboxFailure(error) });
 			}
 			try {
 				// The SDK applies these only to this one process. The one-hour
@@ -382,7 +390,7 @@ export default {
 					},
 				});
 			} finally {
-				await sandbox.deleteSession(sessionId);
+				await destroySandboxSafely(sandbox, sessionId);
 			}
 		}
 
