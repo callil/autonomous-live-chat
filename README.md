@@ -12,6 +12,7 @@ The host product is intentionally simple: a live multi-user chat backed by a Clo
 
 ```text
 apps/demo/                 live chat frontend + Worker/Durable Object backend
+packages/contracts/        shared platform and authoring-envelope policy
 packages/react/            reusable React authoring overlay
 infra/orchestration/       durable job, stack, and provider contracts
 infra/workers/             isolated coding runner + GitHub credential bridge

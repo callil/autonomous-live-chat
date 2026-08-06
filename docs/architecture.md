@@ -1,10 +1,11 @@
 # Architecture
 
-## Three code surfaces
+## Four code surfaces
 
 | Surface | Owns | Does not own |
 | --- | --- | --- |
 | `apps/demo` | Chat UI, room protocol, Worker routes, Durable Object state, product deployment | Reusable React API or isolated Git credentials |
+| `packages/contracts` | Provider-derived limits, delivery policy, sanitized authoring-envelope schema | Product behavior, presentation, or deployment orchestration |
 | `packages/react` | Summonable launcher, element targeting, sanitized target envelope, pluggable submission callback | Chat storage, GitHub, Cloudflare, or agent policy |
 | `infra` | Provider contracts, durable stack rules, trusted checks, Sandbox runner, GitHub bridge | Host-app presentation or product features |
 

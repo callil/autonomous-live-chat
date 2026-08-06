@@ -7,7 +7,13 @@ App Harness does not use character counts or retained-record counts as product p
 3. **Admission:** one record must fit the platform that stores it. Admission is measured in UTF-8 bytes against Cloudflare's documented SQLite Durable Object key-plus-value limit. An oversized single submission is rejected visibly and can be split into smaller steps.
 4. **Authoring envelope:** target metadata is intentionally narrow so the overlay never captures arbitrary DOM state, form values, or secrets. Its named schema bounds live beside the platform policy; they do not limit the request text itself.
 
-The canonical values and helpers are in `infra/contracts/platform-policy.js`; TypeScript consumers use its adjacent declaration file. Tests verify that a delivery page fits one documented multi-key read and that multi-key deletion is batched at Cloudflare's documented boundary.
+The canonical values and helpers are in the dependency-free `@app-harness/contracts` package. Both the demo runtime and reusable React overlay consume it, so their target schemas cannot silently drift. Tests verify that a delivery page stays within documented platform boundaries and that multi-key deletion is batched correctly.
+
+Every number belongs to one of three classes:
+
+- **Platform invariant:** copied from a cited provider limit and changed only when that provider changes.
+- **Privacy/schema boundary:** intentionally minimizes captured browser metadata; it is reviewed as part of the public target-envelope contract.
+- **Operational working set:** limits one read or delivery, is observable and benchmarkable, and never changes retention.
 
 ## Current sources and rationale
 
@@ -16,8 +22,8 @@ The canonical values and helpers are in `infra/contracts/platform-policy.js`; Ty
 | Durable Object key + value: 2,000,000 bytes | Cloudflare SQLite-backed Durable Object platform limit |
 | Durable Object multi-key get/delete: 128 keys | Cloudflare asynchronous storage API limit |
 | WebSocket receive: 32 MiB | Cloudflare platform limit; App Harness uses the smaller durable-record budget for events it must persist |
-| History delivery page: 64 records | Operational working set, deliberately no larger than one multi-key read; changing it does not affect retention |
-| History delivery page: 4,000,000 serialized bytes | Byte ceiling equal to two maximum Durable Object records; record count is only an additional upper bound |
+| History delivery page: 128 records | Operational ceiling derived directly from the documented multi-key boundary; byte paging usually stops large pages sooner |
+| History delivery page: 2,000,000 serialized bytes | Operational ceiling equal to one maximum durable record; older records remain available at the returned cursor |
 
 Cloudflare references:
 

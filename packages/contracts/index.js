@@ -1,6 +1,6 @@
 /**
- * Platform contracts and delivery policy live here so limits are named,
- * documented, and tested instead of being scattered through product code.
+ * Shared platform contracts. Limits live here so the app and reusable overlay
+ * cannot silently drift or accumulate unrelated local constants.
  *
  * Cloudflare sources:
  * - https://developers.cloudflare.com/durable-objects/platform/limits/
@@ -16,18 +16,20 @@ export const PLATFORM_LIMITS = {
 };
 
 /**
- * These values bound one delivery operation, never retained product history.
- * Changing them affects latency and memory pressure, not what is preserved.
+ * Delivery bounds protect one invocation and never discard retained history.
+ * Both values derive directly from documented platform boundaries: a page can
+ * inspect at most one multi-key operation and carries at most one maximum
+ * durable record before the client asks for the next cursor.
  */
 export const DELIVERY_POLICY = {
-	historyRecordsPerPage: 64,
-	historyPageBytes: 2 * PLATFORM_LIMITS.cloudflareDurableObject.keyAndValueBytes,
+	historyRecordsPerPage: PLATFORM_LIMITS.cloudflareDurableObject.getKeysPerCall,
+	historyPageBytes: PLATFORM_LIMITS.cloudflareDurableObject.keyAndValueBytes,
 };
 
 /**
  * The authoring overlay deliberately records a small, non-sensitive locator
- * envelope instead of arbitrary DOM state. These are schema bounds, not caps
- * on the user's actual request or retained history.
+ * envelope instead of arbitrary DOM state. These are privacy/schema bounds,
+ * not caps on request prose or retained history.
  */
 export const AUTHORING_ENVELOPE_POLICY = {
 	roomNameCharacters: 64,

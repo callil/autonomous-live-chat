@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { AUTHORING_ENVELOPE_POLICY } from "../../../packages/contracts/index.js";
 
 const html = await readFile(new URL("../public/index.html", import.meta.url), "utf8");
 const worker = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
@@ -10,6 +11,8 @@ assert.doesNotThrow(() => new Function(clientScript), "the browser client script
 
 assert.doesNotMatch(html, /maxlength=/u);
 assert.doesNotMatch(html, /message-count/u);
+const browserSafeTextPolicy = html.match(/TARGET_SAFE_TEXT_CHARACTERS = (\d+)/u);
+assert.equal(Number(browserSafeTextPolicy?.[1]), AUTHORING_ENVELOPE_POLICY.safeTextCharacters, "the no-build demo mirrors the shared privacy envelope exactly");
 assert.doesNotMatch(worker, /MAX_(?:MESSAGE_LENGTH|REQUEST_LENGTH|STORED_MESSAGES|STORED_ANNOTATIONS|STORED_WORK_ITEMS)/u);
 assert.match(worker, /DELIVERY_POLICY\.historyRecordsPerPage/u);
 assert.match(worker, /type: "chat:history"/u);
