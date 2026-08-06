@@ -6,6 +6,7 @@
 	"scripts": {
 		"test:stack": "node scripts/test-stack-scheduler.mjs",
 		"test:native-git-preflight": "node scripts/test-os-native-git-preflight.mjs",
+		"test:os-provider-bridge": "node scripts/test-os-provider-bridge.mjs",
     "deploy": "wrangler deploy",
     "dev": "wrangler dev",
     "start": "wrangler dev",

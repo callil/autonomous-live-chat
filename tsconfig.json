@@ -40,5 +40,6 @@
 			"./worker-configuration.d.ts",
 			"node"
 		]
-	}
+	},
+	"exclude": ["os-native-git-runner", "os-git-credential-proxy"]
 }

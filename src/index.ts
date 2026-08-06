@@ -1,4 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
+import { classifyOsRunnerResponse, createOsNativeGitJob } from "./os-provider-bridge.js";
 
 type ChatMessage = {
 	id: string;
@@ -106,6 +107,7 @@ type HarnessWorkItem = {
 	workflowId?: string;
 	githubIssue?: { number: number; url: string };
 	githubPullRequestUrl?: string;
+	osNativeGit?: { jobId: string; state: string; runnerUrl: string; stackId: string; generation: number };
 };
 
 type ClientEvent =
@@ -122,9 +124,12 @@ type WorkflowCallback = {
 	result?: unknown;
 };
 
-type RuntimeEnv = Env & {
+type RuntimeEnv = Omit<Env, "OS_NATIVE_GIT_PROVIDER" | "OS_NATIVE_GIT_RUNNER"> & {
 	GITHUB_AUTOMATION_TOKEN: string;
 	AUTONOMY_CALLBACK_SECRET: string;
+	OS_NATIVE_GIT_RUNNER?: Fetcher;
+	OS_NATIVE_GIT_RUNNER_SECRET?: string;
+	OS_NATIVE_GIT_PROVIDER?: string;
 };
 
 const MAX_MESSAGE_LENGTH = 2_000;
@@ -397,17 +402,75 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		};
 
 		workItem.workflowId = workflow.id;
-		this.transitionWorkItem(workItem, "queued", "GitHub issue created. Guarded fallback workflow dispatched; no model-driven agent is involved.");
+		this.transitionWorkItem(workItem, "queued", "GitHub issue created. Candidate execution is being selected by policy.");
 		await Promise.all([this.ctx.storage.put(WORKFLOW_KEY, workflow), this.saveWorkItems(workItems)]);
 		this.broadcastWorkflow(workflow);
 
 		try {
+			if (this.env.OS_NATIVE_GIT_PROVIDER === "enabled") {
+				await this.dispatchOsNativeGitJob(workflow);
+				return;
+			}
+			this.transitionWorkItem(workItem, "queued", "Guarded fallback workflow dispatched; no model-driven agent is involved.");
+			await this.saveWorkItems(workItems);
 			await this.dispatchAutonomousRun(workflow);
 		} catch (error) {
 			const detail = error instanceof Error ? error.message : "unknown dispatch error";
 			console.error("Autonomy dispatch failed", detail);
 			await this.failWorkflow(workflow, `Could not dispatch the guarded candidate run (${detail}). No source or production change was made.`);
 		}
+	}
+
+	/**
+	 * The OS provider boundary is deliberately narrow: only the existing GitHub
+	 * issue, durable work-item ID, room, and first stack generation leave this
+	 * object. Request prose, source, browser values, and credentials do not.
+	 */
+	private async dispatchOsNativeGitJob(workflow: WorkflowRecord): Promise<void> {
+		const workItems = await this.getWorkItems();
+		const workItem = workflow.workItemId ? workItems.find((item) => item.id === workflow.workItemId) : undefined;
+		if (!workItem?.githubIssue) {
+			await this.failWorkflow(workflow, "Cloudflare OS job is blocked because the linked GitHub issue is missing.");
+			return;
+		}
+		const job = createOsNativeGitJob({
+			workItemId: workItem.id,
+			issueUrl: workItem.githubIssue.url,
+			room: "main",
+		});
+		workItem.osNativeGit = {
+			jobId: job.jobId,
+			state: "queued",
+			runnerUrl: job.runnerUrl,
+			stackId: job.stack.id,
+			generation: job.generation,
+		};
+		if (!this.env.OS_NATIVE_GIT_RUNNER || !this.env.OS_NATIVE_GIT_RUNNER_SECRET) {
+			workItem.osNativeGit.state = "blocked";
+			this.transitionWorkItem(workItem, "needs_review", "Cloudflare OS provider is enabled but its private runner binding is not configured. No native Git action was attempted.");
+			await this.saveWorkItems(workItems);
+			return;
+		}
+
+		const response = await this.env.OS_NATIVE_GIT_RUNNER.fetch(new Request("https://runner.internal/v1/native-git/jobs", {
+			method: "POST",
+			headers: {
+				Authorization: `Bearer ${this.env.OS_NATIVE_GIT_RUNNER_SECRET}`,
+				"Content-Type": "application/json",
+			},
+			body: JSON.stringify(job),
+		}));
+		let body: unknown = null;
+		try { body = await response.json(); } catch { /* handled as unrecognized below */ }
+		const outcome = classifyOsRunnerResponse(body);
+		workItem.osNativeGit.state = typeof body === "object" && body && "state" in body && typeof body.state === "string" ? body.state : "unknown";
+		this.transitionWorkItem(workItem, outcome.phase, outcome.detail);
+		workflow.phase = outcome.terminal ? "requires_review" : "preparing_candidate";
+		workflow.updatedAt = Date.now();
+		workflow.activity.push({ phase: workflow.phase, message: outcome.detail, at: workflow.updatedAt });
+		await Promise.all([this.ctx.storage.put(WORKFLOW_KEY, workflow), this.saveWorkItems(workItems)]);
+		await this.appendGitHubIssueStatus(workItem, outcome.detail);
+		this.broadcastWorkflow(workflow);
 	}
 
 	private async dispatchAutonomousRun(workflow: WorkflowRecord): Promise<void> {

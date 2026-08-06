@@ -21,8 +21,15 @@
 		"binding": "ASSETS"
 	},
 	"vars": {
-		"GITHUB_REPOSITORY": "callil/autonomous-live-chat"
+		"GITHUB_REPOSITORY": "callil/autonomous-live-chat",
+		"OS_NATIVE_GIT_PROVIDER": "disabled"
 	},
+	"services": [
+		{
+			"binding": "OS_NATIVE_GIT_RUNNER",
+			"service": "app-harness-os-native-git"
+		}
+	],
 	"durable_objects": {
 		"bindings": [
 			{
