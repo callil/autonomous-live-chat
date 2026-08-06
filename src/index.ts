@@ -1,4 +1,4 @@
-import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
+import { DurableObject, RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
 import {
 	applyCoordinatorCallback,
 	blockCoordinatorStack,
@@ -245,7 +245,11 @@ const PHASES: ReadonlySet<WorkflowPhase> = new Set([
  * that response to one durable App Harness work item without parsing model
  * prose for identifiers.
  */
-export class OsWorkspaceResponseTarget extends WorkerEntrypoint<RuntimeEnv> {
+class OsWorkspaceResponseTarget extends RpcTarget {
+	constructor(private readonly env: RuntimeEnv) {
+		super();
+	}
+
 	async onGadgetResponse(response: OsWorkspaceResponse): Promise<void> {
 		const prefix = "app-harness:";
 		if (!response.idempotencyKey.startsWith(prefix)) throw new Error("Cloudflare OS response target source is invalid.");
@@ -737,10 +741,9 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 			stackId: `stack-${workItem.id}`,
 			generation: 1,
 		};
-		// Forward the static loopback Service Binding itself. The OS response carries
-		// the gateway-owned idempotency key, so this callback never needs a dynamic
-		// binding invocation (which would produce a non-serializable RpcPromise).
-		const responseTarget = this.ctx.exports.OsWorkspaceResponseTarget;
+		// OS persists and duplicates this callback as a native RPC capability. Pass
+		// the RpcTarget the contract expects, not a WorkerEntrypoint binding proxy.
+		const responseTarget = new OsWorkspaceResponseTarget(this.env);
 		const submission = createOsWorkspaceSubmission({
 			workItemId: workItem.id,
 			issue: workItem.githubIssue,
