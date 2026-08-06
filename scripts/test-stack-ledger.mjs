@@ -189,6 +189,22 @@ function buildSingleCandidate() {
 	stale(ciFailed, { type: "node-validation-recorded", eventId: "ci-late-pass", generation: 1, nodeId: "root", headSha: B, outcome: "passed" }, "ledger-terminal");
 }
 
+// A one-node stack with no candidate advances its root generation once when
+// main moves, using the same root-led rule as a larger stack.
+{
+	let ledger = startRunner(singleLedger(), "runner-start-before-main", "root", "attempt-before-main");
+	ledger = apply(ledger, { type: "main-observed", eventId: "main-moved-before-candidate", generation: 1, mainSha: C });
+	assert.equal(ledger.status, "needs-restack");
+	assert.equal(ledger.runner.stage, "restack-pending");
+	ledger = apply(ledger, { type: "restack-started", eventId: "single-root-g2", generation: 1 });
+	assert.equal(ledger.mode, "single-fast");
+	assert.equal(ledger.generation, 2);
+	assert.equal(ledger.generationBaseSha, C);
+	assert.equal(ledger.nodes[0].branch, "app-harness-os/19/g2");
+	assert.equal(ledger.nodes[0].parentBaseSha, C);
+	assert.equal(ledger.runner.stage, "pending");
+}
+
 // A one-node stack keeps its immutable candidate generation/head when main
 // advances. Only the integration proof and dispatch identity are invalidated.
 {

@@ -227,6 +227,7 @@ const COORDINATOR_MAX_ATTEMPTS = 3;
 const COORDINATOR_BATCH_SIZE = 8;
 const SHA = /^[0-9a-f]{40}$/iu;
 const LIVE_APP_URL = "https://autonomous-live-chat.coda-a.workers.dev/?room=main";
+const AUTO_RESTACK_MESSAGE = "Cloudflare OS detected a changed parent base and marked the stack for a single root-led restack.";
 const OS_WORKSPACE_CALLER_EMAIL = "callil.capuozzo@gmail.com";
 const TERMINAL_PHASES: ReadonlySet<WorkflowPhase> = new Set([
 	"completed",
@@ -290,6 +291,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 	constructor(ctx: DurableObjectState, env: RuntimeEnv) {
 		super(ctx, env);
 		this.ctx.blockConcurrencyWhile(() => this.scheduleCoordinatorAlarm());
+		this.ctx.waitUntil(this.recoverAutoRestackStops());
 	}
 
 	[restore](params: unknown): RpcTarget {
@@ -838,6 +840,33 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		if (agent) workItem.osNativeGit.agent = agent;
 		const outcome = classifyOsRunnerResponse(body);
 		if (outcome.retryable) throw new Error(outcome.detail);
+		if (value.state === "needs-restack" && typeof value.baseSha === "string" && SHA.test(value.baseSha)) {
+			const observed = applyStackEvent(ledger, {
+				type: "main-observed",
+				eventId: `runner-main-moved-g${ledger.generation}`,
+				generation: ledger.generation,
+				mainSha: value.baseSha.toLowerCase(),
+			});
+			if (observed.disposition !== "applied" && observed.disposition !== "duplicate") throw new Error(`Stack main observation failed (${observed.reason}).`);
+			const restacked = applyStackEvent(observed.ledger, {
+				type: "restack-started",
+				eventId: `root-restack-g${observed.ledger.generation + 1}`,
+				generation: observed.ledger.generation,
+			});
+			if (restacked.disposition !== "applied" && restacked.disposition !== "duplicate") throw new Error(`Root restack failed (${restacked.reason}).`);
+			ledger = restacked.ledger;
+			workItem.osNativeGit.state = "queued";
+			workItem.osNativeGit.generation = ledger.generation;
+			workItem.osNativeGit.baseSha = ledger.generationBaseSha;
+			delete workItem.osNativeGit.headSha;
+			this.transitionWorkItem(workItem, "building", `Main advanced before the candidate was created; root stack generation ${ledger.generation} was queued automatically.`);
+			workflow.updatedAt = Date.now();
+			workflow.activity.push({ phase: workflow.phase, message: `Root stack generation ${ledger.generation} queued against the current main SHA.`, at: workflow.updatedAt });
+			if (await this.completeClaim(claim, { workflow, workItem, ledger, nextKind: "run-os", nextStage: "queued" })) {
+				this.ctx.waitUntil(this.appendGitHubIssueStatus(workItem, `Root stack generation ${ledger.generation} queued automatically after main advanced.`));
+			}
+			return;
+		}
 		if (value.state !== "pull-request-opened" || typeof value.baseSha !== "string" || typeof value.headSha !== "string" || !value.pullRequest || typeof value.pullRequest !== "object") {
 			const failed = applyStackEvent(ledger, { type: "runner-attempt-failed", eventId: `runner-failed-${claim.effect.attempts}`, generation: ledger.generation, attemptToken: claim.leaseToken });
 			if (failed.disposition === "applied") ledger = failed.ledger;
@@ -1046,6 +1075,74 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		});
 		await this.ctx.storage.put(this.outboxKey(effect.id), effect);
 		await this.ctx.storage.setAlarm(now + 25);
+	}
+
+	/**
+	 * Upgrade recovery for work stopped by the pre-auto-restack coordinator.
+	 * Only an open authority issue with the exact former restack terminal is
+	 * resumed. New runs take the normal in-band auto-restack path above.
+	 */
+	private async recoverAutoRestackStops(): Promise<void> {
+		const workItems = (await this.ctx.storage.get<HarnessWorkItem[]>(WORK_ITEMS_KEY)) ?? [];
+		for (const stored of workItems) {
+			const last = stored.activity.at(-1);
+			if (stored.phase !== "needs_review" || last?.message !== AUTO_RESTACK_MESSAGE || !stored.workflowId || !stored.githubIssue || !stored.osNativeGit?.workspace) continue;
+			const issueResponse = await fetch(`https://api.github.com/repos/${this.env.GITHUB_REPOSITORY}/issues/${stored.githubIssue.number}`, {
+				headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${this.env.GITHUB_AUTOMATION_TOKEN}`, "User-Agent": "app-harness-os", "X-GitHub-Api-Version": "2022-11-28" },
+			});
+			if (!issueResponse.ok) continue;
+			const issue = await issueResponse.json() as { state?: unknown };
+			if (issue.state !== "open") continue;
+			const mainResponse = await fetch(`https://api.github.com/repos/${this.env.GITHUB_REPOSITORY}/git/ref/heads/main`, {
+				headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${this.env.GITHUB_AUTOMATION_TOKEN}`, "User-Agent": "app-harness-os", "X-GitHub-Api-Version": "2022-11-28" },
+			});
+			if (!mainResponse.ok) continue;
+			const main = await mainResponse.json() as { object?: { sha?: unknown } };
+			if (typeof main.object?.sha !== "string" || !SHA.test(main.object.sha)) continue;
+			const workflow = await this.getWorkflow(stored.workflowId);
+			if (!workflow || workflow.phase !== "requires_review") continue;
+			const current = await this.getWorkItem(stored.id);
+			if (!current || current.phase !== "needs_review" || current.activity.at(-1)?.message !== AUTO_RESTACK_MESSAGE || !current.osNativeGit || !current.githubIssue) continue;
+			const now = Date.now();
+			const effectId = this.effectId(workflow.id, "run-os");
+			const ledger = createStackLedger({
+				id: current.osNativeGit.stackId,
+				repository: this.env.GITHUB_REPOSITORY,
+				lane: "room-main",
+				issue: current.githubIssue,
+				baseSha: main.object.sha.toLowerCase(),
+				nodes: [{ id: "root", intent: createStackNodeIntent(current.githubIssue), branchPrefix: `app-harness-os/${current.githubIssue.number}` }],
+			});
+			const job = createCoordinatorJob({ workflowId: workflow.id, workItemId: current.id, pipeline: "os-native-git", firstEffectId: effectId, now });
+			const effect = createCoordinatorEffect({ id: effectId, jobId: job.id, workItemId: current.id, kind: "run-os", now });
+			workflow.phase = "preparing_candidate";
+			workflow.result = undefined;
+			workflow.updatedAt = now;
+			workflow.activity.push({ phase: workflow.phase, message: "Open root stack resumed automatically against the current main SHA.", at: now });
+			current.osNativeGit.state = "queued";
+			current.osNativeGit.generation = ledger.generation;
+			current.osNativeGit.baseSha = ledger.generationBaseSha;
+			current.osNativeGit.attempts = 0;
+			delete current.osNativeGit.headSha;
+			this.transitionWorkItem(current, "queued", "Open root stack resumed automatically against the current main SHA.");
+			const resumed = await this.ctx.storage.transaction(async (txn) => {
+				const latest = await txn.get<HarnessWorkItem>(this.workItemKey(current.id));
+				if (!latest || latest.phase !== "needs_review" || latest.activity.at(-1)?.message !== AUTO_RESTACK_MESSAGE) return false;
+				await Promise.all([
+					txn.put(this.workflowKey(workflow.id), workflow),
+					txn.put(this.workItemKey(current.id), current),
+					txn.put(this.jobKey(job.id), job),
+					txn.put(this.outboxKey(effect.id), effect),
+					txn.put(this.ledgerKey(current.id), ledger),
+				]);
+				return true;
+			});
+			if (!resumed) continue;
+			await Promise.all([this.saveWorkflow(workflow), this.saveWorkItem(current)]);
+			this.broadcastWorkflow(workflow);
+			await this.scheduleCoordinatorAlarm();
+			this.ctx.waitUntil(this.appendGitHubIssueStatus(current, "Open root stack resumed automatically against the current main SHA."));
+		}
 	}
 
 	private async applyWorkflowCallback(callback: WorkflowCallback): Promise<void> {

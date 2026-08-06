@@ -77,6 +77,8 @@ assert.ok(createStackNodeIntent(issue).length < 280);
 assert.equal(classifyOsRunnerResponse({ state: "checked-out" }).phase, "building");
 assert.equal(classifyOsRunnerResponse({ state: "credential-bridge-required" }).terminal, true);
 assert.equal(classifyOsRunnerResponse({ state: "pull-request-opened" }).terminal, false);
+assert.equal(classifyOsRunnerResponse({ state: "needs-restack" }).terminal, false);
+assert.equal(classifyOsRunnerResponse({ state: "needs-restack" }).phase, "building");
 assert.equal(classifyOsRunnerResponse({ state: "runner-unavailable", classification: "sandbox-runtime-interrupted" }).retryable, true);
 assert.equal(classifyOsRunnerResponse({ state: "candidate-failed", classification: "nanocodex-run-failed" }).retryable, false);
 assert.throws(() => createOsNativeGitJob({ workItemId, issue, request: "" }));
