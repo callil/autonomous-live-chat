@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="theme-color" content="#ffffff" />
+    <meta name="theme-color" content="#f7f7f5" />
     <title>App Harness</title>
     <style>
       :root { --accent: #8b5cf6; color: #0d0d0d; background: #fff; font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
@@ -98,40 +98,245 @@
       @keyframes composer-rise { from { opacity: .2; transform: translateY(5px) translateX(-50%); } to { opacity: 1; transform: translateY(0) translateX(-50%); } }
       @media (prefers-reduced-motion: reduce) { .target-composer { animation: none; } }
       @media (max-width: 720px) { .app { grid-template-columns: 44px minmax(0, 1fr); } .sidebar { padding: 7px 3px; } .rail-button { width: 36px; height: 36px; } .composer-wrap { bottom: 0; left: 44px; padding: 24px 14px 14px; } .conversation { padding: 32px 18px 138px; } .topbar { padding: 0 18px; } .target-composer { bottom: 104px; width: min(420px, calc(100vw - 16px)); } .harness-launcher { bottom: 92px; right: 12px; } .authoring-popover, .annotation-panel { bottom: 140px; right: 12px; } .submission-toast { bottom: 144px; right: 12px; } }
+
+      /* Operator surface: bb-inspired density, stable rows, flat achromatic chrome. */
+      :root {
+        --accent: #8b5cf6;
+        --canvas: #f8f8f6;
+        --surface: #ffffff;
+        --sidebar: #f2f2ef;
+        --ink: #20201e;
+        --muted: #6f706b;
+        --faint: #92938e;
+        --hairline: rgba(24, 24, 22, .085);
+        --hover: rgba(31, 31, 29, .055);
+        --active: rgba(31, 31, 29, .085);
+        --danger: #b42318;
+        --success: #18734b;
+        --attention: #9b6500;
+        color: var(--ink);
+        background: var(--canvas);
+        font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        font-size: 14px;
+        font-synthesis: none;
+        -webkit-font-smoothing: antialiased;
+        -moz-osx-font-smoothing: grayscale;
+      }
+      body { height: 100dvh; overflow: hidden; background: var(--canvas); }
+      button, textarea { color: inherit; }
+      button:focus-visible, textarea:focus-visible, a:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 72%, white); outline-offset: 2px; }
+      button { -webkit-tap-highlight-color: transparent; }
+      button:active { transform: scale(.96); }
+      .app { height: 100dvh; min-height: 0; grid-template-columns: 238px minmax(0, 1fr); background: var(--canvas); }
+      .sidebar { min-width: 0; padding: 8px; align-items: stretch; gap: 0; overflow: hidden; background: var(--sidebar); border-right: 1px solid var(--hairline); }
+      .sidebar-top { display: flex; align-items: center; height: 42px; padding: 0 7px; gap: 9px; }
+      .brand-mark { display: grid; place-items: center; width: 24px; height: 24px; flex: 0 0 auto; border-radius: 7px; background: #242422; color: #fff; font: 700 10px/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: -.06em; box-shadow: 0 0 0 1px rgba(0,0,0,.08), 0 1px 2px rgba(0,0,0,.14); }
+      .brand-wordmark { min-width: 0; flex: 1; font-size: 13px; font-weight: 620; letter-spacing: -.015em; white-space: nowrap; }
+      .sidebar-icon-button { position: relative; width: 32px; height: 32px; flex: 0 0 auto; display: grid; place-items: center; border: 0; border-radius: 7px; color: var(--muted); background: transparent; cursor: pointer; transition-property: background-color, color, transform; transition-duration: 140ms; transition-timing-function: cubic-bezier(.23,1,.32,1); }
+      .sidebar-icon-button:hover { color: var(--ink); background: var(--hover); }
+      .sidebar-icon-button svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.65; }
+      .sidebar-section { margin-top: 13px; min-height: 0; }
+      .sidebar-section.work-section { display: flex; flex: 1; flex-direction: column; overflow: hidden; }
+      .sidebar-label { display: flex; align-items: center; justify-content: space-between; height: 24px; padding: 0 9px; color: var(--faint); font-size: 10px; font-weight: 650; letter-spacing: .065em; text-transform: uppercase; }
+      .sidebar-count { font-variant-numeric: tabular-nums; letter-spacing: 0; }
+      .room-row { width: 100%; min-height: 36px; display: flex; align-items: center; gap: 9px; padding: 0 10px; border: 0; border-radius: 8px; background: var(--active); color: var(--ink); cursor: pointer; font-size: 12.5px; text-align: left; transition-property: background-color, transform; transition-duration: 140ms; transition-timing-function: cubic-bezier(.23,1,.32,1); }
+      .room-row:hover { background: rgba(31,31,29,.105); }
+      .room-glyph { width: 18px; color: var(--muted); font: 500 15px/1 ui-monospace, SFMono-Regular, Menlo, monospace; text-align: center; }
+      .room-name { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 540; }
+      .room-presence { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 10.5px; font-variant-numeric: tabular-nums; }
+      .room-presence .dot { width: 5px; height: 5px; }
+      .sidebar-work-list { display: grid; gap: 2px; min-height: 0; margin: 2px 0 0; padding: 0 1px 16px; overflow: auto; list-style: none; scrollbar-width: thin; }
+      .sidebar-work-item { position: relative; display: grid; grid-template-columns: 12px minmax(0, 1fr) auto; gap: 7px; align-items: start; min-height: 43px; padding: 7px 8px; border-radius: 8px; color: var(--muted); transition-property: background-color; transition-duration: 130ms; }
+      .sidebar-work-item:hover { background: var(--hover); }
+      .sidebar-work-item a { position: absolute; inset: 0; border-radius: inherit; }
+      .work-state-dot { width: 6px; height: 6px; margin-top: 5px; border-radius: 50%; background: #a3a39e; box-shadow: 0 0 0 2px var(--sidebar); }
+      .work-state-dot.building, .work-state-dot.queued, .work-state-dot.triaged, .work-state-dot.received { background: var(--attention); }
+      .work-state-dot.completed { background: var(--success); }
+      .work-state-dot.needs_review, .work-state-dot.rejected { background: var(--danger); }
+      .sidebar-work-copy { min-width: 0; }
+      .sidebar-work-summary { display: block; overflow: hidden; color: var(--ink); font-size: 11.5px; line-height: 1.3; text-overflow: ellipsis; white-space: nowrap; }
+      .sidebar-work-note { display: block; margin-top: 2px; overflow: hidden; color: var(--faint); font-size: 10.5px; line-height: 1.3; text-overflow: ellipsis; white-space: nowrap; }
+      .sidebar-work-phase { margin-top: 1px; color: var(--faint); font: 500 9.5px/1.3 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .015em; text-transform: lowercase; }
+      .sidebar-empty { padding: 8px 10px; color: var(--faint); font-size: 11px; line-height: 1.45; text-wrap: pretty; }
+      .sidebar-footer { display: flex; align-items: center; gap: 8px; min-height: 38px; padding: 3px 8px 1px; border-top: 1px solid var(--hairline); color: var(--muted); font-size: 10.5px; }
+      .author-avatar { display: grid; place-items: center; width: 22px; height: 22px; flex: 0 0 auto; border-radius: 50%; background: #dfdfda; color: #4d4e49; font-size: 9px; font-weight: 700; text-transform: uppercase; }
+      .sidebar-author { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      main { min-height: 0; background: var(--surface); }
+      .topbar { height: 48px; flex: 0 0 auto; padding: 0 18px 0 20px; border-bottom: 1px solid var(--hairline); background: rgba(255,255,255,.94); }
+      .room-heading { min-width: 0; display: flex; align-items: center; gap: 8px; }
+      .room-title { font-size: 12.5px; font-weight: 590; letter-spacing: -.005em; }
+      .room-meta { color: var(--faint); font: 500 10.5px/1 ui-monospace, SFMono-Regular, Menlo, monospace; }
+      .connection { min-height: 28px; padding: 0 8px; border-radius: 7px; color: var(--muted); font-size: 10.5px; font-variant-numeric: tabular-nums; transition-property: background-color; transition-duration: 140ms; }
+      .connection:hover { background: var(--hover); }
+      .dot, .status-dot { width: 6px; height: 6px; background: #aaa; }
+      .dot.live { background: var(--success); box-shadow: 0 0 0 2px rgba(24,115,75,.11); }
+      .conversation { width: min(100%, 760px); min-height: 0; margin: 0 auto; padding: 27px 32px 184px; overflow: visible; }
+      main { overflow-y: auto; scrollbar-width: thin; scrollbar-color: rgba(0,0,0,.16) transparent; }
+      .room-intro { display: grid; grid-template-columns: 34px minmax(0, 1fr); gap: 12px; padding: 2px 0 24px; border-bottom: 1px solid var(--hairline); margin-bottom: 25px; }
+      .room-intro-mark { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 10px; color: #fff; background: #242422; box-shadow: 0 0 0 1px rgba(0,0,0,.08), 0 2px 4px rgba(0,0,0,.10); }
+      .room-intro-mark svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+      .room-intro h1 { margin: 0; color: var(--ink); font-size: 14px; line-height: 1.35; font-weight: 620; letter-spacing: -.01em; text-wrap: balance; }
+      .room-intro p { max-width: 580px; margin: 4px 0 0; color: var(--muted); font-size: 12.5px; line-height: 1.5; text-wrap: pretty; }
+      .room-intro kbd { display: inline-flex; min-width: 18px; height: 18px; align-items: center; justify-content: center; padding: 0 5px; border-radius: 5px; background: #f0f0ed; box-shadow: inset 0 0 0 1px rgba(0,0,0,.06), 0 1px 1px rgba(0,0,0,.05); color: var(--muted); font: 500 9.5px/1 ui-monospace, SFMono-Regular, Menlo, monospace; }
+      .empty { margin: 0; padding: 18px 0; color: var(--faint); font-size: 12px; text-align: left; }
+      .messages { gap: 26px; }
+      .message { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 10px; width: 100%; max-width: none; scroll-margin-bottom: 170px; }
+      .message-avatar { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 9px; background: #efefec; box-shadow: inset 0 0 0 1px rgba(0,0,0,.045); color: #5c5d58; font-size: 9.5px; font-weight: 700; text-transform: uppercase; }
+      .message-body { min-width: 0; padding-top: 1px; }
+      .message-meta { display: flex; align-items: baseline; gap: 7px; min-height: 18px; }
+      .author { margin: 0; color: var(--ink); font-size: 11.5px; font-weight: 620; }
+      .message-time { color: var(--faint); font: 500 9.5px/1 ui-monospace, SFMono-Regular, Menlo, monospace; font-variant-numeric: tabular-nums; }
+      .text { color: #33332f; font-size: 13.5px; line-height: 1.58; text-wrap: pretty; }
+      .composer-wrap { left: 238px; padding: 26px 24px 17px; background: linear-gradient(to top, #fff 74%, rgba(255,255,255,0)); }
+      .composer { width: min(100%, 760px); min-height: 56px; padding: 8px 8px 8px 12px; align-items: flex-end; gap: 8px; border: 0; border-radius: 14px; background: #fff; box-shadow: 0 0 0 1px rgba(24,24,22,.13), 0 1px 2px rgba(24,24,22,.06), 0 7px 24px -11px rgba(24,24,22,.24); transition-property: box-shadow; transition-duration: 160ms; transition-timing-function: cubic-bezier(.23,1,.32,1); }
+      .composer:focus-within { box-shadow: 0 0 0 1px rgba(24,24,22,.22), 0 1px 2px rgba(24,24,22,.07), 0 9px 28px -12px rgba(24,24,22,.27); }
+      textarea { min-height: 36px; padding: 8px 4px 6px; color: var(--ink); font-size: 13.5px; line-height: 1.45; }
+      .composer textarea:focus-visible { outline: 0; }
+      textarea::placeholder { color: var(--faint); }
+      .send { width: 32px; height: 32px; border-radius: 9px; background: #262624; transition-property: background-color, color, transform; transition-duration: 140ms; transition-timing-function: cubic-bezier(.23,1,.32,1); }
+      .send svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+      .send:hover:not(:disabled) { background: #0f0f0e; }
+      .send:disabled { background: #ecece9; color: #aaa; }
+      .hint { width: min(100%, 760px); margin-top: 8px; color: var(--faint); font-size: 10px; }
+      .harness-launcher { width: 42px; height: 42px; bottom: 27px; right: 22px; border-radius: 50%; background: #262624; box-shadow: 0 0 0 1px rgba(0,0,0,.12), 0 4px 13px rgba(0,0,0,.18); transition-property: background-color, transform, box-shadow; transition-duration: 150ms; transition-timing-function: cubic-bezier(.23,1,.32,1); }
+      .harness-launcher svg { position: absolute; width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.65; stroke-linecap: round; stroke-linejoin: round; transition-property: opacity, transform, filter; transition-duration: 180ms; transition-timing-function: cubic-bezier(.2,0,0,1); }
+      .launcher-close-icon { opacity: 0; transform: scale(.25); filter: blur(4px); }
+      .harness-launcher[aria-expanded="true"] .launcher-open-icon { opacity: 0; transform: scale(.25); filter: blur(4px); }
+      .harness-launcher[aria-expanded="true"] .launcher-close-icon { opacity: 1; transform: scale(1); filter: blur(0); }
+      .launcher-badge { position: absolute; top: -4px; right: -4px; min-width: 16px; height: 16px; display: inline-flex; align-items: center; justify-content: center; padding: 0 4px; border: 2px solid #fff; border-radius: 999px; background: var(--attention); color: #fff; font: 700 8px/1 ui-monospace, SFMono-Regular, Menlo, monospace; font-variant-numeric: tabular-nums; }
+      .launcher-badge.needs_review, .launcher-badge.rejected { background: var(--danger); }
+      .launcher-badge[hidden] { display: none; }
+      .harness-launcher:hover, .harness-launcher[aria-expanded="true"] { background: #141413; box-shadow: 0 0 0 1px rgba(0,0,0,.16), 0 6px 18px rgba(0,0,0,.20); }
+      .harness-launcher:active { scale: 1; transform: scale(.96); }
+      .authoring-popover { bottom: 27px; right: 22px; width: 304px; height: 42px; padding: 4px 89px 4px 5px; border: 0; border-radius: 22px; background: #1b1b1a; box-shadow: 0 0 0 1px rgba(0,0,0,.13), 0 4px 15px rgba(0,0,0,.19); transform-origin: calc(100% - 21px) 50%; animation: toolbar-expand .18s cubic-bezier(.23,1,.32,1); }
+      .authoring-heading { display: none; }
+      .authoring-tools { height: 34px; grid-template-columns: repeat(3, 1fr); gap: 2px; }
+      .harness-tool { height: 34px; padding: 0 7px; gap: 6px; border-radius: 17px; background: transparent; color: rgba(255,255,255,.72); font-size: 10px; transition-property: background-color, color, transform; transition-duration: 140ms; transition-timing-function: cubic-bezier(.23,1,.32,1); }
+      .harness-tool:hover { background: rgba(255,255,255,.10); color: #fff; }
+      .harness-tool[aria-pressed="true"] { background: rgba(255,255,255,.14); box-shadow: none; color: #fff; }
+      .harness-tool svg { width: 14px; height: 14px; }
+      .annotation-toggle { position: absolute; top: 4px; right: 48px; width: 36px; height: 34px; margin: 0; padding: 0; align-items: center; justify-content: center; color: rgba(255,255,255,.72); border: 0; border-radius: 17px; font-size: 0; transition-property: background-color, color, transform; transition-duration: 140ms; }
+      .annotation-toggle:hover { background: rgba(255,255,255,.10); color: #fff; }
+      .activity-count-badge { min-width: 18px; height: 18px; display: inline-flex; align-items: center; justify-content: center; padding: 0 5px; border-radius: 9px; background: rgba(255,255,255,.12); color: rgba(255,255,255,.86); font: 600 9px/1 ui-monospace, SFMono-Regular, Menlo, monospace; font-variant-numeric: tabular-nums; }
+      .authoring-notice { position: absolute; right: 0; bottom: 50px; width: 254px; margin: 0; padding: 8px 10px; border-radius: 9px; background: rgba(31,31,29,.96); color: white; box-shadow: 0 7px 24px rgba(0,0,0,.16); font-size: 10.5px; }
+      .harness-dismiss { width: 28px; height: 28px; border-radius: 7px; font-size: 15px; transition-property: background-color, color, transform; transition-duration: 140ms; }
+      .annotation-panel { bottom: 80px; right: 22px; width: min(382px, calc(100vw - 24px)); max-height: min(590px, calc(100dvh - 120px)); padding: 11px; overflow: hidden; border: 0; border-radius: 14px; background: rgba(255,255,255,.99); box-shadow: 0 0 0 1px rgba(24,24,22,.10), 0 14px 42px rgba(24,24,22,.16), 0 2px 7px rgba(24,24,22,.07); transform-origin: calc(100% - 21px) calc(100% + 17px); animation: harness-pop .16s cubic-bezier(.23,1,.32,1); }
+      .annotation-panel-header { min-height: 29px; margin-bottom: 4px; font-size: 11.5px; }
+      .annotation-close, .annotation-remove { background: transparent; color: var(--muted); transition-property: background-color, color, transform; transition-duration: 140ms; }
+      .annotation-close:hover, .annotation-remove:hover { background: var(--hover); color: var(--ink); }
+      .annotation-list, .work-item-list { gap: 0; max-height: 205px; scrollbar-width: thin; }
+      .work-item { gap: 4px; padding: 10px 4px; border-color: var(--hairline); }
+      .work-item-summary { color: var(--ink); font-size: 11.5px; }
+      .work-item-phase { color: var(--attention); font: 600 9px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .025em; }
+      .work-item-phase.completed { color: var(--success); }
+      .work-item-phase.needs_review, .work-item-phase.rejected { color: var(--danger); }
+      .work-item-note { color: var(--muted); font-size: 10.5px; }
+      .work-item-links { gap: 10px; font-size: 10.5px; }
+      .work-item-links a { color: var(--ink); text-decoration-color: rgba(0,0,0,.25); }
+      .annotation-item { min-height: 34px; padding: 7px 4px; border-color: var(--hairline); color: var(--muted); font-size: 10.5px; }
+      .activity-divider { border-color: var(--hairline); }
+      .annotation-clear { min-height: 32px; margin-top: 8px; padding: 0 10px; border-radius: 8px; background: #262624; font-size: 10.5px; transition-property: background-color, transform; transition-duration: 140ms; }
+      .annotation-clear:hover { background: #111; }
+      .submission-toast { right: 22px; bottom: 80px; padding: 9px 11px; border-radius: 9px; background: rgba(31,31,29,.96); font-size: 10.5px; box-shadow: 0 7px 24px rgba(0,0,0,.16); }
+      .target-composer { bottom: 92px; width: min(460px, calc(100vw - 32px)); padding: 11px; border: 0; border-radius: 14px; background: rgba(255,255,255,.99); box-shadow: 0 0 0 1px rgba(24,24,22,.11), 0 14px 42px rgba(24,24,22,.16), 0 2px 7px rgba(24,24,22,.07); animation: none; }
+      .target-context { margin: 0 2px 8px; color: var(--muted); font-size: 10.5px; }
+      .target-composer .request-input { min-height: 84px; padding: 9px; border: 1px solid rgba(24,24,22,.14); border-radius: 9px; font-size: 12.5px; }
+      .dialog-actions { margin-top: 8px; }
+      .secondary, .primary { min-height: 32px; padding: 0 11px; border-radius: 8px; font-size: 10.5px; transition-property: background-color, transform; transition-duration: 140ms; }
+      .secondary { background: #efefec; }
+      .secondary:hover { background: #e6e6e1; }
+      .primary { background: #262624; }
+      .primary:hover { background: #111; }
+      .request-error { margin: 7px 2px 0; min-height: 15px; color: var(--danger); font-size: 10.5px; }
+      .request-error.acknowledged { color: var(--muted); }
+      .target-hovered { outline: 1px solid color-mix(in srgb, var(--accent) 65%, #222); outline-offset: 3px; border-radius: 2px; }
+      .target-selected { outline: 2px solid var(--accent); outline-offset: 3px; }
+      .drawing-path { stroke: var(--accent); stroke-width: 2.25; }
+      .comment-pin { width: 20px; height: 20px; border-width: 2px; background: var(--accent); font-size: 9px; box-shadow: 0 0 0 1px rgba(0,0,0,.11), 0 2px 8px rgba(0,0,0,.20); }
+      @keyframes harness-pop { from { opacity: 0; transform: translateY(5px) scale(.97); } to { opacity: 1; transform: translateY(0) scale(1); } }
+      @keyframes toolbar-expand { from { opacity: 0; transform: scaleX(.18); } to { opacity: 1; transform: scaleX(1); } }
+      @media (prefers-reduced-motion: reduce) { .authoring-popover, .annotation-panel { animation: none; } * { scroll-behavior: auto !important; } }
+      @media (max-width: 820px) {
+        .app { grid-template-columns: 56px minmax(0, 1fr); }
+        .sidebar { padding: 7px; }
+        .sidebar-top { justify-content: center; padding: 0; }
+        .brand-wordmark, .sidebar-top .sidebar-icon-button, .sidebar-label, .room-name, .room-presence, .work-section, .sidebar-author { display: none; }
+        .room-row { justify-content: center; min-height: 38px; padding: 0; }
+        .sidebar-footer { justify-content: center; padding-inline: 0; }
+        .composer-wrap { left: 56px; padding-inline: 16px; }
+        .conversation { padding: 24px 22px 176px; }
+      }
+      @media (max-width: 560px) {
+        .app { display: block; }
+        .sidebar { display: none; }
+        .composer-wrap { left: 0; padding: 20px 12px 12px; }
+        .conversation { padding: 21px 16px 164px; }
+        .topbar { padding-inline: 14px; }
+        .room-meta { display: none; }
+        .room-intro { grid-template-columns: 30px minmax(0, 1fr); gap: 10px; }
+        .room-intro-mark { width: 30px; height: 30px; border-radius: 9px; }
+        .harness-launcher { right: 12px; bottom: 92px; }
+        .authoring-popover { right: 12px; bottom: 92px; width: min(304px, calc(100vw - 24px)); }
+        .annotation-panel { right: 12px; bottom: 142px; }
+        .submission-toast { right: 12px; bottom: 142px; }
+        .target-composer { bottom: 103px; }
+      }
     </style>
   </head>
   <body>
     <div class="app">
       <aside class="sidebar" data-target-id="workspace-sidebar" data-target-label="Workspace navigation sidebar" aria-label="Workspace navigation">
-        <div class="rail-button brand" data-target-id="sidebar-brand" data-target-label="App Harness brand" aria-label="App Harness">A</div>
-        <button class="rail-button" data-target-id="rail-main-room" data-target-label="Main room control" type="button" aria-label="Main room" aria-current="page" title="Main room">#</button>
+        <div class="sidebar-top" data-target-id="sidebar-brand" data-target-label="App Harness workspace header">
+          <div class="brand-mark" aria-hidden="true">AH</div>
+          <span class="brand-wordmark">App Harness</span>
+          <button class="sidebar-icon-button" id="sidebar-new-request" data-target-id="sidebar-new-request" data-target-label="Start a contextual request" type="button" aria-label="Start a contextual request" title="Start a contextual request">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+          </button>
+        </div>
+        <section class="sidebar-section" aria-labelledby="rooms-label">
+          <div class="sidebar-label" id="rooms-label">Rooms</div>
+          <button class="room-row" data-target-id="rail-main-room" data-target-label="Main room control" type="button" aria-label="Main room" aria-current="page">
+            <span class="room-glyph" aria-hidden="true">#</span><span class="room-name">Main room</span><span class="room-presence"><i class="dot" id="sidebar-dot"></i><span id="sidebar-presence">—</span></span>
+          </button>
+        </section>
+        <section class="sidebar-section work-section" aria-labelledby="work-label">
+          <div class="sidebar-label" id="work-label"><span>Recent work</span><span class="sidebar-count" id="sidebar-work-count">0</span></div>
+          <ul class="sidebar-work-list" id="sidebar-work-list"></ul>
+        </section>
+        <footer class="sidebar-footer" data-target-id="sidebar-identity" data-target-label="Current participant">
+          <span class="author-avatar" id="sidebar-avatar" aria-hidden="true">G</span><span class="sidebar-author" id="sidebar-author">Guest</span>
+        </footer>
       </aside>
       <main>
-        <header class="topbar" data-target-id="room-header" data-target-label="Main room header"><span class="room-title" data-target-id="room-title" data-target-text>Main room</span><span class="connection" data-target-id="connection-status" data-target-label="Connection status"><i class="dot" id="dot"></i><span id="connection">Connecting</span></span></header>
+        <header class="topbar" data-target-id="room-header" data-target-label="Main room header"><span class="room-heading"><span class="room-title" data-target-id="room-title" data-target-text>Main room</span><span class="room-meta">shared workspace</span></span><span class="connection" data-target-id="connection-status" data-target-label="Connection status"><i class="dot" id="dot"></i><span id="connection">Connecting</span></span></header>
         <section class="conversation" aria-live="polite">
+          <div class="room-intro" data-target-id="room-introduction" data-target-label="Main room introduction">
+            <span class="room-intro-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3M8 12h8M12 8v8"/></svg></span>
+            <div><h1>Shape this app in public</h1><p>Talk with the room, or open the floating authoring tool to point at a specific part of the interface. Every submitted change becomes visible work.</p></div>
+          </div>
           <div class="empty" id="empty" data-target-id="empty-state" data-target-text>Start the conversation.</div><div class="messages" id="messages"></div>
         </section>
       </main>
     </div>
     <form class="composer-wrap" id="form" data-target-id="message-composer" data-target-label="Message composer">
-      <div class="composer"><textarea id="input" data-target-id="message-input" data-target-label="Message input" aria-label="Message" rows="1" maxlength="2000" placeholder="Message Main room" autofocus></textarea><button class="send" id="send" data-target-id="send-message" data-target-label="Send message" type="submit" aria-label="Send message" disabled>↑</button></div>
-      <div class="hint">Messages are shared live with everyone in this room.</div>
+      <div class="composer"><textarea id="input" data-target-id="message-input" data-target-label="Message input" aria-label="Message" rows="1" maxlength="2000" placeholder="Message the room" autofocus></textarea><button class="send" id="send" data-target-id="send-message" data-target-label="Send message" type="submit" aria-label="Send message" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 12 5-5 5 5M12 7v10"/></svg></button></div>
+      <div class="hint">Shared live · press Enter to send, Shift + Enter for a new line</div>
     </form>
     <div class="harness-frame" aria-label="App Harness overlay">
       <svg class="drawing-layer" id="drawing-layer" aria-label="Drawing feedback layer"></svg>
       <div class="comment-layer" id="comment-layer" aria-label="Comment markers"></div>
-      <button class="harness-launcher" id="harness-launcher" data-target-id="harness-authoring-launcher" data-target-label="Open App Harness annotation tools" type="button" aria-label="Open App Harness annotation tools" aria-expanded="false" title="Annotate">✦</button>
+      <button class="harness-launcher" id="harness-launcher" data-target-id="harness-authoring-launcher" data-target-label="Open App Harness annotation tools" type="button" aria-label="Open App Harness annotation tools" aria-expanded="false" title="Annotate"><svg class="launcher-open-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3M8 12h8M12 8v8"/></svg><svg class="launcher-close-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg><span class="launcher-badge" id="launcher-badge" aria-hidden="true" hidden></span></button>
       <section class="authoring-popover" id="authoring-popover" data-target-id="harness-authoring-popover" data-target-label="App Harness annotation tools" aria-label="App Harness annotation tools" hidden>
         <div class="authoring-heading"><span>Annotate</span><button class="harness-dismiss" id="harness-dismiss" data-target-id="harness-close-authoring-tools" data-target-label="Close annotation tools" type="button" aria-label="Close annotation tools" title="Close">×</button></div>
         <div class="authoring-tools">
         <button class="harness-tool target-tool" id="target-mode" data-target-id="harness-target-control" data-target-label="Inspect and target an element" type="button" aria-label="Inspect and target an element for a change request" aria-pressed="false" title="Inspect and target">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2v4M12 18v4M2 12h4M18 12h4M8 8l8 8M8 16l8-8"/><circle cx="12" cy="12" r="4"/></svg><span>Target</span>
         </button>
-        <button class="harness-tool" id="comment-mode" data-target-id="harness-comment-control" data-target-label="Comment on an element" type="button" aria-label="Comment on an element" aria-pressed="false" title="Comment">Comment</button>
-        <button class="harness-tool" id="draw-mode" data-target-id="harness-draw-control" data-target-label="Draw feedback" type="button" aria-label="Draw feedback" aria-pressed="false" title="Draw">Draw</button>
+        <button class="harness-tool" id="comment-mode" data-target-id="harness-comment-control" data-target-label="Comment on an element" type="button" aria-label="Comment on an element" aria-pressed="false" title="Comment"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"/></svg><span>Comment</span></button>
+        <button class="harness-tool" id="draw-mode" data-target-id="harness-draw-control" data-target-label="Draw feedback" type="button" aria-label="Draw feedback" aria-pressed="false" title="Draw"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 20 4.2-1 10.9-10.9a2.2 2.2 0 0 0-3.2-3.2L5 15.8 4 20zM13.8 7l3.2 3.2"/></svg><span>Draw</span></button>
         </div>
         <p class="authoring-notice" id="authoring-notice" role="status" hidden></p>
-        <button class="annotation-toggle" id="annotation-count" data-target-id="harness-annotation-activity-control" data-target-label="Open activity and annotation list" type="button" aria-label="Open activity and annotation list">Activity <span id="activity-count-label">0</span></button>
+        <button class="annotation-toggle" id="annotation-count" data-target-id="harness-annotation-activity-control" data-target-label="Open activity and annotation list" type="button" aria-label="Open activity and annotation list">Activity <span class="activity-count-badge" id="activity-count-label">0</span></button>
       </section>
       <section class="annotation-panel" id="annotation-panel" data-target-id="harness-annotation-panel" data-target-label="Canvas annotation manager" aria-label="Canvas annotations" hidden>
         <div class="annotation-panel-header"><span>Activity</span><button class="annotation-close" id="annotation-close" data-target-id="harness-close-annotation-manager" data-target-label="Close activity and annotation list" type="button" aria-label="Close activity and annotation list">Close</button></div>
@@ -149,13 +354,14 @@
       <div class="dialog-actions"><button class="secondary" id="cancel-target-request" type="button">Cancel</button><button class="secondary" id="done-target-request" type="button" hidden>Done</button><button class="primary" id="submit-target-request" type="submit">Start</button></div><p class="request-error" id="target-request-error" role="alert"></p>
     </form>
     <script>
-      const messagesEl = document.querySelector('#messages'); const emptyEl = document.querySelector('#empty'); const input = document.querySelector('#input'); const send = document.querySelector('#send'); const form = document.querySelector('#form'); const dot = document.querySelector('#dot'); const connection = document.querySelector('#connection');
-      const activityCount = document.querySelector('#activity-count-label'); const annotationToggle = document.querySelector('#annotation-count'); const annotationPanel = document.querySelector('#annotation-panel'); const annotationList = document.querySelector('#annotation-list'); const workItemList = document.querySelector('#work-item-list'); const annotationClose = document.querySelector('#annotation-close'); const annotationClear = document.querySelector('#annotation-clear'); const submissionToast = document.querySelector('#submission-toast');
+      const messagesEl = document.querySelector('#messages'); const emptyEl = document.querySelector('#empty'); const input = document.querySelector('#input'); const send = document.querySelector('#send'); const form = document.querySelector('#form'); const dot = document.querySelector('#dot'); const sidebarDot = document.querySelector('#sidebar-dot'); const connection = document.querySelector('#connection'); const sidebarPresence = document.querySelector('#sidebar-presence');
+      const activityCount = document.querySelector('#activity-count-label'); const launcherBadge = document.querySelector('#launcher-badge'); const sidebarWorkCount = document.querySelector('#sidebar-work-count'); const sidebarWorkList = document.querySelector('#sidebar-work-list'); const annotationToggle = document.querySelector('#annotation-count'); const annotationPanel = document.querySelector('#annotation-panel'); const annotationList = document.querySelector('#annotation-list'); const workItemList = document.querySelector('#work-item-list'); const annotationClose = document.querySelector('#annotation-close'); const annotationClear = document.querySelector('#annotation-clear'); const submissionToast = document.querySelector('#submission-toast');
       const harnessLauncher = document.querySelector('#harness-launcher'); const authoringPopover = document.querySelector('#authoring-popover'); const authoringNotice = document.querySelector('#authoring-notice'); const harnessDismiss = document.querySelector('#harness-dismiss'); const targetModeButton = document.querySelector('#target-mode'); const commentModeButton = document.querySelector('#comment-mode'); const drawModeButton = document.querySelector('#draw-mode'); const targetComposer = document.querySelector('#target-composer'); const targetContext = document.querySelector('#target-context'); const targetRequestInput = document.querySelector('#target-request-input'); const targetRequestError = document.querySelector('#target-request-error'); const targetSubmit = document.querySelector('#submit-target-request'); const targetDone = document.querySelector('#done-target-request'); const drawingLayer = document.querySelector('#drawing-layer'); const commentLayer = document.querySelector('#comment-layer');
-      const author = localStorage.getItem('app-harness-author') || `Guest ${Math.floor(100 + Math.random() * 900)}`; localStorage.setItem('app-harness-author', author);
+      const author = localStorage.getItem('app-harness-author') || `Guest ${Math.floor(100 + Math.random() * 900)}`; localStorage.setItem('app-harness-author', author); document.querySelector('#sidebar-author').textContent = author; document.querySelector('#sidebar-avatar').textContent = initials(author);
       let socket; let reconnectTimer; let toastTimer; let overlayOpen = false; let targetMode = false; let commentMode = false; let drawMode = false; let composerKind = 'request'; let hoveredTarget; let selectedTarget; let selectedEnvelope; let annotations = []; let workItems = []; let pendingSubmissionId; let pendingSubmissionKind; let drawing = false; let draftPoints = []; let draftPath; const rendered = new Set();
-      function setConnection(text, live) { connection.textContent = text; dot.classList.toggle('live', live); }
-      function render(message) { if (rendered.has(message.id)) return; rendered.add(message.id); emptyEl.hidden = true; const row = document.createElement('article'); row.className = 'message'; row.dataset.targetId = `message-${message.id}`; row.dataset.targetLabel = `Message from ${message.author}`; const name = document.createElement('div'); name.className = 'author'; name.textContent = message.author; const text = document.createElement('div'); text.className = 'text'; text.textContent = message.text; row.append(name, text); messagesEl.append(row); row.scrollIntoView({ behavior: 'smooth', block: 'end' }); }
+      function initials(value) { return value.trim().split(/\s+/).slice(0, 2).map(part => part[0]).join('').slice(0, 2) || 'G'; }
+      function setConnection(text, live) { connection.textContent = text; dot.classList.toggle('live', live); sidebarDot.classList.toggle('live', live); sidebarPresence.textContent = text.replace(/\s*live$/i, '') || '—'; }
+      function render(message) { if (rendered.has(message.id)) return; rendered.add(message.id); emptyEl.hidden = true; const row = document.createElement('article'); row.className = 'message'; row.dataset.targetId = `message-${message.id}`; row.dataset.targetLabel = `Message from ${message.author}`; const avatar = document.createElement('div'); avatar.className = 'message-avatar'; avatar.textContent = initials(message.author); avatar.setAttribute('aria-hidden', 'true'); const body = document.createElement('div'); body.className = 'message-body'; const meta = document.createElement('div'); meta.className = 'message-meta'; const name = document.createElement('div'); name.className = 'author'; name.textContent = message.author; const time = document.createElement('time'); time.className = 'message-time'; time.dateTime = new Date(message.createdAt).toISOString(); time.textContent = new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' }).format(message.createdAt); const text = document.createElement('div'); text.className = 'text'; text.textContent = message.text; meta.append(name, time); body.append(meta, text); row.append(avatar, body); messagesEl.append(row); row.scrollIntoView({ behavior: rendered.size > 1 ? 'smooth' : 'auto', block: 'end' }); }
       function targetName(target) { return target?.label || target?.text || target?.targetId?.replace(/[-_]+/g, ' ') || 'this element'; }
       function renderWorkflow() { /* The durable activity record remains available to connected clients without becoming permanent authoring chrome. */ }
       function drawPath(points) { return points.map((point, index) => `${index ? 'L' : 'M'}${point.x} ${point.y}`).join(' '); }
@@ -165,12 +371,12 @@
       function phaseLabel(phase) { return { received: 'Received', triaged: 'Triaged', queued: 'Queued', building: 'Building', completed: 'Completed', rejected: 'Rejected', needs_review: 'Needs review' }[phase] || 'Recorded'; }
       function showAuthoringNotice(message) { authoringNotice.textContent = message; authoringNotice.hidden = false; }
       function showSubmissionToast(message) { submissionToast.textContent = message; submissionToast.hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => { submissionToast.hidden = true; }, 5200); }
-      function acknowledgeSubmission(item) { if (!pendingSubmissionId || item.clientSubmissionId !== pendingSubmissionId) return; const kind = pendingSubmissionKind; pendingSubmissionId = undefined; pendingSubmissionKind = undefined; const message = item.activity?.at(-1)?.message || `${phaseLabel(item.phase)}. Open Activity to follow it.`; if (kind === 'composer') { targetSubmit.hidden = true; targetDone.hidden = false; targetRequestError.textContent = message; } else { showAuthoringNotice(message); } showSubmissionToast(message); }
-      function renderWorkItems(next) { workItems = next; workItemList.replaceChildren(); workItems.forEach(item => { const row = document.createElement('li'); row.className = 'work-item'; const header = document.createElement('div'); header.className = 'work-item-header'; const summary = document.createElement('span'); summary.className = 'work-item-summary'; summary.textContent = item.summary; const phase = document.createElement('span'); phase.className = `work-item-phase ${item.phase}`; phase.textContent = phaseLabel(item.phase); header.append(summary, phase); const note = document.createElement('span'); note.className = 'work-item-note'; note.textContent = item.activity?.at(-1)?.message || 'Recorded.'; row.append(header, note); if (item.githubIssue || item.githubPullRequestUrl) { const links = document.createElement('div'); links.className = 'work-item-links'; if (item.githubIssue) { const issue = document.createElement('a'); issue.href = item.githubIssue.url; issue.target = '_blank'; issue.rel = 'noreferrer'; issue.textContent = `Issue #${item.githubIssue.number}`; links.append(issue); } if (item.githubPullRequestUrl) { const pr = document.createElement('a'); pr.href = item.githubPullRequestUrl; pr.target = '_blank'; pr.rel = 'noreferrer'; pr.textContent = 'Pull request'; links.append(pr); } row.append(links); } workItemList.append(row); acknowledgeSubmission(item); }); if (!workItems.length) { const empty = document.createElement('li'); empty.className = 'work-item'; empty.textContent = 'No activity in this room yet.'; workItemList.append(empty); } activityCount.textContent = `${workItems.length}`; }
+      function acknowledgeSubmission(item) { if (!pendingSubmissionId || item.clientSubmissionId !== pendingSubmissionId) return; const kind = pendingSubmissionKind; pendingSubmissionId = undefined; pendingSubmissionKind = undefined; const message = item.activity?.at(-1)?.message || `${phaseLabel(item.phase)}. Open Activity to follow it.`; if (kind === 'composer') { targetSubmit.hidden = true; targetDone.hidden = false; targetRequestError.classList.add('acknowledged'); targetRequestError.textContent = message; } else { showAuthoringNotice(message); } showSubmissionToast(message); }
+      function renderWorkItems(next) { workItems = next; workItemList.replaceChildren(); sidebarWorkList.replaceChildren(); workItems.forEach((item, index) => { const row = document.createElement('li'); row.className = 'work-item'; const header = document.createElement('div'); header.className = 'work-item-header'; const summary = document.createElement('span'); summary.className = 'work-item-summary'; summary.textContent = item.summary; const phase = document.createElement('span'); phase.className = `work-item-phase ${item.phase}`; phase.textContent = phaseLabel(item.phase); header.append(summary, phase); const note = document.createElement('span'); note.className = 'work-item-note'; note.textContent = item.activity?.at(-1)?.message || 'Recorded.'; row.append(header, note); if (item.githubIssue || item.githubPullRequestUrl) { const links = document.createElement('div'); links.className = 'work-item-links'; if (item.githubIssue) { const issue = document.createElement('a'); issue.href = item.githubIssue.url; issue.target = '_blank'; issue.rel = 'noreferrer'; issue.textContent = `Issue #${item.githubIssue.number}`; links.append(issue); } if (item.githubPullRequestUrl) { const pr = document.createElement('a'); pr.href = item.githubPullRequestUrl; pr.target = '_blank'; pr.rel = 'noreferrer'; pr.textContent = 'Pull request'; links.append(pr); } row.append(links); } workItemList.append(row); if (index < 8) { const sidebarRow = document.createElement('li'); sidebarRow.className = 'sidebar-work-item'; sidebarRow.dataset.targetId = `sidebar-work-${item.id}`; sidebarRow.dataset.targetLabel = `Work item: ${item.summary}`; const state = document.createElement('i'); state.className = `work-state-dot ${item.phase}`; state.setAttribute('aria-hidden', 'true'); const copy = document.createElement('span'); copy.className = 'sidebar-work-copy'; const sidebarSummary = document.createElement('span'); sidebarSummary.className = 'sidebar-work-summary'; sidebarSummary.textContent = item.summary; const sidebarNote = document.createElement('span'); sidebarNote.className = 'sidebar-work-note'; sidebarNote.textContent = item.activity?.at(-1)?.message || 'Recorded.'; copy.append(sidebarSummary, sidebarNote); const sidebarPhase = document.createElement('span'); sidebarPhase.className = 'sidebar-work-phase'; sidebarPhase.textContent = phaseLabel(item.phase); sidebarRow.append(state, copy, sidebarPhase); const href = item.githubPullRequestUrl || item.githubIssue?.url; if (href) { const link = document.createElement('a'); link.href = href; link.target = '_blank'; link.rel = 'noreferrer'; link.setAttribute('aria-label', `${item.summary} — ${phaseLabel(item.phase)}`); sidebarRow.append(link); } sidebarWorkList.append(sidebarRow); } acknowledgeSubmission(item); }); if (!workItems.length) { const empty = document.createElement('li'); empty.className = 'work-item'; empty.textContent = 'No activity in this room yet.'; workItemList.append(empty); const sidebarEmpty = document.createElement('li'); sidebarEmpty.className = 'sidebar-empty'; sidebarEmpty.textContent = 'Target something in the app to start the first visible change.'; sidebarWorkList.append(sidebarEmpty); } const activeItems = workItems.filter(item => !['completed', 'rejected'].includes(item.phase)); const attentionItem = activeItems.find(item => item.phase === 'needs_review') || activeItems[0]; launcherBadge.hidden = activeItems.length === 0; launcherBadge.textContent = activeItems.length > 9 ? '9+' : `${activeItems.length}`; launcherBadge.className = `launcher-badge ${attentionItem?.phase || ''}`; activityCount.textContent = `${workItems.length}`; sidebarWorkCount.textContent = `${workItems.length}`; }
       function connect() { clearTimeout(reconnectTimer); const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'; socket = new WebSocket(`${protocol}//${location.host}/api/rooms/main`); socket.addEventListener('open', () => { setConnection('Live', true); resize(); }); socket.addEventListener('close', () => { setConnection('Reconnecting', false); resize(); reconnectTimer = setTimeout(connect, 1000); }); socket.addEventListener('error', () => socket.close()); socket.addEventListener('message', ({ data }) => { try { const event = JSON.parse(data); if (event.type === 'chat:snapshot') event.messages.forEach(render); if (event.type === 'chat:message') render(event.message); if (event.type === 'chat:presence') setConnection(`${event.count} live`, true); if (event.type === 'workflow:snapshot' || event.type === 'workflow:update') renderWorkflow(event.workflow); if (event.type === 'harness:annotations') renderAnnotations(event.annotations); if (event.type === 'harness:work-items') renderWorkItems(event.workItems); if (event.type === 'workflow:notice') { if (!targetComposer.hidden) { pendingSubmissionId = undefined; targetSubmit.hidden = false; targetDone.hidden = true; targetRequestError.textContent = event.message; } else { showSubmissionToast(event.message); } } } catch {} }); }
       function resize() { input.style.height = 'auto'; input.style.height = `${Math.min(input.scrollHeight, 180)}px`; send.disabled = targetMode || commentMode || drawMode || !input.value.trim() || socket?.readyState !== WebSocket.OPEN; }
       function clearTargetSelection() { hoveredTarget?.classList.remove('target-hovered'); selectedTarget?.classList.remove('target-selected'); hoveredTarget = undefined; selectedTarget = undefined; selectedEnvelope = undefined; }
-      function closeTargetComposer() { targetComposer.hidden = true; targetRequestInput.value = ''; targetRequestError.textContent = ''; targetSubmit.hidden = false; targetSubmit.disabled = false; targetSubmit.textContent = 'Start'; targetDone.hidden = true; pendingSubmissionId = undefined; pendingSubmissionKind = undefined; clearTargetSelection(); }
+      function closeTargetComposer() { targetComposer.hidden = true; targetRequestInput.value = ''; targetRequestError.textContent = ''; targetRequestError.classList.remove('acknowledged'); targetSubmit.hidden = false; targetSubmit.disabled = false; targetSubmit.textContent = 'Start'; targetDone.hidden = true; pendingSubmissionId = undefined; pendingSubmissionKind = undefined; clearTargetSelection(); }
       function setOverlayOpen(active) { overlayOpen = active; document.body.classList.toggle('authoring-open', active); authoringPopover.hidden = !active; harnessLauncher.setAttribute('aria-expanded', String(active)); harnessLauncher.setAttribute('aria-label', active ? 'Close App Harness annotation tools' : 'Open App Harness annotation tools'); harnessLauncher.title = active ? 'Close annotations' : 'Annotate'; if (!active) { setTargetMode(false); setCommentMode(false); setDrawMode(false); annotationPanel.hidden = true; } }
       function setTargetMode(active) { targetMode = active; document.body.classList.toggle('target-mode-active', active); targetModeButton.setAttribute('aria-pressed', String(active)); if (active) { setCommentMode(false); setDrawMode(false); closeTargetComposer(); } else hoveredTarget?.classList.remove('target-hovered'); resize(); }
       function setCommentMode(active) { commentMode = active; document.body.classList.toggle('comment-mode-active', active); commentModeButton.setAttribute('aria-pressed', String(active)); if (active) { setTargetMode(false); setDrawMode(false); closeTargetComposer(); } else hoveredTarget?.classList.remove('target-hovered'); resize(); }
@@ -189,9 +395,9 @@
       function finishDrawing(event) { if (!drawing) return; drawing = false; drawingLayer.releasePointerCapture?.(event.pointerId); draftPath?.remove(); draftPath = undefined; if (draftPoints.length >= 2 && socket?.readyState === WebSocket.OPEN) { pendingSubmissionId = crypto.randomUUID(); pendingSubmissionKind = 'draw'; showAuthoringNotice('Saving drawing…'); socket.send(JSON.stringify({ type: 'harness:annotation', clientSubmissionId: pendingSubmissionId, annotation: { kind: 'draw', points: draftPoints, page: location.pathname } })); } draftPoints = []; }
       drawingLayer.addEventListener('pointerup', finishDrawing); drawingLayer.addEventListener('pointercancel', finishDrawing);
       document.addEventListener('keydown', event => { if (event.key === 'Escape') { const active = targetMode || commentMode || drawMode || !targetComposer.hidden; if (!targetComposer.hidden) closeTargetComposer(); setTargetMode(false); setCommentMode(false); setDrawMode(false); if (!active && overlayOpen) setOverlayOpen(false); return; } if ((targetMode || commentMode || drawMode) && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); event.stopImmediatePropagation(); } }, true);
-      input.addEventListener('input', resize); input.addEventListener('keydown', event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); form.requestSubmit(); } }); harnessLauncher.addEventListener('click', () => { if (!annotationPanel.hidden) { annotationPanel.hidden = true; setOverlayOpen(false); return; } setOverlayOpen(!overlayOpen); }); harnessDismiss.addEventListener('click', () => setOverlayOpen(false)); targetModeButton.addEventListener('click', () => setTargetMode(!targetMode)); commentModeButton.addEventListener('click', () => setCommentMode(!commentMode)); drawModeButton.addEventListener('click', () => setDrawMode(!drawMode)); annotationToggle.addEventListener('click', () => { annotationPanel.hidden = !annotationPanel.hidden; if (!annotationPanel.hidden) { overlayOpen = false; authoringPopover.hidden = true; harnessLauncher.setAttribute('aria-expanded', 'true'); harnessLauncher.setAttribute('aria-label', 'Close App Harness activity'); harnessLauncher.title = 'Close activity'; } }); annotationClose.addEventListener('click', () => { annotationPanel.hidden = true; harnessLauncher.setAttribute('aria-expanded', 'false'); harnessLauncher.setAttribute('aria-label', 'Open App Harness annotation tools'); harnessLauncher.title = 'Annotate'; }); annotationClear.addEventListener('click', () => { if (!annotations.length || socket?.readyState !== WebSocket.OPEN) return; if (confirm('Clear all canvas marks for this room? Chat messages will not be changed.')) socket.send(JSON.stringify({ type: 'harness:annotations:clear' })); }); document.querySelector('#cancel-target-request').addEventListener('click', closeTargetComposer); targetDone.addEventListener('click', closeTargetComposer);
+      input.addEventListener('input', resize); input.addEventListener('keydown', event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); form.requestSubmit(); } }); harnessLauncher.addEventListener('click', () => { if (!annotationPanel.hidden) { annotationPanel.hidden = true; setOverlayOpen(false); return; } setOverlayOpen(!overlayOpen); }); document.querySelector('#sidebar-new-request').addEventListener('click', () => { setOverlayOpen(true); setTargetMode(true); }); harnessDismiss.addEventListener('click', () => setOverlayOpen(false)); targetModeButton.addEventListener('click', () => setTargetMode(!targetMode)); commentModeButton.addEventListener('click', () => setCommentMode(!commentMode)); drawModeButton.addEventListener('click', () => setDrawMode(!drawMode)); annotationToggle.addEventListener('click', () => { annotationPanel.hidden = !annotationPanel.hidden; if (!annotationPanel.hidden) { overlayOpen = false; authoringPopover.hidden = true; harnessLauncher.setAttribute('aria-expanded', 'true'); harnessLauncher.setAttribute('aria-label', 'Close App Harness activity'); harnessLauncher.title = 'Close activity'; } }); annotationClose.addEventListener('click', () => { annotationPanel.hidden = true; harnessLauncher.setAttribute('aria-expanded', 'false'); harnessLauncher.setAttribute('aria-label', 'Open App Harness annotation tools'); harnessLauncher.title = 'Annotate'; }); annotationClear.addEventListener('click', () => { if (!annotations.length || socket?.readyState !== WebSocket.OPEN) return; if (confirm('Clear all canvas marks for this room? Chat messages will not be changed.')) socket.send(JSON.stringify({ type: 'harness:annotations:clear' })); }); document.querySelector('#cancel-target-request').addEventListener('click', closeTargetComposer); targetDone.addEventListener('click', closeTargetComposer);
       form.addEventListener('submit', event => { event.preventDefault(); if (targetMode || commentMode || drawMode) return; const text = input.value.trim(); if (!text || socket?.readyState !== WebSocket.OPEN) return; socket.send(JSON.stringify({ type: 'chat:send', author, text })); input.value = ''; resize(); });
-      targetComposer.addEventListener('submit', event => { event.preventDefault(); const text = targetRequestInput.value.trim(); if (!text) { targetRequestError.textContent = composerKind === 'comment' ? 'Write a brief comment.' : 'Describe the change you want to make.'; return; } if (!selectedEnvelope || socket?.readyState !== WebSocket.OPEN) { targetRequestError.textContent = 'Connection is not ready yet.'; return; } pendingSubmissionId = crypto.randomUUID(); pendingSubmissionKind = 'composer'; targetSubmit.disabled = true; targetRequestError.textContent = composerKind === 'comment' ? 'Recording and creating an activity item…' : 'Submitting and creating an activity item…'; if (composerKind === 'comment') socket.send(JSON.stringify({ type: 'harness:annotation', clientSubmissionId: pendingSubmissionId, annotation: { kind: 'comment', target: selectedEnvelope, text } })); else socket.send(JSON.stringify({ type: 'workflow:request', clientSubmissionId: pendingSubmissionId, request: text, target: selectedEnvelope })); });
+      targetComposer.addEventListener('submit', event => { event.preventDefault(); targetRequestError.classList.remove('acknowledged'); const text = targetRequestInput.value.trim(); if (!text) { targetRequestError.textContent = composerKind === 'comment' ? 'Write a brief comment.' : 'Describe the change you want to make.'; return; } if (!selectedEnvelope || socket?.readyState !== WebSocket.OPEN) { targetRequestError.textContent = 'Connection is not ready yet.'; return; } pendingSubmissionId = crypto.randomUUID(); pendingSubmissionKind = 'composer'; targetSubmit.disabled = true; targetRequestError.textContent = composerKind === 'comment' ? 'Recording and creating an activity item…' : 'Submitting and creating an activity item…'; if (composerKind === 'comment') socket.send(JSON.stringify({ type: 'harness:annotation', clientSubmissionId: pendingSubmissionId, annotation: { kind: 'comment', target: selectedEnvelope, text } })); else socket.send(JSON.stringify({ type: 'workflow:request', clientSubmissionId: pendingSubmissionId, request: text, target: selectedEnvelope })); });
       connect(); resize();
     </script>
   </body>
