@@ -1,4 +1,4 @@
-import { DurableObject } from "cloudflare:workers";
+import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import {
 	applyCoordinatorCallback,
 	blockCoordinatorStack,
@@ -10,8 +10,15 @@ import {
 	reconcileCompletedStack,
 	retryCoordinatorEffect,
 } from "./coordinator-state.js";
-import { createGithubIdentityClient, type GithubModelClassification } from "./github-identity-client.js";
-import { classifyOsRunnerResponse, createOsNativeGitJob, createOsPlanningManifest } from "./os-provider-bridge.js";
+import { createGithubIdentityClient } from "./github-identity-client.js";
+import {
+	classifyOsRunnerResponse,
+	createOsNativeGitJob,
+	createOsWorkspaceSubmission,
+	osExecutionDisposition,
+	osWorkspaceTurnDisposition,
+	validateOsExecutionRequest,
+} from "./os-provider-bridge.js";
 import { applyStackEvent, createStackLedger } from "./stack-ledger.js";
 
 type ChatMessage = {
@@ -126,14 +133,12 @@ type HarnessWorkItem = {
 		runnerUrl: string;
 		stackId: string;
 		generation: number;
-		model?: { id: string; model: string };
-		classification?: OsModelClassification;
-		plan?: { kind: "repository-task"; request: string };
 		attempts?: number;
 		startedAt?: number;
 		baseSha?: string;
 		headSha?: string;
 		agent?: { model: string; responseIds: string[]; tools: string[] };
+		workspace?: { chatPath: string; state: string; lastResponse?: string };
 	};
 };
 
@@ -167,16 +172,34 @@ type CoordinatorEffect = Omit<ReturnType<typeof createCoordinatorEffect>, "paylo
 type StackLedger = ReturnType<typeof createStackLedger>;
 type CoordinatorClaim = { job: CoordinatorJob; effect: CoordinatorEffect; leaseToken: string };
 
-type RuntimeEnv = Omit<Env, "OS_NATIVE_GIT_PROVIDER" | "OS_NATIVE_GIT_RUNNER" | "OS_AGENT_ORCHESTRATOR"> & {
+type RuntimeEnv = Omit<Env, "OS_NATIVE_GIT_RUNNER" | "OS_WORKSPACE"> & {
 	GITHUB_AUTOMATION_TOKEN: string;
 	AUTONOMY_CALLBACK_SECRET: string;
 	OS_NATIVE_GIT_RUNNER?: Fetcher;
 	OS_NATIVE_GIT_RUNNER_SECRET?: string;
-	OS_AGENT_ORCHESTRATOR?: Fetcher;
-	OS_AGENT_ORCHESTRATOR_SECRET?: string;
-	OS_NATIVE_GIT_PROVIDER?: string;
+	OS_WORKSPACE?: unknown;
 	GITHUB_IDENTITY_BRIDGE?: Fetcher;
 	APP_HARNESS_IDENTITY_SECRET?: string;
+};
+
+type OsWorkspaceGateway = {
+	submitExternalMessage(input: {
+		callerEmail: string;
+		gadgetKey: string;
+		chatKey: string;
+		messageKey: string;
+		gadgetTitle: string;
+		prompt: string;
+		chatGatewayRpcTarget: unknown;
+	}): Promise<{ accepted: true; chatPath: string } | { accepted: false; message: string }>;
+};
+
+type OsWorkspaceResponse = { text: string };
+type OsWorkspaceResponseTargetProps = { room: string; workItemId: string };
+type OsExecutionBridgeProps = { source: string };
+type OsExecutionRequest = { workItemId: string; issueNumber: number };
+type WorkerExports = {
+	OsWorkspaceResponseTarget(input: { props: OsWorkspaceResponseTargetProps }): unknown;
 };
 
 const MAX_MESSAGE_LENGTH = 2_000;
@@ -200,6 +223,7 @@ const COORDINATOR_MAX_ATTEMPTS = 3;
 const COORDINATOR_BATCH_SIZE = 8;
 const SHA = /^[0-9a-f]{40}$/iu;
 const LIVE_APP_URL = "https://autonomous-live-chat.coda-a.workers.dev/?room=main";
+const OS_WORKSPACE_CALLER_EMAIL = "callil.capuozzo@gmail.com";
 const TERMINAL_PHASES: ReadonlySet<WorkflowPhase> = new Set([
 	"completed",
 	"requires_review",
@@ -218,51 +242,34 @@ const PHASES: ReadonlySet<WorkflowPhase> = new Set([
 	"failed",
 ]);
 
-type OsAgentPlanResponse = {
-	state?: unknown;
-	model?: unknown;
-	plan?: unknown;
-	rationale?: unknown;
-	classification?: unknown;
-};
 
-type OsModelClassification = {
-	changeType: "visual" | "content" | "data" | "behavior" | "infrastructure";
-	scope: "localized" | "bounded" | "broad";
-	risk: "low" | "medium" | "high";
-	affectedSurface: "ui" | "copy" | "data" | "behavior" | "infrastructure";
-	reversible: boolean;
-	executionEligibility: "eligible" | "needs_review";
-	ciProfile: "visual" | "content" | "behavior" | "data" | "infrastructure";
-};
-
-function acceptedOsAgentPlan(value: unknown, request: string): { model: { id: string; model: string }; plan: { kind: "repository-task"; request: string }; rationale: string; classification: OsModelClassification } | null {
-	if (!value || typeof value !== "object") return null;
-	const response = value as OsAgentPlanResponse;
-	if (response.state !== "planned" || !response.model || typeof response.model !== "object" || !response.plan || typeof response.plan !== "object" || typeof response.rationale !== "string") return null;
-	const model = response.model as Record<string, unknown>;
-	const plan = response.plan as Record<string, unknown>;
-	const change = plan.change;
-	const classification = response.classification as Record<string, unknown> | null;
-	if (!change || typeof change !== "object") return null;
-	const candidate = change as Record<string, unknown>;
-	if (!classification || typeof model.id !== "string" || typeof model.model !== "string" || candidate.kind !== "repository-task" || !["visual", "content", "data", "behavior", "infrastructure"].includes(classification.changeType as string) || !["localized", "bounded", "broad"].includes(classification.scope as string) || !["low", "medium", "high"].includes(classification.risk as string) || !["ui", "copy", "data", "behavior", "infrastructure"].includes(classification.affectedSurface as string) || typeof classification.reversible !== "boolean" || classification.executionEligibility !== "eligible" || !["visual", "content", "behavior", "data", "infrastructure"].includes(classification.ciProfile as string)) return null;
-	return {
-		model: { id: model.id, model: model.model },
-		plan: { kind: "repository-task", request: request.slice(0, 500) },
-		rationale: response.rationale.slice(0, 240),
-		classification: classification as unknown as OsModelClassification,
-	};
+/**
+ * Persistent callback capability handed to Cloudflare OS. The OS workspace
+ * stores this stub and invokes it after the agent turn finishes; the props bind
+ * that response to one durable App Harness work item without parsing model
+ * prose for identifiers.
+ */
+export class OsWorkspaceResponseTarget extends WorkerEntrypoint<RuntimeEnv, OsWorkspaceResponseTargetProps> {
+	async onGadgetResponse(response: OsWorkspaceResponse): Promise<void> {
+		const { room, workItemId } = this.ctx.props;
+		if (!/^[a-zA-Z0-9_-]{1,64}$/u.test(room) || !isUuid(workItemId)) throw new Error("Cloudflare OS response target is invalid.");
+		await this.env.CHAT_ROOM.getByName(room).receiveOsWorkspaceResponse(workItemId, response);
+	}
 }
 
-/** Return only the planner's bounded public state; never surface prompts, headers, or provider output. */
-function osPlannerFailureDetail(status: number, value: unknown): string {
-	const body = value && typeof value === "object" ? value as Record<string, unknown> : null;
-	const state = typeof body?.state === "string" && /^[a-z-]{1,48}$/u.test(body.state) ? body.state : "unknown";
-	const classification = typeof body?.classification === "string" && /^[a-z-]{1,64}$/u.test(body.classification) ? body.classification : null;
-	if (status === 401 || status === 404) return "Cloudflare OS planner authentication to its private service failed. No model or native Git action was attempted.";
-	if (state === "needs-review") return "Cloudflare OS model reviewed this request and did not approve the bounded candidate plan. No native Git action was attempted.";
-	return `Cloudflare OS planner did not produce an approved bounded plan (${classification ?? state}). No native Git action was attempted.`;
+/**
+ * Capability-only bridge exposed to the Cloudflare OS Gatekeeper. It has no
+ * HTTP route and accepts no repository, prompt, source, or credential from the
+ * agent. The durable work item remains the authority for all of those values.
+ */
+export class OsExecutionBridge extends WorkerEntrypoint<RuntimeEnv, OsExecutionBridgeProps> {
+	async enqueueRepositoryTask(input: OsExecutionRequest): Promise<{ accepted: boolean; state: string }> {
+		if (this.ctx.props.source !== "cloudflare-os") throw new Error("Unrecognized Cloudflare OS capability source.");
+		if (!input || !isUuid(input.workItemId) || !Number.isInteger(input.issueNumber) || input.issueNumber < 1) {
+			throw new Error("Cloudflare OS execution request is invalid.");
+		}
+		return this.env.CHAT_ROOM.getByName("main").enqueueOsRepositoryTask(input);
+	}
 }
 
 /**
@@ -321,6 +328,112 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		} finally {
 			await this.scheduleCoordinatorAlarm();
 		}
+	}
+
+	/** Record the final agent response delivered by the persistent OS workspace. */
+	async receiveOsWorkspaceResponse(workItemId: string, response: OsWorkspaceResponse): Promise<void> {
+		if (!isUuid(workItemId) || !response || typeof response.text !== "string") return;
+		const text = response.text.trim().replace(/\s+/gu, " ").slice(0, 500);
+		if (!text) return;
+		const workItem = await this.getWorkItem(workItemId);
+		if (!workItem?.workflowId) return;
+		const workflow = await this.getWorkflow(workItem.workflowId);
+		const job = await this.ctx.storage.get<CoordinatorJob>(this.jobKey(workItem.workflowId));
+		if (!workflow || !job || TERMINAL_PHASES.has(workflow.phase)) return;
+		if (workItem.osNativeGit?.workspace?.lastResponse === text) return;
+		const delegated = osWorkspaceTurnDisposition(job.stage) === "delegated";
+		if (workItem.osNativeGit?.workspace) {
+			workItem.osNativeGit.workspace.state = delegated ? "delegated" : "responded-without-execution";
+			workItem.osNativeGit.workspace.lastResponse = text;
+		}
+		const now = Date.now();
+		if (!delegated) {
+			workflow.phase = "requires_review";
+			workItem.osNativeGit!.state = "needs-review";
+		}
+		workflow.updatedAt = now;
+		const status = delegated
+			? `Cloudflare OS workspace: ${text}`
+			: `Cloudflare OS completed without starting repository execution: ${text}`;
+		workflow.activity.push({ phase: workflow.phase, message: status.slice(0, 280), at: now });
+		this.transitionWorkItem(workItem, delegated ? workItem.phase : "needs_review", status);
+		await this.ctx.storage.transaction(async (txn) => {
+			await Promise.all([
+				txn.put(this.jobKey(job.id), delegated ? job : { ...job, stage: "terminal", currentEffectId: null, lease: null, updatedAt: now }),
+				txn.put(this.workflowKey(workflow.id), workflow),
+				txn.put(this.workItemKey(workItem.id), workItem),
+			]);
+		});
+		await Promise.all([this.saveWorkflow(workflow), this.saveWorkItem(workItem)]);
+		this.broadcastWorkflow(workflow);
+		await this.appendGitHubIssueStatus(workItem, status);
+	}
+
+	/**
+	 * Called only through OsExecutionBridge after the OS Gatekeeper action has
+	 * passed its audit/approval policy. It resumes the deterministic stack
+	 * machine using the original durable request, never agent-supplied prose.
+	 */
+	async enqueueOsRepositoryTask(input: OsExecutionRequest): Promise<{ accepted: boolean; state: string }> {
+		if (!input || !isUuid(input.workItemId) || !Number.isInteger(input.issueNumber) || input.issueNumber < 1) {
+			throw new Error("Cloudflare OS execution request is invalid.");
+		}
+		const workItem = await this.getWorkItem(input.workItemId);
+		if (!workItem?.workflowId || !workItem.githubIssue) throw new Error("Cloudflare OS execution request lost its durable work item.");
+		validateOsExecutionRequest(input, { workItemId: workItem.id, issue: workItem.githubIssue });
+		const workflow = await this.getWorkflow(workItem.workflowId);
+		const job = await this.ctx.storage.get<CoordinatorJob>(this.jobKey(workItem.workflowId));
+		if (!workflow || !job) throw new Error("Cloudflare OS execution request lost its durable workflow.");
+
+		const now = Date.now();
+		const effectId = this.effectId(job.id, "observe-main");
+		const existingEffect = await this.ctx.storage.get<CoordinatorEffect>(this.outboxKey(effectId));
+		const disposition = osExecutionDisposition({ terminal: job.stage === "terminal", existingEffect: Boolean(existingEffect), jobStage: job.stage });
+		if (disposition === "terminal") return { accepted: false, state: "terminal" };
+		if (disposition === "duplicate") return { accepted: true, state: workItem.osNativeGit?.state ?? job.stage };
+		const effect = createCoordinatorEffect({ id: effectId, jobId: job.id, workItemId: workItem.id, kind: "observe-main", now });
+		workItem.osNativeGit ??= {
+			jobId: `os-${workItem.id}-g1`,
+			state: "workspace-delegated",
+			runnerUrl: "https://app-harness-os-native-git.coda-a.workers.dev",
+			stackId: `stack-${workItem.id}`,
+			generation: 1,
+		};
+		workItem.osNativeGit.state = "workspace-delegated";
+		if (workItem.osNativeGit.workspace) workItem.osNativeGit.workspace.state = "delegated";
+		workflow.phase = "preparing_candidate";
+		workflow.updatedAt = now;
+		workflow.activity.push({ phase: "preparing_candidate", message: "Cloudflare OS delegated the approved task to the deterministic stack runner.", at: now });
+		this.transitionWorkItem(workItem, "queued", "Cloudflare OS approved the repository task; main observation and native Git execution are queued.");
+
+		await this.ctx.storage.transaction(async (txn) => {
+			const current = await txn.get<CoordinatorJob>(this.jobKey(job.id));
+			if (!current || current.stage === "terminal") throw new Error("Cloudflare OS execution request became stale.");
+			const existing = await txn.get<CoordinatorEffect>(this.outboxKey(effectId));
+			if (!existing) await txn.put(this.outboxKey(effectId), effect);
+			const submissionEffect = current.currentEffectId
+				? await txn.get<CoordinatorEffect>(this.outboxKey(current.currentEffectId))
+				: undefined;
+			if (submissionEffect?.kind === "submit-os-workspace" && submissionEffect.state !== "delivered" && submissionEffect.state !== "failed") {
+				await txn.put(this.outboxKey(submissionEffect.id), {
+					...submissionEffect,
+					state: "delivered",
+					leaseToken: null,
+					leaseExpiresAt: null,
+					updatedAt: now,
+				});
+			}
+			await Promise.all([
+				txn.put(this.jobKey(job.id), { ...current, stage: "queued", currentEffectId: effectId, lease: null, updatedAt: now }),
+				txn.put(this.workflowKey(workflow.id), workflow),
+				txn.put(this.workItemKey(workItem.id), workItem),
+			]);
+		});
+		await Promise.all([this.saveWorkflow(workflow), this.saveWorkItem(workItem)]);
+		this.broadcastWorkflow(workflow);
+		await this.appendGitHubIssueStatus(workItem, "Cloudflare OS approved the repository task; main observation and native Git execution are queued.");
+		await this.ctx.storage.setAlarm(now + 25);
+		return { accepted: true, state: "queued" };
 	}
 
 	async webSocketMessage(socket: WebSocket, raw: ArrayBuffer | string): Promise<void> {
@@ -393,23 +506,17 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		}
 
 		const now = Date.now();
-		const osProviderEnabled = this.env.OS_NATIVE_GIT_PROVIDER === "enabled";
-		const approvedComment = annotation.kind === "comment" && isPolicyApprovedFallbackRequest(annotation.text);
-		const canPlanComment = annotation.kind === "comment" && (osProviderEnabled || approvedComment);
+		const canSubmitComment = annotation.kind === "comment";
 		const workItem = this.createWorkItem({
 			annotationId: annotation.id,
 			clientSubmissionId: normalizeSubmissionId(clientSubmissionId),
 			kind: annotation.kind,
 			summary: annotation.kind === "comment" ? annotation.text : "Freehand drawing feedback",
 			target: annotation.kind === "comment" ? annotation.target : undefined,
-			phase: canPlanComment ? "received" : "needs_review",
-			message: osProviderEnabled && annotation.kind === "comment"
-				? "Comment received. Cloudflare OS bounded planning will decide whether it can become a candidate."
-				: approvedComment
-					? "Comment received. It matches the guarded fallback policy and is being queued."
-				: annotation.kind === "comment"
-					? "Comment recorded and awaiting agent triage. Arbitrary comments do not build themselves yet."
-					: "Drawing recorded and awaiting agent triage.",
+			phase: canSubmitComment ? "received" : "needs_review",
+			message: annotation.kind === "comment"
+				? "Comment received and durably queued for the persistent Cloudflare OS workspace."
+				: "Drawing recorded as public context; add a text comment to submit an implementation request.",
 			now,
 		});
 		annotation.workItemId = workItem.id;
@@ -425,10 +532,10 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		this.broadcast({ type: "harness:annotations", annotations: stored });
 		this.broadcastWorkItems(workItems);
 
-		if (canPlanComment && annotation.kind === "comment") {
+		if (canSubmitComment && annotation.kind === "comment") {
 			await this.startWorkflow(socket, annotation.text, annotation.target, workItem.clientSubmissionId, workItem.id);
 		} else {
-			await this.ensureGitHubIssue(workItem.id, approvedComment, false, "triage");
+			await this.ensureGitHubIssue(workItem.id, false, "triage");
 		}
 	}
 
@@ -485,30 +592,13 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 				summary: request,
 				target: target ?? undefined,
 				phase: "received",
-				message: "Change request received and checking the guarded policy.",
+				message: "Change request received and durably queued.",
 				now,
 			});
 			workItems.unshift(workItem);
 			// Issue creation resolves the item from durable storage so an external
 			// handoff can never race a newly submitted targeted request.
 			await this.saveWorkItems(workItems);
-		}
-
-		const policyApproved = isPolicyApprovedFallbackRequest(request);
-		const osProviderEnabled = this.env.OS_NATIVE_GIT_PROVIDER === "enabled";
-		if (!osProviderEnabled && !policyApproved) {
-			const workItemId = workItem.id;
-			const issueCreated = await this.ensureGitHubIssue(workItem.id, policyApproved, false, "triage");
-			if (!issueCreated) return;
-			workItems = await this.getWorkItems();
-			workItem = workItems.find((item) => item.id === workItemId) ?? workItem;
-			this.transitionWorkItem(
-				workItem,
-				"needs_review",
-				`GitHub issue #${workItem.githubIssue?.number ?? "?"} created — awaiting coding-agent triage. NanoCodex is not configured.`,
-			);
-			await this.saveWorkItems(workItems);
-			return;
 		}
 
 		const targetDescription = describeTarget(target);
@@ -522,23 +612,23 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 			updatedAt: now,
 			activity: [
 				{ phase: "received", message: `Request received${targetDescription ? ` for ${targetDescription}` : ""} and durably queued.`, at: now },
-				{ phase: "interpreting", message: osProviderEnabled ? "Sending the bounded request to Cloudflare OS planning." : "Checking the request against the autonomous change policy.", at: now },
+				{ phase: "interpreting", message: "Creating the public issue before submitting to the persistent Cloudflare OS workspace.", at: now },
 			],
 		};
 
 		workItem.workflowId = workflow.id;
 		this.transitionWorkItem(workItem, "queued", workItem.githubIssue
-			? osProviderEnabled ? "Cloudflare OS planning is durably queued." : "Guarded fallback dispatch is durably queued."
-			: "GitHub App issue creation is durably queued before candidate execution.");
-		const firstKind = workItem.githubIssue ? osProviderEnabled ? "plan-os" : "dispatch-fallback" : "create-issue";
+			? "Cloudflare OS workspace submission is durably queued."
+			: "GitHub App issue creation is durably queued before the OS workspace handoff.");
+		const firstKind = workItem.githubIssue ? "submit-os-workspace" : "create-issue";
 		const firstEffectId = this.effectId(workflow.id, firstKind);
-		const job = createCoordinatorJob({ workflowId: workflow.id, workItemId: workItem.id, pipeline: osProviderEnabled ? "os-native-git" : "fallback", firstEffectId, now });
+		const job = createCoordinatorJob({ workflowId: workflow.id, workItemId: workItem.id, pipeline: "os-native-git", firstEffectId, now });
 		const effect = createCoordinatorEffect({
 			id: firstEffectId,
 			jobId: job.id,
 			workItemId: workItem.id,
 			kind: firstKind,
-			payload: { policyApproved, handoff: osProviderEnabled ? "os-planning" : "fallback" },
+			payload: { handoff: "os-workspace" },
 			now,
 		});
 		await Promise.all([
@@ -609,13 +699,11 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		try {
 			switch (claim.effect.kind) {
 				case "create-issue": await this.processCreateIssue(claim); break;
-				case "plan-os": await this.processOsPlan(claim); break;
+				case "submit-os-workspace": await this.processOsWorkspaceSubmission(claim); break;
 				case "observe-main": await this.processMainObservation(claim); break;
 				case "run-os": await this.processOsRunner(claim); break;
 				case "dispatch-promotion": await this.processPromotionDispatch(claim); break;
-				case "dispatch-fallback": await this.processFallbackDispatch(claim); break;
 				case "github-status": await this.processGithubStatus(claim); break;
-				case "github-classification": await this.processGithubClassification(claim); break;
 				case "github-close": await this.processGithubClose(claim); break;
 				default: throw new Error(`Unsupported coordinator effect ${claim.effect.kind}.`);
 			}
@@ -629,60 +717,55 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		const workflow = await this.getWorkflow(claim.job.id);
 		const workItem = await this.getWorkItem(claim.job.workItemId);
 		if (!workflow || !workItem) throw new Error("Coordinator issue handoff lost its durable work record.");
-		const policyApproved = claim.effect.payload.policyApproved === true;
-		const handoff = claim.effect.payload.handoff === "os-planning" ? "os-planning" : "fallback";
+		const handoff = "os-workspace";
 		if (!workItem.githubIssue) {
-			const issue = await this.createGithubIssueHandoff(workItem, policyApproved, false, handoff);
+			const issue = await this.createGithubIssueHandoff(workItem, false, handoff);
 			workItem.githubIssue = { number: issue.issueNumber, url: issue.issueUrl };
 		}
-		this.transitionWorkItem(workItem, "triaged", handoff === "os-planning"
-			? `GitHub issue #${workItem.githubIssue.number} created by App Harness. Cloudflare OS bounded planning is durably queued.`
-			: `GitHub issue #${workItem.githubIssue.number} created by App Harness. Guarded fallback dispatch is durably queued.`);
-		const nextKind = claim.job.pipeline === "os-native-git" ? "plan-os" : "dispatch-fallback";
+		this.transitionWorkItem(workItem, "triaged", `GitHub issue #${workItem.githubIssue.number} created by App Harness. Persistent Cloudflare OS workspace submission is durably queued.`);
+		const nextKind = "submit-os-workspace";
 		await this.completeClaim(claim, { workflow, workItem, nextKind, nextStage: "queued" });
 	}
 
-	private async processOsPlan(claim: { job: CoordinatorJob; effect: CoordinatorEffect; leaseToken: string }): Promise<void> {
+	private async processOsWorkspaceSubmission(claim: CoordinatorClaim): Promise<void> {
 		const workflow = await this.getWorkflow(claim.job.id);
 		const workItem = await this.getWorkItem(claim.job.workItemId);
-		if (!workflow || !workItem?.githubIssue) throw new Error("Cloudflare OS planning lost its linked issue.");
-		if (!this.env.OS_AGENT_ORCHESTRATOR || !this.env.OS_AGENT_ORCHESTRATOR_SECRET || !this.env.OS_NATIVE_GIT_RUNNER || !this.env.OS_NATIVE_GIT_RUNNER_SECRET) {
-			await this.terminateClaim(claim, workflow, workItem, "requires_review", "Cloudflare OS provider is enabled but its private planning or runner binding is not configured. No model or native Git action was attempted.");
-			return;
-		}
-		const manifest = createOsPlanningManifest({ workItemId: workItem.id, issueUrl: workItem.githubIssue.url, request: workflow.request, target: workflow.target, room: "main" });
-		workItem.osNativeGit = { jobId: `os-${workItem.id}-g${manifest.stack.generation}`, state: "planning", runnerUrl: manifest.runnerUrl, stackId: manifest.stack.id, generation: manifest.stack.generation };
-		const response = await this.env.OS_AGENT_ORCHESTRATOR.fetch(new Request("https://os-agent.internal/v1/plans", {
-			method: "POST",
-			headers: { Authorization: `Bearer ${this.env.OS_AGENT_ORCHESTRATOR_SECRET}`, "Content-Type": "application/json" },
-			body: JSON.stringify(manifest),
-		}));
-		let body: unknown = null;
-		try { body = await response.json(); } catch { /* rejected below */ }
-		const plan = acceptedOsAgentPlan(body, workflow.request);
-		if (!plan) {
-			workItem.osNativeGit.state = typeof body === "object" && body && "state" in body && typeof body.state === "string" ? body.state : "unknown";
-			await this.terminateClaim(claim, workflow, workItem, "requires_review", osPlannerFailureDetail(response.status, body));
-			return;
-		}
-		workItem.osNativeGit.state = "planned";
-		workItem.osNativeGit.model = plan.model;
-		workItem.osNativeGit.plan = plan.plan;
-		workItem.osNativeGit.classification = plan.classification;
-		this.transitionWorkItem(workItem, "queued", `Cloudflare OS model ${plan.model.model} produced a bounded candidate plan; main observation is queued durably.`);
-		workflow.phase = "preparing_candidate";
+		if (!workflow || !workItem?.githubIssue) throw new Error("Cloudflare OS workspace submission lost its linked issue.");
+		if (!this.env.OS_WORKSPACE) throw new Error("Persistent Cloudflare OS workspace binding is unavailable.");
+		workItem.osNativeGit ??= {
+			jobId: `os-${workItem.id}-g1`,
+			state: "workspace-submitting",
+			runnerUrl: "https://app-harness-os-native-git.coda-a.workers.dev",
+			stackId: `stack-${workItem.id}`,
+			generation: 1,
+		};
+		const responseTarget = (this.ctx.exports as unknown as WorkerExports).OsWorkspaceResponseTarget({ props: { room: "main", workItemId: workItem.id } });
+		const submission = createOsWorkspaceSubmission({
+			workItemId: workItem.id,
+			issue: workItem.githubIssue,
+			request: workflow.request,
+			target: workflow.target,
+			responseTarget,
+		});
+		const result = await (this.env.OS_WORKSPACE as OsWorkspaceGateway).submitExternalMessage({
+			callerEmail: OS_WORKSPACE_CALLER_EMAIL,
+			...submission,
+		});
+		if (!result.accepted) throw new Error(`Cloudflare OS rejected the workspace message (${result.message.slice(0, 120)}).`);
+		workItem.osNativeGit.state = "workspace-accepted";
+		workItem.osNativeGit.workspace = { chatPath: result.chatPath, state: "accepted" };
+		this.transitionWorkItem(workItem, "triaged", "Persistent Cloudflare OS workspace accepted the request and is deciding how to act.");
 		workflow.updatedAt = Date.now();
-		workflow.activity.push({ phase: "preparing_candidate", message: `Cloudflare OS model plan recorded (${plan.rationale}).`, at: workflow.updatedAt });
-		if (await this.completeClaim(claim, { workflow, workItem, nextKind: "observe-main", nextStage: "queued" })) {
-			await this.applyOsClassificationLabels(workItem, plan.classification);
-			await this.appendGitHubIssueStatus(workItem, `Cloudflare OS model plan recorded (${plan.model.model}, ${plan.model.id}); native Git is queued durably.`);
+		workflow.activity.push({ phase: workflow.phase, message: "Persistent Cloudflare OS workspace accepted the idempotent request.", at: workflow.updatedAt });
+		if (await this.completeClaim(claim, { workflow, workItem, nextKind: null, nextStage: "awaiting-os" })) {
+			await this.appendGitHubIssueStatus(workItem, `Cloudflare OS workspace accepted the request: ${result.chatPath}`);
 		}
 	}
 
 	private async processMainObservation(claim: { job: CoordinatorJob; effect: CoordinatorEffect; leaseToken: string }): Promise<void> {
 		const workflow = await this.getWorkflow(claim.job.id);
 		const workItem = await this.getWorkItem(claim.job.workItemId);
-		if (!workflow || !workItem?.githubIssue || !workItem.osNativeGit?.plan) throw new Error("Main observation lost its durable plan.");
+		if (!workflow || !workItem?.githubIssue || !workItem.osNativeGit?.workspace) throw new Error("Main observation lost its durable OS workspace authority.");
 		const response = await fetch(`https://api.github.com/repos/${this.env.GITHUB_REPOSITORY}/git/ref/heads/main`, {
 			headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${this.env.GITHUB_AUTOMATION_TOKEN}`, "User-Agent": "app-harness-os", "X-GitHub-Api-Version": "2022-11-28" },
 		});
@@ -705,7 +788,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		const workflow = await this.getWorkflow(claim.job.id);
 		const workItem = await this.getWorkItem(claim.job.workItemId);
 		let ledger = await this.ctx.storage.get<StackLedger>(this.ledgerKey(claim.job.workItemId));
-		if (!workflow || !workItem?.githubIssue || !workItem.osNativeGit?.plan || !ledger || !this.env.OS_NATIVE_GIT_RUNNER || !this.env.OS_NATIVE_GIT_RUNNER_SECRET) throw new Error("Native Git runner lost its durable capability state.");
+		if (!workflow || !workItem?.githubIssue || !workItem.osNativeGit?.workspace || !ledger || !this.env.OS_NATIVE_GIT_RUNNER || !this.env.OS_NATIVE_GIT_RUNNER_SECRET) throw new Error("Native Git runner lost its durable capability state.");
 		if (ledger.runner.stage === "running" && ledger.runner.attemptToken) {
 			ledger = applyStackEvent(ledger, { type: "runner-attempt-retryable", eventId: `runner-expired-${claim.effect.attempts - 1}`, generation: ledger.generation, attemptToken: ledger.runner.attemptToken }).ledger;
 		}
@@ -717,8 +800,13 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		workItem.osNativeGit.attempts = claim.effect.attempts;
 		this.transitionWorkItem(workItem, "building", `Cloudflare OS isolated native Git runner started durable attempt ${claim.effect.attempts}.`);
 		await Promise.all([this.ctx.storage.put(this.ledgerKey(workItem.id), ledger), this.saveWorkItem(workItem)]);
-		const manifest = createOsPlanningManifest({ workItemId: workItem.id, issueUrl: workItem.githubIssue.url, request: workflow.request, target: workflow.target, room: "main", generation: ledger.generation });
-		const runnerJob = createOsNativeGitJob({ manifest, plan: workItem.osNativeGit.plan, parentBaseSha: ledger.generationBaseSha });
+		const runnerJob = createOsNativeGitJob({
+			workItemId: workItem.id,
+			issue: workItem.githubIssue,
+			request: workflow.request,
+			generation: ledger.generation,
+			parentBaseSha: ledger.generationBaseSha,
+		});
 		const response = await this.env.OS_NATIVE_GIT_RUNNER.fetch(new Request("https://runner.internal/v1/native-git/jobs", {
 			method: "POST",
 			headers: { Authorization: `Bearer ${this.env.OS_NATIVE_GIT_RUNNER_SECRET}`, "Content-Type": "application/json" },
@@ -774,36 +862,12 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		const response = await fetch(`https://api.github.com/repos/${this.env.GITHUB_REPOSITORY}/actions/workflows/os-stack-promote.yml/dispatches`, {
 			method: "POST",
 			headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${this.env.GITHUB_AUTOMATION_TOKEN}`, "Content-Type": "application/json", "User-Agent": "app-harness-os", "X-GitHub-Api-Version": "2022-11-28" },
-			body: JSON.stringify({ ref: "main", inputs: { pull_request: match[1], stack_id: runner.stackId, generation: String(runner.generation), issue_number: String(workItem.githubIssue.number), parent_branch: "main", head_sha: runner.headSha, room: "main", workflow_id: workflow.id, ci_profile: runner.classification?.ciProfile ?? "unsupported" } }),
+			body: JSON.stringify({ ref: "main", inputs: { pull_request: match[1], stack_id: runner.stackId, generation: String(runner.generation), issue_number: String(workItem.githubIssue.number), parent_branch: "main", head_sha: runner.headSha, room: "main", workflow_id: workflow.id, ci_profile: "behavior" } }),
 		});
 		if (!response.ok) throw new Error(`Stack promotion dispatch failed (${response.status}).`);
 		if (await this.completeClaim(claim, { workflow, workItem, nextKind: null, nextStage: "awaiting-callback" })) {
 			await this.appendGitHubIssueStatus(workItem, `Stack scheduled: ${runner.stackId} generation ${runner.generation}, root parent main, base ${runner.baseSha}. Candidate: ${workItem.githubPullRequestUrl}`);
 		}
-	}
-
-	private async processFallbackDispatch(claim: { job: CoordinatorJob; effect: CoordinatorEffect; leaseToken: string }): Promise<void> {
-		const workflow = await this.getWorkflow(claim.job.id);
-		const workItem = await this.getWorkItem(claim.job.workItemId);
-		if (!workflow || !workItem?.githubIssue) throw new Error("Fallback dispatch lost its linked issue.");
-		const response = await fetch(`https://api.github.com/repos/${this.env.GITHUB_REPOSITORY}/actions/workflows/autonomous-change.yml/dispatches`, {
-			method: "POST",
-			headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${this.env.GITHUB_AUTOMATION_TOKEN}`, "Content-Type": "application/json", "User-Agent": "app-harness-autonomy", "X-GitHub-Api-Version": "2022-11-28" },
-			body: JSON.stringify({ ref: "main", inputs: { request_id: workflow.id, request: workflow.request, room: "main", issue_number: String(workItem.githubIssue.number) } }),
-		});
-		if (!response.ok) throw new Error(`GitHub fallback dispatch failed (${response.status}).`);
-		this.transitionWorkItem(workItem, "queued", "Guarded fallback workflow dispatched; no model-driven agent is involved.");
-		if (await this.completeClaim(claim, { workflow, workItem, nextKind: null, nextStage: "awaiting-callback" })) {
-			await this.appendGitHubIssueStatus(workItem, "Guarded fallback workflow dispatched; awaiting signed completion callbacks.");
-		}
-	}
-
-	private async applyOsClassificationLabels(workItem: HarnessWorkItem, classification: OsModelClassification): Promise<void> {
-		if (!workItem.githubIssue) return;
-		await this.enqueueAuxEffect(workItem, "github-classification", {
-			issueNumber: workItem.githubIssue.number,
-			classification,
-		});
 	}
 
 	private async processGithubStatus(claim: CoordinatorClaim): Promise<void> {
@@ -812,19 +876,6 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		const body = claim.effect.payload.body;
 		if (!workItem || !Number.isInteger(issueNumber) || typeof body !== "string") throw new Error("GitHub status effect is invalid.");
 		await createGithubIdentityClient(this.env, { workItemId: workItem.id }).updateStatus({ issueNumber: issueNumber as number, body });
-		await this.completeAuxClaim(claim);
-	}
-
-	private async processGithubClassification(claim: CoordinatorClaim): Promise<void> {
-		const workItem = await this.getWorkItem(claim.job.workItemId);
-		const issueNumber = claim.effect.payload.issueNumber;
-		const classification = claim.effect.payload.classification as OsModelClassification | undefined;
-		if (!workItem || !Number.isInteger(issueNumber) || !classification) throw new Error("GitHub classification effect is invalid.");
-		await createGithubIdentityClient(this.env, { workItemId: workItem.id }).reconcileClassification({
-			issueNumber: issueNumber as number,
-			classification: "agent",
-			modelClassification: classification as GithubModelClassification,
-		});
 		await this.completeAuxClaim(claim);
 	}
 
@@ -959,7 +1010,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		await this.scheduleCoordinatorAlarm();
 	}
 
-	private async enqueueAuxEffect(workItem: HarnessWorkItem, kind: "github-status" | "github-classification" | "github-close", payload: Record<string, unknown>): Promise<void> {
+	private async enqueueAuxEffect(workItem: HarnessWorkItem, kind: "github-status" | "github-close", payload: Record<string, unknown>): Promise<void> {
 		if (!workItem.workflowId) return;
 		const job = await this.ctx.storage.get<CoordinatorJob>(this.jobKey(workItem.workflowId));
 		if (!job) return;
@@ -985,7 +1036,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		if (!workItem) return;
 		let job = await this.ctx.storage.get<CoordinatorJob>(this.jobKey(workflow.id));
 		if (!job) {
-			const legacy = createCoordinatorJob({ workflowId: workflow.id, workItemId: workItem.id, pipeline: workItem.osNativeGit ? "os-native-git" : "fallback", firstEffectId: this.effectId(workflow.id, "legacy"), now: workflow.createdAt });
+				const legacy = createCoordinatorJob({ workflowId: workflow.id, workItemId: workItem.id, pipeline: "os-native-git", firstEffectId: this.effectId(workflow.id, "legacy"), now: workflow.createdAt });
 			job = { ...legacy, stage: "awaiting-callback", currentEffectId: null, lease: null };
 		}
 		if (!job) return;
@@ -1160,9 +1211,8 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 			if (workItem.githubIssue) continue;
 			await this.ensureGitHubIssue(
 				workItem.id,
-				workItem.kind !== "draw" && isPolicyApprovedFallbackRequest(workItem.summary),
 				true,
-				this.env.OS_NATIVE_GIT_PROVIDER === "enabled" && workItem.kind !== "draw" ? "os-planning" : workItem.kind !== "draw" && isPolicyApprovedFallbackRequest(workItem.summary) ? "fallback" : "triage",
+				workItem.kind !== "draw" ? "os-workspace" : "triage",
 			);
 		}
 	}
@@ -1203,23 +1253,21 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		if (changed) await this.saveWorkItems(workItems);
 	}
 
-	private async ensureGitHubIssue(workItemId: string, policyApproved: boolean, backfill: boolean, handoff: "os-planning" | "fallback" | "triage" = policyApproved ? "fallback" : "triage"): Promise<boolean> {
+	private async ensureGitHubIssue(workItemId: string, backfill: boolean, handoff: "os-workspace" | "triage" = "triage"): Promise<boolean> {
 		const workItems = await this.getWorkItems();
 		const workItem = workItems.find((item) => item.id === workItemId);
 		if (!workItem) return false;
 		if (workItem.githubIssue) return true;
 
 		try {
-			const issue = await this.createGithubIssueHandoff(workItem, policyApproved, backfill, handoff);
+			const issue = await this.createGithubIssueHandoff(workItem, backfill, handoff);
 			workItem.githubIssue = { number: issue.issueNumber, url: issue.issueUrl };
 			this.transitionWorkItem(
 				workItem,
-				handoff === "os-planning" || policyApproved ? "triaged" : "needs_review",
-				handoff === "os-planning"
-					? `GitHub issue #${issue.issueNumber} created by App Harness. Cloudflare OS bounded planning is next.`
-					: policyApproved
-						? `GitHub issue #${issue.issueNumber} created by App Harness. The deterministic fallback may now start.`
-						: `GitHub issue #${issue.issueNumber} created by App Harness — awaiting coding-agent triage.`,
+				handoff === "os-workspace" ? "triaged" : "needs_review",
+				handoff === "os-workspace"
+					? `GitHub issue #${issue.issueNumber} created by App Harness. Persistent Cloudflare OS workspace handoff is next.`
+					: `GitHub issue #${issue.issueNumber} created by App Harness — awaiting a text implementation request.`,
 			);
 			await this.saveWorkItems(workItems);
 			return true;
@@ -1231,7 +1279,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		}
 	}
 
-	private async createGithubIssueHandoff(workItem: HarnessWorkItem, _policyApproved: boolean, backfill: boolean, handoff: "os-planning" | "fallback" | "triage") {
+	private async createGithubIssueHandoff(workItem: HarnessWorkItem, backfill: boolean, handoff: "os-workspace" | "triage") {
 		const target = workItem.target;
 		const targetDetails = target
 			? [
@@ -1243,11 +1291,9 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 				`- Room/page: \`${target.room}${target.page}\``,
 			].join("\n")
 			: "### Safe target envelope\nNo element target was supplied (freehand drawing feedback).";
-		const classification = handoff === "os-planning"
-			? "Queued for Cloudflare OS planning. The model classifies the request and the autonomous repository agent may implement it with the available terminal, Git, stack, test, migration, and Cloudflare tools after a plan is recorded."
-			: handoff === "fallback"
-				? "Eligible for the deterministic guarded fallback. This is not a model-driven coding-agent run."
-				: "Recorded as intake awaiting coding-agent triage. No candidate or model run has started.";
+		const classification = handoff === "os-workspace"
+			? "Queued for the persistent Cloudflare OS repository workspace. The workspace may delegate implementation through its typed App Harness capability; the durable issue and request remain authoritative."
+			: "Recorded as public context. A text implementation request is needed before autonomous execution starts.";
 		const body = [
 			"## App Harness intake",
 			`- Work item: \`${workItem.id}\``,
@@ -1389,12 +1435,6 @@ function normalizeRequest(value: unknown): string | null {
 
 function normalizeSubmissionId(value: unknown): string | undefined {
 	return typeof value === "string" && isUuid(value) ? value : undefined;
-}
-
-function isPolicyApprovedFallbackRequest(request: string): boolean {
-	if (/^(?:set|change) (?:the )?accent(?: color)? to (blue|green|purple|orange)[.!]?$/i.test(request)) return true;
-	const emptyMatch = request.match(/^set (?:the )?empty(?: |-)?state(?: message)? to ["“]?(.+?)["”]?[.!]?$/i);
-	return Boolean(emptyMatch && /^[A-Za-z0-9 ,.!?'’:-]{1,80}$/.test(emptyMatch[1].trim()));
 }
 
 function normalizeTarget(value: unknown): TargetEnvelope | null {

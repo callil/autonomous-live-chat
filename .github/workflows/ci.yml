@@ -1,0 +1,42 @@
+name: App Harness CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: app-harness-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the exact revision without persisted credentials
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install exact dependencies
+        run: npm ci
+      - name: Verify Worker, orchestration, stack, and agent contracts
+        run: |
+          npm run cf-typegen
+          npx tsc --noEmit
+          npm run test:stack
+          npm run test:native-git-preflight
+          npm run test:os-provider-bridge
+          npm run test:coordinator
+          npm --prefix os-native-git-runner run typecheck
+          npm --prefix os-native-git-runner run test:runner-contract
+          npm --prefix os-git-credential-proxy run typecheck
+          git diff --check

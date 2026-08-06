@@ -31,7 +31,7 @@ export function normalizeAgentProvenance(value) {
 }
 
 export function createCoordinatorJob({ workflowId, workItemId, pipeline, firstEffectId, now }) {
-	if (pipeline !== "os-native-git" && pipeline !== "fallback") throw new Error("Coordinator pipeline is invalid.");
+	if (pipeline !== "os-native-git") throw new Error("Coordinator pipeline is invalid.");
 	return {
 		schemaVersion: 1,
 		id: id(workflowId, "Workflow ID"),
@@ -71,6 +71,7 @@ export function claimCoordinatorEffect(job, effect, { now, leaseToken, leaseMs }
 	if (!EFFECT_STATES.has(effect.state)) throw new Error("Coordinator effect state is invalid.");
 	if (effect.state === "delivered" || effect.state === "failed") return { disposition: "settled", job, effect };
 	if (isTerminalCoordinatorJob(job) && effect.blocking) return { disposition: "terminal", job, effect };
+	if (effect.blocking && job.currentEffectId !== effect.id) return { disposition: "stale", job, effect };
 	const at = timestamp(now, "Claim time");
 	if (effect.availableAt > at) return { disposition: "not-due", job, effect };
 	if (job.lease && job.lease.effectId !== effect.id && job.lease.expiresAt > at) return { disposition: "busy", job, effect };

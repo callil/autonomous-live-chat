@@ -21,17 +21,20 @@
 		"binding": "ASSETS"
 	},
 	"vars": {
-		"GITHUB_REPOSITORY": "callil/autonomous-live-chat",
-		"OS_NATIVE_GIT_PROVIDER": "enabled"
+		"GITHUB_REPOSITORY": "callil/autonomous-live-chat"
 	},
 	"services": [
 		{
-			"binding": "OS_NATIVE_GIT_RUNNER",
-			"service": "app-harness-os-native-git"
+			"binding": "OS_WORKSPACE",
+			"service": "app-harness-os",
+			"entrypoint": "ExternalMessageGateway",
+			"props": {
+				"source": "app-harness"
+			}
 		},
 		{
-			"binding": "OS_AGENT_ORCHESTRATOR",
-			"service": "app-harness-os-orchestrator"
+			"binding": "OS_NATIVE_GIT_RUNNER",
+			"service": "app-harness-os-native-git"
 		},
 		{
 			"binding": "GITHUB_IDENTITY_BRIDGE",
@@ -51,7 +54,8 @@
 	},
 	"upload_source_maps": true,
 	"compatibility_flags": [
-		"nodejs_compat"
+		"nodejs_compat",
+		"enable_ctx_exports"
 	]
 	/**
 	 * Smart Placement

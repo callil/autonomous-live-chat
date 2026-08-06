@@ -27,21 +27,14 @@ For situated feedback, open the small **App Harness** button at the lower-right,
 
 Targeted requests include a sanitized, stable envelope based on an explicit `data-target-id`. It contains the element identity, semantic tag/role, a safe label or explicitly marked static text, page and room context, and its viewport rectangle. Input values, message bodies, query strings, and secrets are not included. See [targeting and integration](./docs/targeting.md).
 
-The optional App Harness overlay frames the host app rather than becoming its permanent chrome. It stays collapsed when not in use and supports target-aware requests plus durable comments and freehand feedback when opened; see [overlay canvas](./docs/overlay-canvas.md). Every submission creates a durable, shared activity item **and a GitHub issue**. The on-demand Activity list exposes the actual issue and pull-request URLs. With the Cloudflare OS provider enabled, bounded text requests are labelled `cloudflare-os-planning` and reach a model planner; an approved, schema-validated repository task can start NanoCodex in an isolated Cloudflare Sandbox. The deterministic visual/copy path remains a disabled-provider fallback; drawing-only feedback is recorded for triage.
+The optional App Harness overlay frames the host app rather than becoming permanent chrome. It stays collapsed when not in use and supports target-aware requests, durable comments, and freehand context; see [overlay canvas](./docs/overlay-canvas.md). Every submission creates a durable activity item and a real GitHub issue. The on-demand Activity list exposes actual issue and pull-request URLs.
 
-### Deterministic fallback policy
+Every text request then goes directly, over a private Cloudflare service binding, to one persistent Cloudflare OS workspace/chat for this repository. There is no separate stateless planner. Cloudflare OS keeps the long-lived operator context and can delegate implementation through one typed App Harness capability containing only the durable work-item ID and issue number.
 
-The app may autonomously execute only these exact, benign requests:
+The capability resumes the existing durable pipeline from the original request: observe `main`, start an isolated Cloudflare Sandbox, run an ephemeral NanoCodex coding child with the full checkout and normal engineering tools, create a PR or ordered PR stack, run unprivileged CI, merge, deploy, and reconcile a signed callback. Ordinary children default to GPT-5.6 Luna with low reasoning and can use parallel read-only subagents for investigation; the child parent alone edits and owns Git/stack operations.
 
-- `set accent to blue`, `green`, `purple`, or `orange`
-- `set empty state to "Your short message"` using only letters, numbers, ordinary punctuation, and at most 80 characters
+Safety comes from operating guidelines, isolated execution, process-scoped repository credentials, immutable Git provenance, CI, reversible deployment, and truthful refusal—not a color/copy or command allowlist. The agent can change the full application when it can do so safely. It must preserve data and secrets and refuse illegal, harmful, intentionally availability-destroying, destructive-data, credential-seeking, or externally unsupported work.
 
-Everything else is held as **requires review**. The runner never interprets raw request text as a command. It maps an exact supported sentence to one parameter in a fixed transform of `public/index.html`.
+The room transcript keeps the latest 200 chat messages as a bounded product snapshot. That cap is not the agent’s memory: the persistent Cloudflare OS workspace owns operator context, while GitHub issues, PRs, repository files, and the durable work ledger preserve the implementation record.
 
-For an allowed request, the Durable Object first opens a linked GitHub issue, then GitHub Actions creates a candidate branch and pull request, runs `npm run cf-typegen` and `npx tsc --noEmit`, automatically promotes the policy-approved candidate, then deploys with Wrangler. Authenticated callbacks update the durable public record through **received**, **interpreting**, **preparing candidate**, **validating**, **deploying**, and **completed**. For all other feedback, the issue is marked **awaiting coding-agent triage**—it does not imply that a branch, pull request, or coding agent exists.
-
-### Fallback boundary
-
-The deterministic fallback cannot change data, authentication or authorization, credentials, dependencies, Worker configuration, backend logic, workflow policy, or arbitrary source files. The NanoCodex provider is a separate path with full repository tools, ephemeral credentials, bounded audit output, and mandatory CI gates. Service credentials authenticate the private runner and callback, and are never exposed to the chat UI or persisted model output.
-
-The next provider is [Cloudflare OS](./docs/cloudflare-os-provider.md): an isolated Sandbox workspace with narrow Gatekeeper capabilities and a Durable Object audit ledger. Dependent changes must use the [stacked-PR scheduler](./docs/stacked-prs.md), never independent auto-rebase loops.
+See [how it works](./docs/how-it-works-today.md), the [Cloudflare OS provider](./docs/cloudflare-os-provider.md), and the [stacked-PR scheduler](./docs/stacked-prs.md).

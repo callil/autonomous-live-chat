@@ -5,13 +5,13 @@ App Harness is a small but real experiment in software that can evolve in public
 - [Canonical goal](./canonical-goal.md) — the end-to-end product contract and acceptance chain.
 - [Project intent](./project-intent.md) — why this product exists and what the chat MVP proves.
 - [How it works today](./how-it-works-today.md) — the deployed coordination and delivery path.
-- [Current autonomy and policy](./current-autonomy-and-policy.md) — the constrained fallback and its non-negotiable limits.
+- [Current autonomy and policy](./current-autonomy-and-policy.md) — full-agent autonomy, operating guidelines, and capability boundaries.
 - [Cloudflare OS provider](./cloudflare-os-provider.md) — the default capability/execution architecture and its real deployment boundary.
 - [Stacked PR scheduling](./stacked-prs.md) — the dependency model that prevents autonomous rebase races.
 - [Native Git credential bridge](./native-git-credential-bridge.md) — the default-deny Sandbox-to-GitHub App boundary.
 - [Architecture map](./architecture-map.md) — deployed services, prepared glue, trust boundaries, ordering, and remaining proof.
-- [Legacy NanoCodex note](./next-architecture-nanocodex.md) — the superseded GitHub Actions candidate experiment.
 - [Design principles](./design-principles.md) — the product experience this system is trying to protect.
+- [Interface system](./design.md) — the token contract and simplified host-versus-overlay composition.
 - [Targeting and integration](./targeting.md) — the click-to-target envelope and the intended installable harness.
 - [Overlay canvas](./overlay-canvas.md) — the summonable annotation control, feedback protocol, and tldraw adapter boundary.
 

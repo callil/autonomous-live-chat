@@ -12,7 +12,6 @@ import {
 
 const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
 const dockerfile = await readFile(new URL("../Dockerfile", import.meta.url), "utf8");
-const planner = await readFile(new URL("../../os-agent-orchestrator/src/index.ts", import.meta.url), "utf8");
 const entrypoint = new URL("../agent-entrypoint.mjs", import.meta.url);
 
 const instructions = buildNanocodexInstructions({
@@ -25,6 +24,9 @@ const instructions = buildNanocodexInstructions({
 for (const capability of ["normal terminal", "filesystem", "GitHub CLI", "gh stack", "package managers", "migration tools", "Wrangler", "CI is the merge"]) assert.match(instructions, new RegExp(capability, "i"));
 assert.match(instructions, /Do not restrict yourself to a file or command allowlist/u);
 assert.match(instructions, /Never read, print, copy, commit, or expose credentials/u);
+assert.match(instructions, /read-only subagents proactively and in parallel/u);
+assert.match(instructions, /parent agent alone owns edits, Git, branches, and the stack/u);
+assert.equal(NANOCODEX_DEFAULT_MODEL, "gpt-5.6-luna");
 
 const bounded = normalizeAgentSummary({
 	model: NANOCODEX_DEFAULT_MODEL,
@@ -57,9 +59,6 @@ assert.match(source, /base64Url\(digest\)\.slice\(0, 32\)/u);
 assert.ok(`ah-nc030-gs010-${"x".repeat(32)}`.length <= 63, "derived Cloudflare Sandbox identities stay within the platform limit");
 assert.match(source, /NANOCODEX_EXECUTION_TIMEOUT_MS = 720_000/u, "agent execution stays below Cloudflare's 15-minute alarm limit");
 for (const obsolete of ["DOC_AGENT_TOOLS", "safeDocumentationPatch", "runDocumentationAgent", "add -- README.md docs"]) assert.doesNotMatch(source, new RegExp(obsolete.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"));
-assert.match(planner, /plan: \{ change: \{ kind: "repository-task" \} \}/u);
-assert.doesNotMatch(planner, /documentation-only|outside README\.md and docs/u);
-
 assert.match(dockerfile, new RegExp(`NANOCODEX_VERSION=${NANOCODEX_VERSION}`, "u"));
 assert.match(dockerfile, /GH_VERSION=2\.97\.0/u);
 assert.match(dockerfile, /GH_STACK_VERSION=0\.1\.0/u);
@@ -75,7 +74,7 @@ const directory = await mkdtemp(join(tmpdir(), "nanocodex-contract-"));
 const mock = join(directory, "nanocodex");
 await writeFile(mock, `#!/usr/bin/env node
 const args = process.argv.slice(2);
-if (args[0] !== "run" || !args.includes("--cwd") || !args.includes("--thinking") || !args.includes("--instructions") || !args.includes("--rollouts") || !args.includes("--store-responses") || !args.includes("--web-search") || !args.includes("--image-generation") || args.includes("--model") || args.at(-2) !== "--" || args.at(-1) !== "Implement task") process.exit(3);
+if (args[0] !== "run" || !args.includes("--cwd") || !args.includes("--thinking") || args[args.indexOf("--thinking") + 1] !== "low" || !args.includes("--instructions") || !args.includes("--rollouts") || !args.includes("--store-responses") || !args.includes("--web-search") || args[args.indexOf("--web-search") + 1] !== "false" || !args.includes("--image-generation") || !args.includes("--subagents") || args[args.indexOf("--subagents") + 1] !== "true" || args.includes("--model") || args.at(-2) !== "--" || args.at(-1) !== "Implement task") process.exit(3);
 process.stdout.write(JSON.stringify({type:"model.call.completed",payload:{response_id:"resp_safe",content:"SECRET_TRANSCRIPT"}})+"\\n");
 process.stdout.write(JSON.stringify({type:"tool.call",payload:{tool:"terminal.exec",arguments:{token:"SECRET_TOKEN"}}})+"\\n");
 process.stdout.write(JSON.stringify({type:"run.completed",payload:{answer:"SECRET_ANSWER"}})+"\\n");

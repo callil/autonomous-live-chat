@@ -33,10 +33,10 @@ The intended product is an installable App Harness adapter, not a copy of this c
 
 A hosted configurator may later create the project configuration, connect the guarded delivery policy, and verify the adapter without asking users to hand-edit internal transport settings. It must not grant an agent broad source, secret, or deployment access merely because the target overlay is installed.
 
-## Current boundary and future handoff
+## Current handoff
 
-Today, target mode enriches the Durable Object request ledger and public activity record. It does not broaden the deterministic fallback: only the existing exact accent and empty-state transformations can execute. Out-of-policy targeted requests still require human review.
+Target mode enriches the Durable Object request ledger and public activity record. Every bounded text request follows the same direct persistent Cloudflare OS workspace handoff. The target helps the operator locate intent; it does not replace the original request or grant source, repository, command, or credential authority.
 
-The Cloudflare OS handoff will pass the request, sanitized target envelope, and private target-to-source provenance manifest to an isolated Sandbox session. Gatekeepers, CI, and the Durable Object remain the capability, validation, policy, and audit authorities. See [Cloudflare OS provider](./cloudflare-os-provider.md).
+The Cloudflare OS message includes the request and sanitized target envelope. The OS workspace can delegate implementation only through the typed App Harness Gatekeeper capability, after which deterministic code resolves the original durable request and launches the isolated child. See [Cloudflare OS provider](./cloudflare-os-provider.md).
 
-Freehand marks and comments are a separate feedback channel; see [Overlay canvas](./overlay-canvas.md). They create durable intake items for triage. A comment that exactly matches the already-approved fallback grammar is the narrow exception: it is dispatched as a guarded autonomous request. Other comments and all drawings remain recorded feedback until the Cloudflare OS provider is connected.
+Text comments are implementation requests and use the same OS path. Freehand drawings remain public visual context and receive an issue, but need a text request before autonomous implementation starts. See [Overlay canvas](./overlay-canvas.md).
