@@ -289,6 +289,7 @@ export class OsExecutionBridge extends WorkerEntrypoint<RuntimeEnv, OsExecutionB
 export class ChatRoom extends DurableObject<RuntimeEnv> {
 	constructor(ctx: DurableObjectState, env: RuntimeEnv) {
 		super(ctx, env);
+		this.ctx.blockConcurrencyWhile(() => this.scheduleCoordinatorAlarm());
 	}
 
 	[restore](params: unknown): RpcTarget {
@@ -405,7 +406,10 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		const existingEffect = await this.ctx.storage.get<CoordinatorEffect>(this.outboxKey(effectId));
 		const disposition = osExecutionDisposition({ terminal: job.stage === "terminal", existingEffect: Boolean(existingEffect), jobStage: job.stage });
 		if (disposition === "terminal") return { accepted: false, state: "terminal" };
-		if (disposition === "duplicate") return { accepted: true, state: workItem.osNativeGit?.state ?? job.stage };
+		if (disposition === "duplicate") {
+			await this.scheduleCoordinatorAlarm();
+			return { accepted: true, state: workItem.osNativeGit?.state ?? job.stage };
+		}
 		const effect = createCoordinatorEffect({ id: effectId, jobId: job.id, workItemId: workItem.id, kind: "observe-main", now });
 		workItem.osNativeGit ??= {
 			jobId: `os-${workItem.id}-g1`,
@@ -446,8 +450,8 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		});
 		await Promise.all([this.saveWorkflow(workflow), this.saveWorkItem(workItem)]);
 		this.broadcastWorkflow(workflow);
-		await this.appendGitHubIssueStatus(workItem, "Cloudflare OS approved the repository task; main observation and native Git execution are queued.");
 		await this.ctx.storage.setAlarm(now + 25);
+		this.ctx.waitUntil(this.appendGitHubIssueStatus(workItem, "Cloudflare OS approved the repository task; main observation and native Git execution are queued."));
 		return { accepted: true, state: "queued" };
 	}
 
