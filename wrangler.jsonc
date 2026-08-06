@@ -13,6 +13,12 @@
 				"ChatRoom"
 			],
 			"tag": "v1"
+		},
+		{
+			"new_sqlite_classes": [
+				"OsWorkspaceResponseTarget"
+			],
+			"tag": "v2"
 		}
 	],
 	"assets": {
@@ -46,6 +52,10 @@
 			{
 				"class_name": "ChatRoom",
 				"name": "CHAT_ROOM"
+			},
+			{
+				"class_name": "OsWorkspaceResponseTarget",
+				"name": "OS_RESPONSE_TARGETS"
 			}
 		]
 	},

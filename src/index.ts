@@ -1,4 +1,4 @@
-import { DurableObject, RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
+import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import {
 	applyCoordinatorCallback,
 	blockCoordinatorStack,
@@ -178,6 +178,7 @@ type RuntimeEnv = Omit<Env, "OS_NATIVE_GIT_RUNNER" | "OS_WORKSPACE"> & {
 	OS_NATIVE_GIT_RUNNER?: Fetcher;
 	OS_NATIVE_GIT_RUNNER_SECRET?: string;
 	OS_WORKSPACE?: unknown;
+	OS_RESPONSE_TARGETS: DurableObjectNamespace<OsWorkspaceResponseTarget>;
 	GITHUB_IDENTITY_BRIDGE?: Fetcher;
 	APP_HARNESS_IDENTITY_SECRET?: string;
 };
@@ -195,6 +196,7 @@ type OsWorkspaceGateway = {
 };
 
 type OsWorkspaceResponse = { text: string; idempotencyKey: string };
+type OsWorkspaceResponseTargetState = { room: string; workItemId: string };
 type OsExecutionBridgeProps = { source: string };
 type OsExecutionRequest = { workItemId: string; issueNumber: number };
 
@@ -245,17 +247,22 @@ const PHASES: ReadonlySet<WorkflowPhase> = new Set([
  * that response to one durable App Harness work item without parsing model
  * prose for identifiers.
  */
-class OsWorkspaceResponseTarget extends RpcTarget {
-	constructor(private readonly env: RuntimeEnv) {
-		super();
+export class OsWorkspaceResponseTarget extends DurableObject<RuntimeEnv> {
+	async arm(target: OsWorkspaceResponseTargetState): Promise<void> {
+		if (!/^[a-zA-Z0-9_-]{1,64}$/u.test(target.room) || !isUuid(target.workItemId)) {
+			throw new Error("Cloudflare OS response target is invalid.");
+		}
+		await this.ctx.storage.put("target", target);
 	}
 
 	async onGadgetResponse(response: OsWorkspaceResponse): Promise<void> {
+		const target = await this.ctx.storage.get<OsWorkspaceResponseTargetState>("target");
+		if (!target) throw new Error("Cloudflare OS response target is not armed.");
 		const prefix = "app-harness:";
 		if (!response.idempotencyKey.startsWith(prefix)) throw new Error("Cloudflare OS response target source is invalid.");
 		const workItemId = response.idempotencyKey.slice(prefix.length);
-		if (!isUuid(workItemId)) throw new Error("Cloudflare OS response target work item is invalid.");
-		await this.env.CHAT_ROOM.getByName("main").receiveOsWorkspaceResponse(workItemId, response);
+		if (!isUuid(workItemId) || workItemId !== target.workItemId) throw new Error("Cloudflare OS response target work item is invalid.");
+		await this.env.CHAT_ROOM.getByName(target.room).receiveOsWorkspaceResponse(workItemId, response);
 	}
 }
 
@@ -741,9 +748,10 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 			stackId: `stack-${workItem.id}`,
 			generation: 1,
 		};
-		// OS persists and duplicates this callback as a native RPC capability. Pass
-		// the RpcTarget the contract expects, not a WorkerEntrypoint binding proxy.
-		const responseTarget = new OsWorkspaceResponseTarget(this.env);
+		// OS persists this callback for delivery retries, so use a named Durable
+		// Object stub: the smallest persistent RPC capability Cloudflare provides.
+		const responseTarget = this.env.OS_RESPONSE_TARGETS.getByName(workItem.id);
+		await responseTarget.arm({ room: "main", workItemId: workItem.id });
 		const submission = createOsWorkspaceSubmission({
 			workItemId: workItem.id,
 			issue: workItem.githubIssue,
