@@ -4,6 +4,7 @@
 	"private": true,
 	"type": "module",
 	"scripts": {
+		"test:composer": "node scripts/test-message-composer.mjs",
 		"test:stack": "node scripts/test-stack-scheduler.mjs",
 		"test:native-git-preflight": "node scripts/test-os-native-git-preflight.mjs",
 		"test:os-provider-bridge": "node scripts/test-os-provider-bridge.mjs",

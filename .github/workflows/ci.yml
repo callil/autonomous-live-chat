@@ -32,6 +32,7 @@ jobs:
         run: |
           npm run cf-typegen
           npx tsc --noEmit
+          npm run test:composer
           npm run test:stack
           npm run test:native-git-preflight
           npm run test:os-provider-bridge

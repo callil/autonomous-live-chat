@@ -397,12 +397,23 @@ textarea::placeholder {
   stroke-width: 1.75;
 }
 
-.hint {
+.composer-meta {
+  display: flex;
   width: min(100%, var(--composer-width));
+  justify-content: space-between;
+  gap: var(--space-4);
   margin: var(--space-2) auto var(--space-0);
   color: var(--color-text-tertiary);
   font-size: var(--type-caption);
-  text-align: center;
+}
+
+.message-count {
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+}
+
+.message-count.warning {
+  color: var(--color-warning);
 }
 
 /* App Harness is a removable layer above the host, never host navigation. */
