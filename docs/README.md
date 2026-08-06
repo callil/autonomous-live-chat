@@ -1,18 +1,13 @@
-# App Harness docs
+# App Harness documentation
 
-App Harness is a small but real experiment in software that can evolve in public.
+Read these in order:
 
-- [Canonical goal](./canonical-goal.md) — the end-to-end product contract and acceptance chain.
-- [Project intent](./project-intent.md) — why this product exists and what the chat MVP proves.
-- [How it works today](./how-it-works-today.md) — the deployed coordination and delivery path.
-- [Current autonomy and policy](./current-autonomy-and-policy.md) — full-agent autonomy, operating guidelines, and capability boundaries.
-- [Cloudflare OS provider](./cloudflare-os-provider.md) — the default capability/execution architecture and its real deployment boundary.
-- [Stacked PR scheduling](./stacked-prs.md) — the dependency model that prevents autonomous rebase races.
-- [Native Git credential bridge](./native-git-credential-bridge.md) — the default-deny Sandbox-to-GitHub App boundary.
-- [Architecture map](./architecture-map.md) — deployed services, prepared glue, trust boundaries, ordering, and remaining proof.
-- [Design principles](./design-principles.md) — the product experience this system is trying to protect.
-- [Interface system](./design.md) — the token contract and simplified host-versus-overlay composition.
-- [Targeting and integration](./targeting.md) — the click-to-target envelope and the intended installable harness.
-- [Overlay canvas](./overlay-canvas.md) — the summonable annotation control, feedback protocol, and tldraw adapter boundary.
+1. [Product](./product.md) — intent, experience, and definition of success.
+2. [Architecture](./architecture.md) — components, data flow, repository layout, and stacked delivery.
+3. [React integration](./integration.md) — installing the overlay in another app.
+4. [Operations](./operations.md) — local checks, deployments, credentials, and recovery.
+5. [Safety](./security.md) — full autonomy with durable, observable guardrails.
+6. [Interface system](./design.md) — visual tokens and host/overlay design rules.
+7. [Code review](./code-review.md) — findings fixed in the repository split and remaining debt.
 
-These documents describe the deployed system, not a roadmap disguised as implementation. When reality changes, update the relevant page in the same change.
+The documents describe what exists. Proposed work is labeled as such.

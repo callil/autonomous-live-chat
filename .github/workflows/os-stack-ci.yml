@@ -43,7 +43,7 @@ jobs:
         id: candidate
         env:
           EXPECTED_PARENT: main
-        run: node scripts/os-stack-gate.mjs verify-pr
+        run: node infra/scripts/os-stack-gate.mjs verify-pr
       - name: Publish signed pending status before candidate execution
         env:
           ATTESTATION_SECRET: ${{ secrets.AUTONOMY_CALLBACK_SECRET }}
@@ -51,7 +51,7 @@ jobs:
           EXPECTED_HEAD: ${{ steps.candidate.outputs.head_sha }}
           PR: ${{ steps.candidate.outputs.pull_request }}
           VALIDATION_STATE: pending
-        run: node scripts/os-stack-gate.mjs publish-status
+        run: node infra/scripts/os-stack-gate.mjs publish-status
 
   validate_candidate:
     name: validate-candidate
@@ -83,16 +83,7 @@ jobs:
       - name: Install candidate dependencies without privileged secrets
         run: npm ci
       - name: Run mandatory candidate baseline
-        run: |
-          npm run cf-typegen
-          npx tsc --noEmit
-          npm run test:stack
-          npm run test:native-git-preflight
-          npm run test:os-provider-bridge
-          npm run test:coordinator
-          git diff --check
-      - name: Verify NanoCodex runner boundary
-        run: npm --prefix os-native-git-runner run test:runner-contract
+        run: npm run check
 
   publish_validation:
     name: publish-validation
@@ -120,7 +111,7 @@ jobs:
       - name: Publish signed immutable validation result
         env:
           VALIDATION_STATE: ${{ needs.validate_candidate.result == 'success' && 'success' || 'failure' }}
-        run: node scripts/os-stack-gate.mjs publish-status
+        run: node infra/scripts/os-stack-gate.mjs publish-status
       - name: Comment with successful validation evidence
         if: needs.validate_candidate.result == 'success'
         continue-on-error: true

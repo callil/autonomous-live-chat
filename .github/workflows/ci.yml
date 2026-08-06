@@ -29,17 +29,4 @@ jobs:
       - name: Install exact dependencies
         run: npm ci
       - name: Verify Worker, orchestration, stack, and agent contracts
-        run: |
-          npm run cf-typegen
-          npx tsc --noEmit
-          npm run test:composer
-          npm run test:stack
-          npm run test:native-git-preflight
-          npm run test:os-provider-bridge
-          npm run test:coordinator
-          npm --prefix os-native-git-runner run cf-typegen
-          npm --prefix os-native-git-runner run typecheck
-          npm --prefix os-native-git-runner run test:runner-contract
-          npm --prefix os-git-credential-proxy run cf-typegen
-          npm --prefix os-git-credential-proxy run typecheck
-          git diff --check
+        run: npm run check

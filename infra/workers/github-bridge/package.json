@@ -1,0 +1,14 @@
+{
+  "name": "@app-harness/github-bridge",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "cf-typegen": "wrangler types",
+    "typecheck": "tsc --noEmit",
+    "test": "node scripts/test-github-app-identity-bridge.mjs"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "wrangler": "^4.119.0"
+  }
+}
