@@ -262,21 +262,23 @@ function allowedDocPath(path: unknown): path is string {
 }
 
 /** Model gets no shell/network tool. It can only call this fixed repository tool set. */
-async function runDocumentationAgent(session: Awaited<ReturnType<typeof createSessionAfterRuntimeUpdate>>, checkout: string, task: string, env: Env): Promise<{ ok: boolean; audit: ToolAudit[]; classification?: string }> {
-	if (!env.OPENAI_API_KEY || !env.MODEL_ID) return { ok: false, audit: [], classification: "agent-credential-unavailable" };
+async function runDocumentationAgent(session: Awaited<ReturnType<typeof createSessionAfterRuntimeUpdate>>, checkout: string, task: string, env: Env): Promise<{ ok: boolean; audit: ToolAudit[]; responseIds: string[]; model: string; classification?: string }> {
+	if (!env.OPENAI_API_KEY || !env.MODEL_ID) return { ok: false, audit: [], responseIds: [], model: env.MODEL_ID, classification: "agent-credential-unavailable" };
 	const audit: ToolAudit[] = [];
+	const responseIds: string[] = [];
 	const read = new Set<string>();
 	let inspectedAfterWrite = false;
 	let checkedAfterWrite = false;
 	let input: unknown[] = [{ role: "user", content: [{ type: "input_text", text: `Update the repository documentation for this request: ${task}. First inspect real files. You may change README.md or docs/*.md only. Use tools; do not explain outside tools.` }] }];
 	for (let round = 0; round < 8; round += 1) {
 		let response: Response;
-		try { response = await fetch("https://api.openai.com/v1/responses", { method: "POST", headers: { Authorization: `Bearer ${env.OPENAI_API_KEY}`, "Content-Type": "application/json" }, body: JSON.stringify({ model: env.MODEL_ID, store: false, input, tools: DOC_AGENT_TOOLS, tool_choice: "required" }) }); } catch { return { ok: false, audit, classification: "agent-request-failed" }; }
-		if (!response.ok) return { ok: false, audit, classification: "agent-request-failed" };
-		const body = await response.json() as { output?: Array<Record<string, unknown>> };
+		try { response = await fetch("https://api.openai.com/v1/responses", { method: "POST", headers: { Authorization: `Bearer ${env.OPENAI_API_KEY}`, "Content-Type": "application/json" }, body: JSON.stringify({ model: env.MODEL_ID, store: false, input, tools: DOC_AGENT_TOOLS, tool_choice: "required" }) }); } catch { return { ok: false, audit, responseIds, model: env.MODEL_ID, classification: "agent-request-failed" }; }
+		if (!response.ok) return { ok: false, audit, responseIds, model: env.MODEL_ID, classification: "agent-request-failed" };
+		const body = await response.json() as { id?: unknown; output?: Array<Record<string, unknown>> };
+		if (typeof body.id === "string" && /^[A-Za-z0-9_-]{1,120}$/u.test(body.id)) responseIds.push(body.id);
 		const responseOutput = body.output ?? [];
 		const calls = responseOutput.filter((item) => item.type === "function_call");
-		if (!calls.length) return { ok: false, audit, classification: "agent-no-tool-call" };
+		if (!calls.length) return { ok: false, audit, responseIds, model: env.MODEL_ID, classification: "agent-no-tool-call" };
 		const outputs: unknown[] = [];
 		for (const call of calls) {
 			const name = call.name; let args: Record<string, unknown> = {}; try { args = JSON.parse(String(call.arguments ?? "{}")) as Record<string, unknown>; } catch { /* rejected below */ }
@@ -296,11 +298,11 @@ async function runDocumentationAgent(session: Awaited<ReturnType<typeof createSe
 			} else value = { ok: false, error: "Unknown or invalid tool call." };
 			audit.push({ name: typeof name === "string" ? name : "invalid", ok: value.ok === true });
 			outputs.push({ type: "function_call_output", call_id: call.call_id, output: JSON.stringify(value) });
-			if (name === "finish" && value.ok) return { ok: true, audit };
+			if (name === "finish" && value.ok) return { ok: true, audit, responseIds, model: env.MODEL_ID };
 		}
 		input = [...input, ...responseOutput, ...outputs];
 	}
-	return { ok: false, audit, classification: "agent-round-limit" };
+	return { ok: false, audit, responseIds, model: env.MODEL_ID, classification: "agent-round-limit" };
 }
 
 /**
@@ -414,7 +416,7 @@ export default {
 				}
 
 				const agent = await runDocumentationAgent(session, checkoutDirectory, candidate.change.request, env);
-				if (!agent.ok) return Response.json({ jobId: job.jobId, state: "candidate-failed", classification: agent.classification ?? "agent-tool-loop-failed", toolAudit: agent.audit });
+				if (!agent.ok) return Response.json({ jobId: job.jobId, state: "candidate-failed", classification: agent.classification ?? "agent-tool-loop-failed", agent: { model: agent.model, responseIds: agent.responseIds, tools: agent.audit.map((entry) => entry.name) } });
 
 				const commandStages: Array<[string, string, Record<string, string> | undefined]> = [
 					["branch", `git -C ${checkoutDirectory} checkout -b ${candidate.stack.branch}`, undefined],
@@ -453,6 +455,7 @@ export default {
 						parentBranch: candidate.stack.parentBranch,
 						pullRequestBase: candidate.stack.pullRequestBase,
 					},
+					agent: { model: agent.model, responseIds: agent.responseIds, tools: agent.audit.map((entry) => entry.name) },
 				});
 			} finally {
 				await destroySandboxSafely(sandbox, sessionId);

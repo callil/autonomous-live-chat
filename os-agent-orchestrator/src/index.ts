@@ -66,10 +66,9 @@ function planSchema() {
 	return {
 		type: "object",
 		additionalProperties: false,
-		required: ["decision", "patch", "rationale", "classification"],
+		required: ["decision", "rationale", "classification"],
 		properties: {
 			decision: { type: "string", enum: ["approved", "needs_review"] },
-			patch: { type: ["string", "null"], maxLength: 12000 },
 			rationale: { type: "string", maxLength: 240 },
 			classification: { type: "object", additionalProperties: false, required: ["changeType", "scope", "risk", "affectedSurface", "reversible", "executionEligibility", "ciProfile"], properties: {
 				changeType: { type: "string", enum: ["visual", "content", "data", "behavior", "infrastructure"] },
@@ -84,18 +83,18 @@ function planSchema() {
 	};
 }
 
-function validatedPlan(value: unknown): ({ decision: "approved"; patch: string; rationale: string } | { decision: "needs_review"; rationale: string }) & { classification: Classification } | null {
+function validatedPlan(value: unknown): ({ decision: "approved"; rationale: string } | { decision: "needs_review"; rationale: string }) & { classification: Classification } | null {
 	if (!value || typeof value !== "object") return null;
 	const plan = value as Record<string, unknown>;
 	if (typeof plan.rationale !== "string" || !plan.rationale.trim() || plan.rationale.length > 240 || !plan.classification || typeof plan.classification !== "object") return null;
 	const classification = plan.classification as Record<string, unknown>;
 	if (!["visual", "content", "data", "behavior", "infrastructure"].includes(classification.changeType as string) || !["localized", "bounded", "broad"].includes(classification.scope as string) || !["low", "medium", "high"].includes(classification.risk as string) || !["ui", "copy", "data", "behavior", "infrastructure"].includes(classification.affectedSurface as string) || typeof classification.reversible !== "boolean" || !["eligible", "needs_review"].includes(classification.executionEligibility as string) || !["visual", "content", "behavior", "data", "infrastructure"].includes(classification.ciProfile as string)) return null;
 	const safeClassification = classification as unknown as Classification;
-	if (plan.decision === "approved" && typeof plan.patch === "string" && plan.patch.startsWith("--- a/") && plan.patch.includes("+++ b/")) {
+	if (plan.decision === "approved") {
 		if (safeClassification.executionEligibility !== "eligible" || safeClassification.changeType !== "content" || safeClassification.scope !== "localized" || safeClassification.risk !== "low" || !safeClassification.reversible || safeClassification.ciProfile !== "content") return null;
-		return { decision: "approved", patch: plan.patch, rationale: plan.rationale.trim(), classification: safeClassification };
+		return { decision: "approved", rationale: plan.rationale.trim(), classification: safeClassification };
 	}
-	if (plan.decision === "needs_review" && plan.patch === null) return { decision: "needs_review", rationale: plan.rationale.trim(), classification: safeClassification };
+	if (plan.decision === "needs_review") return { decision: "needs_review", rationale: plan.rationale.trim(), classification: safeClassification };
 	return null;
 }
 
@@ -120,9 +119,9 @@ function responseText(value: unknown): string | null {
 async function askModel(manifest: SafeManifest, env: Env): Promise<Response> {
 	const instructions = [
 		"You are the App Harness Cloudflare OS planning agent.",
-		"You are allowed to propose one small documentation-only change in README.md or a file below docs/. Return a standard unified diff with paths beginning a/ and b/.",
-		"Never touch source code, workflows, package files, credentials, configuration, lockfiles, or any file outside README.md and docs/. Do not emit shell commands or prose outside the JSON fields.",
-		"If the request is not an unambiguous, localized documentation update, return needs_review with patch null.",
+		"Classify whether this is an unambiguous, localized documentation-only request. You never write or propose a patch.",
+		"Never approve source code, workflows, package files, credentials, configuration, lockfiles, or a request outside README.md and docs/.",
+		"If the request is not an unambiguous, localized documentation update, return needs_review.",
 		"An approved change must classify as content, localized, low risk, affectedSurface ui or copy, reversible true, execution eligible, and content CI profile. Classification can never waive the file policy.",
 		"Do not include user data beyond a brief rationale.",
 	].join(" ");
@@ -160,7 +159,7 @@ async function askModel(manifest: SafeManifest, env: Env): Promise<Response> {
 			model: { id: result.id, model: env.MODEL_ID },
 			rationale: plan.rationale,
 			classification: plan.classification,
-			plan: { change: { kind: "documentation-patch", patch: plan.patch } },
+			plan: { change: { kind: "documentation-task" } },
 		});
 	} catch {
 		return Response.json({ state: "agent-unavailable", classification: "model-response-unavailable" }, { status: 502 });

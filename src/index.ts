@@ -207,7 +207,7 @@ function acceptedOsAgentPlan(value: unknown, request: string): { model: { id: st
 	const classification = response.classification as Record<string, unknown> | null;
 	if (!change || typeof change !== "object") return null;
 	const candidate = change as Record<string, unknown>;
-	if (!classification || typeof model.id !== "string" || typeof model.model !== "string" || candidate.kind !== "documentation-patch" || !["visual", "content", "data", "behavior", "infrastructure"].includes(classification.changeType as string) || classification.changeType !== "content" || classification.scope !== "localized" || classification.risk !== "low" || !["ui", "copy"].includes(classification.affectedSurface as string) || classification.reversible !== true || classification.executionEligibility !== "eligible" || classification.ciProfile !== "content") return null;
+	if (!classification || typeof model.id !== "string" || typeof model.model !== "string" || candidate.kind !== "documentation-task" || !["visual", "content", "data", "behavior", "infrastructure"].includes(classification.changeType as string) || classification.changeType !== "content" || classification.scope !== "localized" || classification.risk !== "low" || !["ui", "copy"].includes(classification.affectedSurface as string) || classification.reversible !== true || classification.executionEligibility !== "eligible" || classification.ciProfile !== "content") return null;
 	return {
 		model: { id: model.id, model: model.model },
 		plan: { kind: "documentation-task", request: request.slice(0, 500) },
