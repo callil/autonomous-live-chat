@@ -601,6 +601,10 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		workItem.osNativeGit.attempts = (workItem.osNativeGit.attempts ?? 0) + 1;
 		this.transitionWorkItem(workItem, "building", "Cloudflare OS isolated native Git runner started the durable candidate job.");
 		await Promise.all([this.ctx.storage.put(WORKFLOW_KEY, workflow), this.saveWorkItems(workItems)]);
+		// Schedule the watchdog before awaiting a cross-Worker call. If the
+		// invocation is interrupted after this durable write, the lease expires
+		// into a resumable planned job instead of becoming a zombie "running" job.
+		await this.ctx.storage.setAlarm(workItem.osNativeGit.startedAt + OS_RUNNER_LEASE_MS + 50);
 
 		let response: Response;
 		try {
