@@ -50,6 +50,15 @@ function safeJob(input: NativeGitJob, env: Env): { jobId: string; repository: st
 	return { jobId: input.jobId, repository: input.repository, generation: input.generation as number };
 }
 
+function classifyGitTransportFailure(stderr: string): "proxy-unreachable" | "proxy-authorization-rejected" | "proxy-upstream-unavailable" | "git-transport-failed" {
+	// The raw transport output can include request context. Keep it inside the
+	// Sandbox and expose only a small, auditable category to the coordinator.
+	if (/could not resolve host|name or service not known|failed to connect|connection timed out/iu.test(stderr)) return "proxy-unreachable";
+	if (/http (?:401|403|404)\b|authentication failed|could not read username/iu.test(stderr)) return "proxy-authorization-rejected";
+	if (/http 5\d\d\b|credential bridge unavailable|service unavailable/iu.test(stderr)) return "proxy-upstream-unavailable";
+	return "git-transport-failed";
+}
+
 /**
  * A deliberately tiny production Sandbox runner. The only currently live
  * operation is a fixed command probe, used to verify isolated shell execution
@@ -125,7 +134,7 @@ export default {
 						jobId: job.jobId,
 						state: "checkout-failed",
 						exitCode: clone.exitCode,
-						classification: "git-transport-failed",
+						classification: classifyGitTransportFailure(clone.stderr),
 					});
 				}
 				const head = await session.exec("git -C /workspace/repository rev-parse HEAD", { timeout: 15_000 });
