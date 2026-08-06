@@ -32,6 +32,10 @@
 		{
 			"binding": "OS_AGENT_ORCHESTRATOR",
 			"service": "app-harness-os-orchestrator"
+		},
+		{
+			"binding": "GITHUB_IDENTITY_BRIDGE",
+			"service": "app-harness-os-git-proxy"
 		}
 	],
 	"durable_objects": {

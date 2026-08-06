@@ -1,4 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
+import { createGithubIdentityClient, type GithubModelClassification } from "./github-identity-client.js";
 import { classifyOsRunnerResponse, createOsNativeGitJob, createOsPlanningManifest } from "./os-provider-bridge.js";
 
 type ChatMessage = {
@@ -135,6 +136,7 @@ type WorkflowCallback = {
 	phase?: unknown;
 	message?: unknown;
 	result?: unknown;
+	deploymentUrl?: unknown;
 };
 
 type RuntimeEnv = Omit<Env, "OS_NATIVE_GIT_PROVIDER" | "OS_NATIVE_GIT_RUNNER" | "OS_AGENT_ORCHESTRATOR"> & {
@@ -145,6 +147,8 @@ type RuntimeEnv = Omit<Env, "OS_NATIVE_GIT_PROVIDER" | "OS_NATIVE_GIT_RUNNER" | 
 	OS_AGENT_ORCHESTRATOR?: Fetcher;
 	OS_AGENT_ORCHESTRATOR_SECRET?: string;
 	OS_NATIVE_GIT_PROVIDER?: string;
+	GITHUB_IDENTITY_BRIDGE?: Fetcher;
+	APP_HARNESS_IDENTITY_SECRET?: string;
 };
 
 const MAX_MESSAGE_LENGTH = 2_000;
@@ -676,20 +680,11 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 
 	private async applyOsClassificationLabels(workItem: HarnessWorkItem, classification: OsModelClassification): Promise<void> {
 		if (!workItem.githubIssue) return;
-		const labels = [
-			`change-${classification.changeType}`,
-			`scope-${classification.scope}`,
-			`risk-${classification.risk}`,
-			`surface-${classification.affectedSurface}`,
-			classification.reversible ? "reversible-yes" : "reversible-no",
-			`execution-${classification.executionEligibility}`,
-			`ci-${classification.ciProfile}`,
-		];
 		try {
-			await fetch(`https://api.github.com/repos/${this.env.GITHUB_REPOSITORY}/issues/${workItem.githubIssue.number}/labels`, {
-				method: "POST",
-				headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${this.env.GITHUB_AUTOMATION_TOKEN}`, "Content-Type": "application/json", "User-Agent": "app-harness-os", "X-GitHub-Api-Version": "2022-11-28" },
-				body: JSON.stringify({ labels }),
+			await createGithubIdentityClient(this.env, { workItemId: workItem.id }).reconcileClassification({
+				issueNumber: workItem.githubIssue.number,
+				classification: "agent",
+				modelClassification: classification as GithubModelClassification,
 			});
 		} catch { /* labels improve discoverability but never alter execution authority */ }
 	}
@@ -901,33 +896,20 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 			targetDetails,
 		].filter(Boolean).join("\n");
 		try {
-			const response = await fetch(`https://api.github.com/repos/${this.env.GITHUB_REPOSITORY}/issues`, {
-				method: "POST",
-				headers: {
-					Accept: "application/vnd.github+json",
-					Authorization: `Bearer ${this.env.GITHUB_AUTOMATION_TOKEN}`,
-					"Content-Type": "application/json",
-					"User-Agent": "app-harness-autonomy",
-					"X-GitHub-Api-Version": "2022-11-28",
-				},
-				body: JSON.stringify({
-					title: `App Harness: ${workItem.summary.slice(0, 90)}`,
-					body,
-					labels: ["app-harness", handoff === "os-planning" ? "cloudflare-os-planning" : handoff === "fallback" ? "guarded-fallback" : "awaiting-coding-agent-triage"],
-				}),
+			const issue = await createGithubIdentityClient(this.env, { workItemId: workItem.id }).createIssue({
+				title: `App Harness: ${workItem.summary.slice(0, 90)}`,
+				body,
+				classification: handoff === "triage" ? "triage" : "agent",
 			});
-			if (!response.ok) throw new Error(`GitHub issue creation failed (${response.status})`);
-			const issue = (await response.json()) as { number?: unknown; html_url?: unknown };
-			if (typeof issue.number !== "number" || typeof issue.html_url !== "string") throw new Error("GitHub returned an invalid issue response");
-			workItem.githubIssue = { number: issue.number, url: issue.html_url };
+			workItem.githubIssue = { number: issue.issueNumber, url: issue.issueUrl };
 			this.transitionWorkItem(
 				workItem,
 				handoff === "os-planning" || policyApproved ? "triaged" : "needs_review",
 				handoff === "os-planning"
-					? `GitHub issue #${issue.number} created. Cloudflare OS bounded planning is next.`
+					? `GitHub issue #${issue.issueNumber} created by App Harness. Cloudflare OS bounded planning is next.`
 					: policyApproved
-						? `GitHub issue #${issue.number} created. The deterministic fallback may now start.`
-						: `GitHub issue #${issue.number} created — awaiting coding-agent triage.`,
+						? `GitHub issue #${issue.issueNumber} created by App Harness. The deterministic fallback may now start.`
+						: `GitHub issue #${issue.issueNumber} created by App Harness — awaiting coding-agent triage.`,
 			);
 			await this.saveWorkItems(workItems);
 			return true;
@@ -941,22 +923,11 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 
 	private async appendGitHubIssueStatus(workItem: HarnessWorkItem, message: string, result?: string): Promise<void> {
 		if (!workItem.githubIssue) return;
-		const details = result ? `\n\nResult: ${result}` : "";
 		try {
-			await fetch(
-				`https://api.github.com/repos/${this.env.GITHUB_REPOSITORY}/issues/${workItem.githubIssue.number}/comments`,
-				{
-					method: "POST",
-					headers: {
-						Accept: "application/vnd.github+json",
-						Authorization: `Bearer ${this.env.GITHUB_AUTOMATION_TOKEN}`,
-						"Content-Type": "application/json",
-						"User-Agent": "app-harness-autonomy",
-						"X-GitHub-Api-Version": "2022-11-28",
-					},
-					body: JSON.stringify({ body: `App Harness status: ${message}${details}` }),
-				},
-			);
+			await createGithubIdentityClient(this.env, { workItemId: workItem.id }).updateStatus({
+				issueNumber: workItem.githubIssue.number,
+				body: formatGithubStatus(workItem, message, result),
+			});
 		} catch (error) {
 			console.error("GitHub issue status update failed", error);
 		}
@@ -985,6 +956,38 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 	private broadcastPresence(): void {
 		this.broadcast({ type: "chat:presence", count: this.ctx.getWebSockets().length });
 	}
+}
+
+function githubPhaseLabel(phase: WorkItemPhase): string {
+	if (phase === "needs_review") return "Needs review";
+	return phase.charAt(0).toUpperCase() + phase.slice(1);
+}
+
+function formatGithubStatus(workItem: HarnessWorkItem, message: string, result?: string): string {
+	const progress = workItem.activity.slice(-6).map((event) => {
+		const marker = event.phase === "completed" ? "✅" : event.phase === "rejected" || event.phase === "needs_review" ? "⚠️" : event === workItem.activity.at(-1) ? "▶️" : "✓";
+		return `- ${marker} **${githubPhaseLabel(event.phase)}** — ${event.message}`;
+	});
+	const links = [
+		workItem.githubIssue ? `[Issue #${workItem.githubIssue.number}](${workItem.githubIssue.url})` : null,
+		workItem.githubPullRequestUrl ? `[Pull request](${workItem.githubPullRequestUrl})` : null,
+		result && /^https:\/\//u.test(result) ? `[Latest evidence](${result})` : null,
+	].filter((value): value is string => Boolean(value));
+	return [
+		"## App Harness · live status",
+		`**${githubPhaseLabel(workItem.phase)}** — ${message}`,
+		"",
+		"| Work | Value |",
+		"| --- | --- |",
+		`| Work item | \`${workItem.id}\` |`,
+		`| Execution | ${workItem.osNativeGit ? `Cloudflare OS · generation ${workItem.osNativeGit.generation}` : "Triage"} |`,
+		`| Artifacts | ${links.join(" · ") || "Pending"} |`,
+		"",
+		"### Progress",
+		...progress,
+		"",
+		`<sub>Updated ${new Date(workItem.updatedAt).toISOString()}. This comment is updated in place by the App Harness GitHub App.</sub>`,
+	].join("\n").slice(0, 5_900);
 }
 
 function normalizeAuthor(value: unknown): string {
@@ -1166,7 +1169,7 @@ export default {
 		const room = roomName(url.pathname);
 
 		if (request.method === "POST" && url.pathname === "/api/autonomy/callback") {
-			const { body, valid } = await validCallback(request, runtimeEnv.GITHUB_AUTOMATION_TOKEN);
+			const { body, valid } = await validCallback(request, runtimeEnv.AUTONOMY_CALLBACK_SECRET);
 			if (!valid) return new Response("Unauthorized", { status: 401 });
 			const callback = JSON.parse(body) as WorkflowCallback & { room?: unknown };
 			const callbackRoom = typeof callback.room === "string" ? roomName(`/api/rooms/${callback.room}`) : null;

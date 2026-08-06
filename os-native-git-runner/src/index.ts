@@ -211,7 +211,7 @@ async function createStackPullRequest(
 				head: candidate.stack.branch,
 				base: candidate.stack.pullRequestBase,
 				body: [
-					`Closes #${candidate.stack.issueNumber}`,
+					`Refs #${candidate.stack.issueNumber}`,
 					"",
 					"## Cloudflare OS candidate provenance",
 					`- Stack: \`${candidate.stack.stackId}\` generation ${job.generation}`,
