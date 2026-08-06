@@ -5,11 +5,11 @@ The deployed fallback is intentionally narrow. It maps exact natural-language se
 - `set accent to blue`, `green`, `purple`, or `orange`
 - `set empty state to "Your short message"` — ordinary punctuation only, up to 80 characters
 
-Any other request creates a real GitHub issue and becomes **awaiting coding-agent triage**. Raw request text is never turned into a shell command, package command, configuration write, or arbitrary source edit.
+When the Cloudflare OS provider is enabled, every bounded text request instead creates an issue labelled `cloudflare-os-planning` and is sent as a bounded manifest to the model planner. The model may approve only the accent-color candidate shape above; all other requests become **needs review** with no native Git attempt. When that provider is disabled, non-matching requests create a real GitHub issue and become **awaiting coding-agent triage**. Raw request text is never turned into a shell command, package command, configuration write, or arbitrary source edit.
 
 Target mode can make either kind of request more legible by attaching its bounded element envelope. It does not expand the allowlist or grant the fallback any ability to interpret an arbitrary target as permission to modify arbitrary code.
 
-Comments and drawings are durable intake, not a claim that freeform feedback is already self-executing. Every intake gets a linked GitHub issue and the Activity list records its actual external handoff and triage state. Only a comment that exactly matches one of the fallback sentences is dispatched to the guarded candidate/CI/deploy loop; all other comments and every drawing remain **awaiting coding-agent triage** until the Cloudflare OS provider is connected.
+Comments and drawings are durable intake, not a claim that freeform feedback is already self-executing. Every intake gets a linked GitHub issue and the Activity list records its actual external handoff and triage state. With Cloudflare OS enabled, text comments receive the same bounded planning pass; drawing-only feedback remains recorded intake. With the provider disabled, only a comment that exactly matches one of the fallback sentences is dispatched to the guarded candidate/CI/deploy loop.
 
 Hard prohibitions apply even to future agents unless an explicit policy revision is reviewed and shipped:
 

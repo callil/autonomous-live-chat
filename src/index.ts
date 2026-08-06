@@ -183,12 +183,25 @@ function acceptedOsAgentPlan(value: unknown): { model: { id: string; model: stri
 	if (response.state !== "planned" || !response.model || typeof response.model !== "object" || !response.plan || typeof response.plan !== "object" || typeof response.rationale !== "string") return null;
 	const model = response.model as Record<string, unknown>;
 	const plan = response.plan as Record<string, unknown>;
-	if (typeof model.id !== "string" || typeof model.model !== "string" || plan.kind !== "accent-color" || !["blue", "green", "purple", "orange"].includes(plan.color as string)) return null;
+	const change = plan.change;
+	if (!change || typeof change !== "object") return null;
+	const candidate = change as Record<string, unknown>;
+	if (typeof model.id !== "string" || typeof model.model !== "string" || candidate.kind !== "accent-color" || !["blue", "green", "purple", "orange"].includes(candidate.color as string)) return null;
 	return {
 		model: { id: model.id, model: model.model },
-		plan: { kind: "accent-color", color: plan.color as "blue" | "green" | "purple" | "orange" },
+		plan: { kind: "accent-color", color: candidate.color as "blue" | "green" | "purple" | "orange" },
 		rationale: response.rationale.slice(0, 240),
 	};
+}
+
+/** Return only the planner's bounded public state; never surface prompts, headers, or provider output. */
+function osPlannerFailureDetail(status: number, value: unknown): string {
+	const body = value && typeof value === "object" ? value as Record<string, unknown> : null;
+	const state = typeof body?.state === "string" && /^[a-z-]{1,48}$/u.test(body.state) ? body.state : "unknown";
+	const classification = typeof body?.classification === "string" && /^[a-z-]{1,64}$/u.test(body.classification) ? body.classification : null;
+	if (status === 401 || status === 404) return "Cloudflare OS planner authentication to its private service failed. No model or native Git action was attempted.";
+	if (state === "needs-review") return "Cloudflare OS model reviewed this request and did not approve the bounded candidate plan. No native Git action was attempted.";
+	return `Cloudflare OS planner did not produce an approved bounded plan (${classification ?? state}). No native Git action was attempted.`;
 }
 
 /**
@@ -305,16 +318,20 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		}
 
 		const now = Date.now();
+		const osProviderEnabled = this.env.OS_NATIVE_GIT_PROVIDER === "enabled";
 		const approvedComment = annotation.kind === "comment" && isPolicyApprovedFallbackRequest(annotation.text);
+		const canPlanComment = annotation.kind === "comment" && (osProviderEnabled || approvedComment);
 		const workItem = this.createWorkItem({
 			annotationId: annotation.id,
 			clientSubmissionId: normalizeSubmissionId(clientSubmissionId),
 			kind: annotation.kind,
 			summary: annotation.kind === "comment" ? annotation.text : "Freehand drawing feedback",
 			target: annotation.kind === "comment" ? annotation.target : undefined,
-			phase: approvedComment ? "received" : "needs_review",
-			message: approvedComment
-				? "Comment received. It matches the guarded fallback policy and is being queued."
+			phase: canPlanComment ? "received" : "needs_review",
+			message: osProviderEnabled && annotation.kind === "comment"
+				? "Comment received. Cloudflare OS bounded planning will decide whether it can become a candidate."
+				: approvedComment
+					? "Comment received. It matches the guarded fallback policy and is being queued."
 				: annotation.kind === "comment"
 					? "Comment recorded and awaiting agent triage. Arbitrary comments do not build themselves yet."
 					: "Drawing recorded and awaiting agent triage.",
@@ -333,8 +350,8 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		this.broadcast({ type: "harness:annotations", annotations: stored });
 		this.broadcastWorkItems(workItems);
 
-		const issueCreated = await this.ensureGitHubIssue(workItem.id, approvedComment, false);
-		if (approvedComment && annotation.kind === "comment") {
+		const issueCreated = await this.ensureGitHubIssue(workItem.id, approvedComment, false, canPlanComment && osProviderEnabled ? "os-planning" : approvedComment ? "fallback" : "triage");
+		if (canPlanComment && annotation.kind === "comment") {
 			if (issueCreated) await this.startWorkflow(socket, annotation.text, annotation.target, workItem.clientSubmissionId, workItem.id);
 		}
 	}
@@ -395,12 +412,13 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		}
 
 		const policyApproved = isPolicyApprovedFallbackRequest(request);
+		const osProviderEnabled = this.env.OS_NATIVE_GIT_PROVIDER === "enabled";
 		const workItemId = workItem.id;
-		const issueCreated = await this.ensureGitHubIssue(workItemId, policyApproved, false);
+		const issueCreated = await this.ensureGitHubIssue(workItemId, policyApproved, false, osProviderEnabled ? "os-planning" : policyApproved ? "fallback" : "triage");
 		if (!issueCreated) return;
 		workItems = await this.getWorkItems();
 		workItem = workItems.find((item) => item.id === workItemId) ?? workItem;
-		if (!policyApproved) {
+		if (!osProviderEnabled && !policyApproved) {
 			this.transitionWorkItem(
 				workItem,
 				"needs_review",
@@ -412,7 +430,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 
 		const active = await this.ctx.storage.get<WorkflowRecord>(WORKFLOW_KEY);
 		if (active && !TERMINAL_PHASES.has(active.phase)) {
-			this.transitionWorkItem(workItem, "needs_review", "A guarded run is already active. This request is recorded for human triage.");
+			this.transitionWorkItem(workItem, "needs_review", "An autonomous candidate run is already active. This request is recorded for human triage.");
 			await this.saveWorkItems(workItems);
 			socket.send(JSON.stringify({ type: "workflow:notice", message: "This room already has a change request in progress." }));
 			return;
@@ -429,12 +447,12 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 			updatedAt: now,
 			activity: [
 				{ phase: "received", message: `Request received${targetDescription ? ` for ${targetDescription}` : ""} and durably queued.`, at: now },
-				{ phase: "interpreting", message: "Checking the request against the autonomous change policy.", at: now },
+				{ phase: "interpreting", message: osProviderEnabled ? "Sending the bounded request to Cloudflare OS planning." : "Checking the request against the autonomous change policy.", at: now },
 			],
 		};
 
 		workItem.workflowId = workflow.id;
-		this.transitionWorkItem(workItem, "queued", "GitHub issue created. Candidate execution is being selected by policy.");
+		this.transitionWorkItem(workItem, "queued", osProviderEnabled ? "GitHub issue created. Cloudflare OS planning is starting." : "GitHub issue created. Candidate execution is being selected by policy.");
 		await Promise.all([this.ctx.storage.put(WORKFLOW_KEY, workflow), this.saveWorkItems(workItems)]);
 		this.broadcastWorkflow(workflow);
 
@@ -500,12 +518,13 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		const agentPlan = acceptedOsAgentPlan(planningBody);
 		if (!agentPlan) {
 			workItem.osNativeGit.state = typeof planningBody === "object" && planningBody && "state" in planningBody && typeof (planningBody as { state?: unknown }).state === "string" ? (planningBody as { state: string }).state : "unknown";
-			this.transitionWorkItem(workItem, "needs_review", "Cloudflare OS planning agent did not return an approved bounded plan. No native Git action was attempted.");
+			const detail = osPlannerFailureDetail(planningResponse.status, planningBody);
+			this.transitionWorkItem(workItem, "needs_review", detail);
 			workflow.phase = "requires_review";
 			workflow.updatedAt = Date.now();
-			workflow.activity.push({ phase: workflow.phase, message: "Cloudflare OS planning agent did not return an approved bounded plan. No native Git action was attempted.", at: workflow.updatedAt });
+			workflow.activity.push({ phase: workflow.phase, message: detail, at: workflow.updatedAt });
 			await Promise.all([this.ctx.storage.put(WORKFLOW_KEY, workflow), this.saveWorkItems(workItems)]);
-			await this.appendGitHubIssueStatus(workItem, "Cloudflare OS planner returned no approved bounded plan; native Git was not started.");
+			await this.appendGitHubIssueStatus(workItem, detail);
 			this.broadcastWorkflow(workflow);
 			return;
 		}
@@ -669,11 +688,12 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 				workItem.id,
 				workItem.kind !== "draw" && isPolicyApprovedFallbackRequest(workItem.summary),
 				true,
+				this.env.OS_NATIVE_GIT_PROVIDER === "enabled" && workItem.kind !== "draw" ? "os-planning" : workItem.kind !== "draw" && isPolicyApprovedFallbackRequest(workItem.summary) ? "fallback" : "triage",
 			);
 		}
 	}
 
-	private async ensureGitHubIssue(workItemId: string, policyApproved: boolean, backfill: boolean): Promise<boolean> {
+	private async ensureGitHubIssue(workItemId: string, policyApproved: boolean, backfill: boolean, handoff: "os-planning" | "fallback" | "triage" = policyApproved ? "fallback" : "triage"): Promise<boolean> {
 		const workItems = await this.getWorkItems();
 		const workItem = workItems.find((item) => item.id === workItemId);
 		if (!workItem) return false;
@@ -690,9 +710,11 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 					`- Room/page: \`${target.room}${target.page}\``,
 				].join("\n")
 			: "### Safe target envelope\nNo element target was supplied (freehand drawing feedback).";
-		const classification = policyApproved
-			? "Eligible for the deterministic guarded fallback. This is not a model-driven coding-agent run."
-			: "Awaiting coding-agent triage. NanoCodex is not configured because its required OpenAI API credential is unavailable.";
+		const classification = handoff === "os-planning"
+			? "Queued for Cloudflare OS bounded planning. A model may approve only the explicitly allowlisted candidate shape; no native Git action exists until an approved plan is recorded."
+			: handoff === "fallback"
+				? "Eligible for the deterministic guarded fallback. This is not a model-driven coding-agent run."
+				: "Recorded as intake awaiting coding-agent triage. No candidate or model run has started.";
 		const body = [
 			"## App Harness intake",
 			`- Work item: \`${workItem.id}\``,
@@ -719,7 +741,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 				body: JSON.stringify({
 					title: `App Harness: ${workItem.summary.slice(0, 90)}`,
 					body,
-					labels: ["app-harness", policyApproved ? "guarded-fallback" : "awaiting-coding-agent-triage"],
+					labels: ["app-harness", handoff === "os-planning" ? "cloudflare-os-planning" : handoff === "fallback" ? "guarded-fallback" : "awaiting-coding-agent-triage"],
 				}),
 			});
 			if (!response.ok) throw new Error(`GitHub issue creation failed (${response.status})`);
@@ -728,10 +750,12 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 			workItem.githubIssue = { number: issue.number, url: issue.html_url };
 			this.transitionWorkItem(
 				workItem,
-				policyApproved ? "triaged" : "needs_review",
-				policyApproved
-					? `GitHub issue #${issue.number} created. The deterministic fallback may now start.`
-					: `GitHub issue #${issue.number} created — awaiting coding-agent triage.`,
+				handoff === "os-planning" || policyApproved ? "triaged" : "needs_review",
+				handoff === "os-planning"
+					? `GitHub issue #${issue.number} created. Cloudflare OS bounded planning is next.`
+					: policyApproved
+						? `GitHub issue #${issue.number} created. The deterministic fallback may now start.`
+						: `GitHub issue #${issue.number} created — awaiting coding-agent triage.`,
 			);
 			await this.saveWorkItems(workItems);
 			return true;
