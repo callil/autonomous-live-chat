@@ -83,9 +83,9 @@ export function osExecutionDisposition({ terminal, existingEffect, jobStage }) {
 	return "queue";
 }
 
-/** A completed OS turn without the typed execution action is an explicit no-op. */
+/** OS actions may remain pending after the agent turn while a user approves them. */
 export function osWorkspaceTurnDisposition(jobStage) {
-	return jobStage === "awaiting-os" ? "needs-review" : "delegated";
+	return jobStage === "awaiting-os" ? "awaiting-action" : "delegated";
 }
 
 /** Create the runner job exclusively from original durable request data. */

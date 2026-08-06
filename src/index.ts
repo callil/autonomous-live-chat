@@ -358,23 +358,19 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		if (workItem.osNativeGit?.workspace?.lastResponse === text) return;
 		const delegated = osWorkspaceTurnDisposition(job.stage) === "delegated";
 		if (workItem.osNativeGit?.workspace) {
-			workItem.osNativeGit.workspace.state = delegated ? "delegated" : "responded-without-execution";
+			workItem.osNativeGit.workspace.state = delegated ? "delegated" : "awaiting-action";
 			workItem.osNativeGit.workspace.lastResponse = text;
 		}
 		const now = Date.now();
-		if (!delegated) {
-			workflow.phase = "requires_review";
-			workItem.osNativeGit!.state = "needs-review";
-		}
 		workflow.updatedAt = now;
 		const status = delegated
 			? `Cloudflare OS workspace: ${text}`
-			: `Cloudflare OS completed without starting repository execution: ${text}`;
+			: `Cloudflare OS assessment: ${text} Repository execution may still be awaiting approval.`;
 		workflow.activity.push({ phase: workflow.phase, message: status.slice(0, 280), at: now });
-		this.transitionWorkItem(workItem, delegated ? workItem.phase : "needs_review", status);
+		this.transitionWorkItem(workItem, workItem.phase, status);
 		await this.ctx.storage.transaction(async (txn) => {
 			await Promise.all([
-				txn.put(this.jobKey(job.id), delegated ? job : { ...job, stage: "terminal", currentEffectId: null, lease: null, updatedAt: now }),
+				txn.put(this.jobKey(job.id), job),
 				txn.put(this.workflowKey(workflow.id), workflow),
 				txn.put(this.workItemKey(workItem.id), workItem),
 			]);
