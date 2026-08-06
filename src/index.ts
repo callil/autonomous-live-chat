@@ -128,7 +128,7 @@ type HarnessWorkItem = {
 		generation: number;
 		model?: { id: string; model: string };
 		classification?: OsModelClassification;
-		plan?: { kind: "documentation-task"; request: string };
+		plan?: { kind: "repository-task"; request: string };
 		attempts?: number;
 		startedAt?: number;
 		baseSha?: string;
@@ -235,7 +235,7 @@ type OsModelClassification = {
 	ciProfile: "visual" | "content" | "behavior" | "data" | "infrastructure";
 };
 
-function acceptedOsAgentPlan(value: unknown, request: string): { model: { id: string; model: string }; plan: { kind: "documentation-task"; request: string }; rationale: string; classification: OsModelClassification } | null {
+function acceptedOsAgentPlan(value: unknown, request: string): { model: { id: string; model: string }; plan: { kind: "repository-task"; request: string }; rationale: string; classification: OsModelClassification } | null {
 	if (!value || typeof value !== "object") return null;
 	const response = value as OsAgentPlanResponse;
 	if (response.state !== "planned" || !response.model || typeof response.model !== "object" || !response.plan || typeof response.plan !== "object" || typeof response.rationale !== "string") return null;
@@ -245,10 +245,10 @@ function acceptedOsAgentPlan(value: unknown, request: string): { model: { id: st
 	const classification = response.classification as Record<string, unknown> | null;
 	if (!change || typeof change !== "object") return null;
 	const candidate = change as Record<string, unknown>;
-	if (!classification || typeof model.id !== "string" || typeof model.model !== "string" || candidate.kind !== "documentation-task" || !["visual", "content", "data", "behavior", "infrastructure"].includes(classification.changeType as string) || classification.changeType !== "content" || classification.scope !== "localized" || classification.risk !== "low" || !["ui", "copy"].includes(classification.affectedSurface as string) || classification.reversible !== true || classification.executionEligibility !== "eligible" || classification.ciProfile !== "content") return null;
+	if (!classification || typeof model.id !== "string" || typeof model.model !== "string" || candidate.kind !== "repository-task" || !["visual", "content", "data", "behavior", "infrastructure"].includes(classification.changeType as string) || !["localized", "bounded", "broad"].includes(classification.scope as string) || !["low", "medium", "high"].includes(classification.risk as string) || !["ui", "copy", "data", "behavior", "infrastructure"].includes(classification.affectedSurface as string) || typeof classification.reversible !== "boolean" || classification.executionEligibility !== "eligible" || !["visual", "content", "behavior", "data", "infrastructure"].includes(classification.ciProfile as string)) return null;
 	return {
 		model: { id: model.id, model: model.model },
-		plan: { kind: "documentation-task", request: request.slice(0, 500) },
+		plan: { kind: "repository-task", request: request.slice(0, 500) },
 		rationale: response.rationale.slice(0, 240),
 		classification: classification as unknown as OsModelClassification,
 	};

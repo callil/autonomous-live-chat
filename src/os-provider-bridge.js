@@ -55,11 +55,11 @@ export function createOsPlanningManifest({ workItemId, issueUrl, request, target
 /**
  * Convert a model-approved, schema-validated plan into a runner job. No
  * original prose, prompt, source, or model response crosses this boundary.
- * @param {{ manifest: any, plan: { kind: "documentation-task", request: string }, parentBaseSha?: string | null }} input
+ * @param {{ manifest: any, plan: { kind: "repository-task", request: string }, parentBaseSha?: string | null }} input
  */
 export function createOsNativeGitJob({ manifest, plan, parentBaseSha = null }) {
 	if (!manifest || manifest.repository !== REPOSITORY || !Number.isInteger(manifest.issueNumber)) throw new Error("OS runner job needs a valid planning manifest.");
-	if (!plan || plan.kind !== "documentation-task" || typeof plan.request !== "string" || !plan.request.trim() || plan.request.length > 500) throw new Error("OS runner job needs an allowlisted documentation task.");
+	if (!plan || plan.kind !== "repository-task" || typeof plan.request !== "string" || !plan.request.trim() || plan.request.length > 500) throw new Error("OS runner job needs a bounded repository task.");
 	const workItemId = safeWorkItemId(manifest.workItemId);
 	const generation = safeGeneration(manifest.stack?.generation);
 	if (parentBaseSha !== null && (typeof parentBaseSha !== "string" || !SHA.test(parentBaseSha))) throw new Error("OS runner job parent base must be a full Git SHA.");
@@ -68,7 +68,7 @@ export function createOsNativeGitJob({ manifest, plan, parentBaseSha = null }) {
 		repository: REPOSITORY,
 		generation,
 		candidate: {
-			change: { kind: "documentation-task", request: plan.request },
+			change: { kind: "repository-task", request: plan.request },
 			stack: {
 				stackId: manifest.stack.id,
 				nodeId: "root",
