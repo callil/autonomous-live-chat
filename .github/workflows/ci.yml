@@ -36,7 +36,9 @@ jobs:
           npm run test:native-git-preflight
           npm run test:os-provider-bridge
           npm run test:coordinator
+          npm --prefix os-native-git-runner run cf-typegen
           npm --prefix os-native-git-runner run typecheck
           npm --prefix os-native-git-runner run test:runner-contract
+          npm --prefix os-git-credential-proxy run cf-typegen
           npm --prefix os-git-credential-proxy run typecheck
           git diff --check

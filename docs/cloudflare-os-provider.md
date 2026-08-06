@@ -10,9 +10,9 @@ After creating the public issue, the room Durable Object calls the deployed OS W
 - chat: `repository-main`
 - message idempotency/correlation: the durable App Harness work-item UUID
 - caller: the configured Access account
-- callback: a persistent exported `OsWorkspaceResponseTarget` bound to room + work item
+- callback: a persistent `ctx.restore()` stub created by the existing room and bound to the work item
 
-There is no stateless planner Worker and no second bearer secret between App Harness and OS. The service binding carries the RPC capability. OS retries the exported response target at least once; App Harness deduplicates the final text and records it as public commentary only.
+There is no stateless planner Worker, callback Worker, or second bearer secret between App Harness and OS. The service binding carries the RPC capability. The room implements Cloudflare's `[restore]` hook, so either Worker can restart before OS invokes the callback. OS retries the response target at least once; App Harness validates its work-item correlation, deduplicates the final text, and records it as public commentary only.
 
 ## Execution capability
 

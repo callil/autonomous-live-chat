@@ -33,7 +33,7 @@ flowchart LR
 
 ## Persistence and idempotency
 
-The OS workspace key is the repository and the chat key is `repository-main`, so operator context survives individual tasks. The work-item UUID is the external message key and the callback correlation key. Cloudflare OS can redeliver the response safely. The Gatekeeper capability can also be retried safely: the Durable Object creates exactly one fixed `observe-main` effect for the work item.
+The OS workspace key is the repository and the chat key is `repository-main`, so operator context survives individual tasks. The work-item UUID is the external message key and the callback correlation key. The existing room creates the callback with Cloudflare's `ctx.restore()` primitive; no callback Worker or second Durable Object is involved, and OS can redeliver the response safely after restarts. The Gatekeeper capability can also be retried safely: the Durable Object creates exactly one fixed `observe-main` effect for the work item.
 
 The NanoCodex implementation child is intentionally not persistent. It receives the current checkout and task, can parallelize read-only investigation with built-in subagents, and disappears after leaving independently verifiable Git artifacts. This keeps long-term context in OS and task execution isolated.
 
