@@ -61,7 +61,9 @@ jobs:
         run: |
           attempt=1
           while [ "$attempt" -le 36 ]; do
-            result="$(gh api "repos/${GH_REPO}/commits/${EXPECTED_HEAD}/status" --jq '.statuses[] | select(.context == "app-harness-os/validate-node") | .state' | tail -n 1)"
+            # GitHub returns status history newest-first. Use the newest
+            # matching immutable validation result, never a stale earlier run.
+            result="$(gh api "repos/${GH_REPO}/commits/${EXPECTED_HEAD}/status" --jq '.statuses[] | select(.context == "app-harness-os/validate-node") | .state' | head -n 1)"
             if [ "$result" = success ]; then exit 0; fi
             if [ -n "$result" ] && [ "$result" != null ]; then echo "validate-node concluded: $result"; exit 1; fi
             sleep 5
