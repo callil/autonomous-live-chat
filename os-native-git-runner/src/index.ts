@@ -6,8 +6,9 @@ type Env = {
 	Sandbox: DurableObjectNamespace<Sandbox>;
 	ALLOWED_REPOSITORY: string;
 	APP_HARNESS_RUNNER_SECRET: string;
-	GIT_PROXY_ASSERTION_SECRET: string;
-	GIT_PROXY_ORIGIN: string;
+	GITHUB_APP_ID: string;
+	GITHUB_APP_INSTALLATION_ID: string;
+	GITHUB_APP_PRIVATE_KEY: string;
 	NATIVE_GIT_ENABLED: string;
 };
 
@@ -26,18 +27,6 @@ function base64Url(bytes: Uint8Array): string {
 	return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/u, "");
 }
 
-async function signedProxyAssertion(job: { jobId: string; repository: string; generation: number }, secret: string): Promise<string> {
-	const payload = base64Url(encoder.encode(JSON.stringify({
-		iss: "app-harness-os-native-git",
-		jobId: job.jobId,
-		repository: job.repository,
-		generation: job.generation,
-		exp: Math.floor(Date.now() / 1000) + 300,
-	})));
-	const key = await crypto.subtle.importKey("raw", encoder.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-	return `${payload}.${base64Url(new Uint8Array(await crypto.subtle.sign("HMAC", key, encoder.encode(payload))))}`;
-}
-
 function authorized(request: Request, env: Env): boolean {
 	const value = request.headers.get("authorization");
 	return value === `Bearer ${env.APP_HARNESS_RUNNER_SECRET}`;
@@ -50,31 +39,51 @@ function safeJob(input: NativeGitJob, env: Env): { jobId: string; repository: st
 	return { jobId: input.jobId, repository: input.repository, generation: input.generation as number };
 }
 
-function classifyGitTransportFailure(stderr: string): "proxy-unreachable" | "proxy-authorization-rejected" | "proxy-upstream-unavailable" | "git-transport-failed" {
+function classifyGitTransportFailure(stderr: string): "github-unreachable" | "github-authorization-rejected" | "github-upstream-unavailable" | "git-transport-failed" {
 	// The raw transport output can include request context. Keep it inside the
 	// Sandbox and expose only a small, auditable category to the coordinator.
-	if (/could not resolve host|name or service not known|failed to connect|connection timed out/iu.test(stderr)) return "proxy-unreachable";
-	if (/http (?:401|403|404)\b|authentication failed|could not read username/iu.test(stderr)) return "proxy-authorization-rejected";
-	if (/http 5\d\d\b|credential bridge unavailable|service unavailable/iu.test(stderr)) return "proxy-upstream-unavailable";
+	if (/could not resolve host|name or service not known|failed to connect|connection timed out/iu.test(stderr)) return "github-unreachable";
+	if (/http (?:401|403|404)\b|authentication failed|could not read username/iu.test(stderr)) return "github-authorization-rejected";
+	if (/http 5\d\d\b|service unavailable/iu.test(stderr)) return "github-upstream-unavailable";
 	return "git-transport-failed";
 }
 
-type ProxyPreparation =
-	| { assertion: string; classification?: never }
-	| { assertion?: never; classification: "proxy-unreachable" | "proxy-authorization-rejected" | "proxy-upstream-unavailable" | "proxy-discovery-rejected" };
+function pemToDer(pem: string): ArrayBuffer {
+	const body = pem.replace(/-----(BEGIN|END) [A-Z ]+-----/gu, "").replace(/\s+/gu, "");
+	const bytes = Uint8Array.from(atob(body), (char) => char.charCodeAt(0));
+	return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+}
 
-async function prepareApprovedProxy(job: { jobId: string; repository: string; generation: number }, env: Env): Promise<ProxyPreparation> {
-	const assertion = await signedProxyAssertion(job, env.GIT_PROXY_ASSERTION_SECRET);
+async function appJwt(env: Env): Promise<string> {
+	const now = Math.floor(Date.now() / 1000);
+	const header = base64Url(encoder.encode(JSON.stringify({ alg: "RS256", typ: "JWT" })));
+	const payload = base64Url(encoder.encode(JSON.stringify({ iat: now - 30, exp: now + 540, iss: env.GITHUB_APP_ID })));
+	const key = await crypto.subtle.importKey("pkcs8", pemToDer(env.GITHUB_APP_PRIVATE_KEY), { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, ["sign"]);
+	const signature = new Uint8Array(await crypto.subtle.sign("RSASSA-PKCS1-v1_5", key, encoder.encode(`${header}.${payload}`)));
+	return `${header}.${payload}.${base64Url(signature)}`;
+}
+
+type GitHubInstallationPreparation =
+	| { token: string; classification?: never }
+	| { token?: never; classification: "github-installation-unavailable" | "github-installation-rejected" | "github-repository-not-allowed" };
+
+async function prepareGitHubInstallation(env: Env): Promise<GitHubInstallationPreparation> {
 	try {
-		const response = await fetch(`${env.GIT_PROXY_ORIGIN}/${job.repository}.git/info/refs?service=git-upload-pack`, {
-			headers: { "X-App-Harness-Assertion": assertion, "Git-Protocol": "version=2" },
+		const tokenResponse = await fetch(`https://api.github.com/app/installations/${encodeURIComponent(env.GITHUB_APP_INSTALLATION_ID)}/access_tokens`, {
+			method: "POST",
+			headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${await appJwt(env)}`, "User-Agent": "app-harness-os-native-git", "X-GitHub-Api-Version": "2022-11-28" },
 		});
-		if (response.ok) return { assertion };
-		if (response.status === 401 || response.status === 403 || response.status === 404) return { classification: "proxy-authorization-rejected" };
-		if (response.status >= 500) return { classification: "proxy-upstream-unavailable" };
-		return { classification: "proxy-discovery-rejected" };
+		if (tokenResponse.status === 401 || tokenResponse.status === 403 || tokenResponse.status === 404) return { classification: "github-installation-rejected" };
+		if (!tokenResponse.ok) return { classification: "github-installation-unavailable" };
+		const token = (await tokenResponse.json() as { token?: unknown }).token;
+		if (typeof token !== "string" || !token) return { classification: "github-installation-unavailable" };
+		const repositoryResponse = await fetch(`https://api.github.com/repos/${env.ALLOWED_REPOSITORY}`, {
+			headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${token}`, "User-Agent": "app-harness-os-native-git", "X-GitHub-Api-Version": "2022-11-28" },
+		});
+		if (repositoryResponse.status === 401 || repositoryResponse.status === 403 || repositoryResponse.status === 404) return { classification: "github-repository-not-allowed" };
+		return repositoryResponse.ok ? { token } : { classification: "github-installation-unavailable" };
 	} catch {
-		return { classification: "proxy-unreachable" };
+		return { classification: "github-installation-unavailable" };
 	}
 }
 
@@ -99,8 +108,10 @@ async function createSessionAfterRuntimeUpdate(
  * operation is a fixed command probe, used to verify isolated shell execution
  * without accepting a repository URL, shell text, model output, or credential.
  *
- * The job endpoint is intentionally fail-closed until a separately deployed
- * GitHub App installation-token proxy exists. It does not fabricate Git work.
+ * The job endpoint uses a GitHub App private key held only by this Worker to
+ * mint a short-lived installation token for the one allowed repository. The
+ * token is never returned, logged, included in a command string, or sent to a
+ * model/OS caller; only the isolated Sandbox Git process receives it.
  */
 export default {
 	async fetch(request: Request, env: Env): Promise<Response> {
@@ -137,19 +148,16 @@ export default {
 			}
 			const job = safeJob(body, env);
 			if (!job) return Response.json({ error: "Job is outside the runner's scope." }, { status: 403 });
-			if (env.NATIVE_GIT_ENABLED !== "true" || !env.GIT_PROXY_ASSERTION_SECRET) {
+			if (env.NATIVE_GIT_ENABLED !== "true" || !env.GITHUB_APP_ID || !env.GITHUB_APP_INSTALLATION_ID || !env.GITHUB_APP_PRIVATE_KEY) {
 				return Response.json({
 					jobId: job.jobId,
 					state: "credential-bridge-required",
-					message: "The isolated runner is live, but native Git stays disabled until the repository-scoped GitHub App proxy is configured.",
+					message: "The isolated runner is live, but native Git stays disabled until the repository-scoped GitHub App capability is configured.",
 				});
 			}
-			if (env.GIT_PROXY_ORIGIN !== "https://app-harness-os-git-proxy.coda-a.workers.dev") {
-				return Response.json({ error: "Runner Git proxy origin is not approved." }, { status: 503 });
-			}
-			const proxy = await prepareApprovedProxy(job, env);
-			if ("classification" in proxy) {
-				return Response.json({ jobId: job.jobId, state: "checkout-failed", classification: proxy.classification });
+			const installation = await prepareGitHubInstallation(env);
+			if ("classification" in installation) {
+				return Response.json({ jobId: job.jobId, state: "checkout-failed", classification: installation.classification });
 			}
 
 			const sandbox = getSandbox(env.Sandbox, `app-harness-${job.jobId}-g${job.generation}`, { enableDefaultSession: false });
@@ -167,16 +175,17 @@ export default {
 				throw error;
 			}
 			try {
-				// Configure Git directly rather than interpolating a shell variable into
-				// the command. The short-lived assertion reaches only this session's
-				// environment, never a command string, stderr, audit event, or response.
+				// Configure Git directly rather than interpolating a credential into a
+				// command. The one-hour installation token reaches only this session's
+				// environment, never a command string, audit event, or response.
 				await session.setEnvVars({
 					GIT_CONFIG_COUNT: "1",
 					GIT_CONFIG_KEY_0: "http.extraHeader",
-					GIT_CONFIG_VALUE_0: `X-App-Harness-Assertion: ${proxy.assertion}`,
+					GIT_CONFIG_VALUE_0: `Authorization: Basic ${btoa(`x-access-token:${installation.token}`)}`,
+					GIT_TERMINAL_PROMPT: "0",
 				});
 				const clone = await session.exec(
-					"git clone --depth 1 https://app-harness-os-git-proxy.coda-a.workers.dev/callil/autonomous-live-chat.git /workspace/repository",
+					"git clone --depth 1 https://github.com/callil/autonomous-live-chat.git /workspace/repository",
 					{ timeout: 120_000 },
 				);
 				if (!clone.success) {
