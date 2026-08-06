@@ -6,7 +6,9 @@
   "compatibility_flags": ["nodejs_compat"],
   "observability": { "enabled": true },
   "vars": {
-    "ALLOWED_REPOSITORY": "callil/autonomous-live-chat"
+    "ALLOWED_REPOSITORY": "callil/autonomous-live-chat",
+    "GIT_PROXY_ORIGIN": "https://app-harness-os-git-proxy.coda-a.workers.dev",
+    "NATIVE_GIT_ENABLED": "false"
   },
   "containers": [
     {

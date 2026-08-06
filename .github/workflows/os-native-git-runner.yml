@@ -25,6 +25,7 @@ jobs:
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       APP_HARNESS_RUNNER_SECRET: ${{ secrets.APP_HARNESS_RUNNER_SECRET }}
+      GIT_PROXY_ASSERTION_SECRET: ${{ secrets.GIT_PROXY_ASSERTION_SECRET }}
     steps:
       - uses: actions/checkout@v4
 
@@ -52,6 +53,8 @@ jobs:
         run: |
           test -n "$APP_HARNESS_RUNNER_SECRET"
           printf '%s' "$APP_HARNESS_RUNNER_SECRET" | npx wrangler secret put APP_HARNESS_RUNNER_SECRET --name app-harness-os-native-git
+          test -n "$GIT_PROXY_ASSERTION_SECRET"
+          printf '%s' "$GIT_PROXY_ASSERTION_SECRET" | npx wrangler secret put GIT_PROXY_ASSERTION_SECRET --name app-harness-os-native-git
 
       - name: Verify isolated Sandbox shell
         if: inputs.verify_sandbox
