@@ -179,8 +179,7 @@ type CoordinatorClaim = { job: CoordinatorJob; effect: CoordinatorEffect; leaseT
 type RuntimeEnv = Omit<Env, "OS_NATIVE_GIT_RUNNER" | "OS_WORKSPACE"> & {
 	GITHUB_AUTOMATION_TOKEN: string;
 	AUTONOMY_CALLBACK_SECRET: string;
-	OS_NATIVE_GIT_RUNNER?: Fetcher;
-	OS_NATIVE_GIT_RUNNER_SECRET?: string;
+	OS_NATIVE_GIT_RUNNER?: unknown;
 	OS_WORKSPACE?: unknown;
 	GITHUB_IDENTITY_BRIDGE?: Fetcher;
 	APP_HARNESS_IDENTITY_SECRET?: string;
@@ -196,6 +195,10 @@ type OsWorkspaceGateway = {
 		prompt: string;
 		chatGatewayRpcTarget: unknown;
 	}): Promise<{ accepted: true; chatPath: string } | { accepted: false; message: string }>;
+};
+
+type OsNativeGitRunnerGateway = {
+	runJob(job: ReturnType<typeof createOsNativeGitJob>): Promise<unknown>;
 };
 
 type OsWorkspaceResponse = { text: string; idempotencyKey: string };
@@ -806,7 +809,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		const workflow = await this.getWorkflow(claim.job.id);
 		const workItem = await this.getWorkItem(claim.job.workItemId);
 		let ledger = await this.ctx.storage.get<StackLedger>(this.ledgerKey(claim.job.workItemId));
-		if (!workflow || !workItem?.githubIssue || !workItem.osNativeGit?.workspace || !ledger || !this.env.OS_NATIVE_GIT_RUNNER || !this.env.OS_NATIVE_GIT_RUNNER_SECRET) throw new Error("Native Git runner lost its durable capability state.");
+		if (!workflow || !workItem?.githubIssue || !workItem.osNativeGit?.workspace || !ledger || !this.env.OS_NATIVE_GIT_RUNNER) throw new Error("Native Git runner lost its durable capability state.");
 		if (ledger.runner.stage === "running" && ledger.runner.attemptToken) {
 			ledger = applyStackEvent(ledger, { type: "runner-attempt-retryable", eventId: `runner-expired-${claim.effect.attempts - 1}`, generation: ledger.generation, attemptToken: ledger.runner.attemptToken }).ledger;
 		}
@@ -825,14 +828,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 			generation: ledger.generation,
 			parentBaseSha: ledger.generationBaseSha,
 		});
-		const response = await this.env.OS_NATIVE_GIT_RUNNER.fetch(new Request("https://runner.internal/v1/native-git/jobs", {
-			method: "POST",
-			headers: { Authorization: `Bearer ${this.env.OS_NATIVE_GIT_RUNNER_SECRET}`, "Content-Type": "application/json" },
-			body: JSON.stringify(runnerJob),
-		}));
-		if (!response.ok) throw new Error(`Cloudflare OS native runner transport failed (${response.status}); retry queued.`);
-		let body: unknown = null;
-		try { body = await response.json(); } catch { throw new Error("Cloudflare OS native runner returned no status; retry queued."); }
+		const body = await (this.env.OS_NATIVE_GIT_RUNNER as OsNativeGitRunnerGateway).runJob(runnerJob);
 		const value = body && typeof body === "object" ? body as Record<string, unknown> : {};
 		const agent = normalizeAgentProvenance(value.agent);
 		if (agent) workItem.osNativeGit.agent = agent;

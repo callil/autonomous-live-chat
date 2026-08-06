@@ -1,4 +1,5 @@
 import { getSandbox, isDurableObjectCodeUpdateReset, isPlatformTransientError, type Sandbox } from "@cloudflare/sandbox";
+import { WorkerEntrypoint } from "cloudflare:workers";
 import {
 	buildNanocodexInstructions,
 	NANOCODEX_DEFAULT_MODEL,
@@ -297,7 +298,7 @@ function parseAgent(stdout: string, model: string): { summary: AgentSummary; ok:
 	} catch { return null; }
 }
 
-export default {
+const httpHandler = {
 	async fetch(request: Request, env: Env): Promise<Response> {
 		const url = new URL(request.url);
 		if (request.method !== "POST" || !authorized(request, env)) return new Response("Not found", { status: 404 });
@@ -416,3 +417,21 @@ export default {
 		} finally { await destroySandboxSafely(sandbox, sessionId); }
 	},
 };
+
+/** Private capability surface for the App Harness service binding. */
+export class NativeGitRunner extends WorkerEntrypoint<Env> {
+	async runJob(job: NativeGitJob): Promise<unknown> {
+		const response = await httpHandler.fetch(new Request("https://runner.internal/v1/native-git/jobs", {
+			method: "POST",
+			headers: {
+				Authorization: `Bearer ${this.env.APP_HARNESS_RUNNER_SECRET}`,
+				"Content-Type": "application/json",
+			},
+			body: JSON.stringify(job),
+		}), this.env);
+		if (!response.ok) throw new Error(`Native Git runner rejected its private RPC request (${response.status}).`);
+		return response.json();
+	}
+}
+
+export default httpHandler;

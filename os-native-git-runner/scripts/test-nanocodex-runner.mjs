@@ -52,6 +52,8 @@ assert.match(source, /timeout: NANOCODEX_EXECUTION_TIMEOUT_MS/u);
 assert.match(source, /classification: "sandbox-runtime-interrupted"/u);
 assert.match(source, /state: "runner-unavailable"/u);
 assert.match(source, /new version rollout/u);
+assert.match(source, /class NativeGitRunner extends WorkerEntrypoint/u);
+assert.match(source, /async runJob\(job: NativeGitJob\)/u);
 assert.doesNotMatch(source, /session\.exec\(`node \/opt\/app-harness\/agent-entrypoint\.mjs/u);
 assert.match(source, /GH_TOKEN: installation\.token/u);
 assert.match(source, /candidate-working-tree-dirty/u);
