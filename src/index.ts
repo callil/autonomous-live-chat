@@ -194,8 +194,7 @@ type OsWorkspaceGateway = {
 	}): Promise<{ accepted: true; chatPath: string } | { accepted: false; message: string }>;
 };
 
-type OsWorkspaceResponse = { text: string };
-type OsWorkspaceResponseTargetProps = { room: string; workItemId: string };
+type OsWorkspaceResponse = { text: string; idempotencyKey: string };
 type OsExecutionBridgeProps = { source: string };
 type OsExecutionRequest = { workItemId: string; issueNumber: number };
 
@@ -246,11 +245,13 @@ const PHASES: ReadonlySet<WorkflowPhase> = new Set([
  * that response to one durable App Harness work item without parsing model
  * prose for identifiers.
  */
-export class OsWorkspaceResponseTarget extends WorkerEntrypoint<RuntimeEnv, OsWorkspaceResponseTargetProps> {
+export class OsWorkspaceResponseTarget extends WorkerEntrypoint<RuntimeEnv> {
 	async onGadgetResponse(response: OsWorkspaceResponse): Promise<void> {
-		const { room, workItemId } = this.ctx.props;
-		if (!/^[a-zA-Z0-9_-]{1,64}$/u.test(room) || !isUuid(workItemId)) throw new Error("Cloudflare OS response target is invalid.");
-		await this.env.CHAT_ROOM.getByName(room).receiveOsWorkspaceResponse(workItemId, response);
+		const prefix = "app-harness:";
+		if (!response.idempotencyKey.startsWith(prefix)) throw new Error("Cloudflare OS response target source is invalid.");
+		const workItemId = response.idempotencyKey.slice(prefix.length);
+		if (!isUuid(workItemId)) throw new Error("Cloudflare OS response target work item is invalid.");
+		await this.env.CHAT_ROOM.getByName("main").receiveOsWorkspaceResponse(workItemId, response);
 	}
 }
 
@@ -736,11 +737,10 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 			stackId: `stack-${workItem.id}`,
 			generation: 1,
 		};
-		// A loopback binding configured with dynamic props may be represented by an
-		// RPC thenable at runtime. Resolve it before forwarding the persistent
-		// callback capability to Cloudflare OS; passing the unresolved thenable is
-		// rejected by Workers RPC as a non-serializable `RpcPromise`.
-		const responseTarget = await this.ctx.exports.OsWorkspaceResponseTarget({ props: { room: "main", workItemId: workItem.id } });
+		// Forward the static loopback Service Binding itself. The OS response carries
+		// the gateway-owned idempotency key, so this callback never needs a dynamic
+		// binding invocation (which would produce a non-serializable RpcPromise).
+		const responseTarget = this.ctx.exports.OsWorkspaceResponseTarget;
 		const submission = createOsWorkspaceSubmission({
 			workItemId: workItem.id,
 			issue: workItem.githubIssue,
