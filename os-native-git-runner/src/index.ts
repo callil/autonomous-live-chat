@@ -1,4 +1,4 @@
-import { getSandbox, type Sandbox } from "@cloudflare/sandbox";
+import { getSandbox, isDurableObjectCodeUpdateReset, isPlatformTransientError, type Sandbox } from "@cloudflare/sandbox";
 
 export { Sandbox } from "@cloudflare/sandbox";
 
@@ -59,6 +59,22 @@ function classifyGitTransportFailure(stderr: string): "proxy-unreachable" | "pro
 	return "git-transport-failed";
 }
 
+async function createSessionAfterRuntimeUpdate(
+	sandbox: ReturnType<typeof getSandbox>,
+	options: Parameters<ReturnType<typeof getSandbox>["createSession"]>[0],
+) {
+	for (let attempt = 0; attempt < 4; attempt += 1) {
+		try {
+			return await sandbox.createSession(options);
+		} catch (error) {
+			const transient = isPlatformTransientError(error) || isDurableObjectCodeUpdateReset(error);
+			if (!transient || attempt === 3) throw error;
+			await new Promise((resolve) => setTimeout(resolve, 750 * (attempt + 1)));
+		}
+	}
+	throw new Error("Sandbox session retry exhausted.");
+}
+
 /**
  * A deliberately tiny production Sandbox runner. The only currently live
  * operation is a fixed command probe, used to verify isolated shell execution
@@ -78,7 +94,7 @@ export default {
 			const sandbox = getSandbox(env.Sandbox, "app-harness-runner-probe", {
 				enableDefaultSession: false,
 			});
-			const session = await sandbox.createSession({
+			const session = await createSessionAfterRuntimeUpdate(sandbox, {
 				id: "probe",
 				cwd: "/workspace",
 				commandTimeoutMs: 15_000,
@@ -115,7 +131,15 @@ export default {
 
 			const sandbox = getSandbox(env.Sandbox, `app-harness-${job.jobId}-g${job.generation}`, { enableDefaultSession: false });
 			const sessionId = `candidate-${job.generation}`;
-			const session = await sandbox.createSession({ id: sessionId, cwd: "/workspace", commandTimeoutMs: 120_000 });
+			let session;
+			try {
+				session = await createSessionAfterRuntimeUpdate(sandbox, { id: sessionId, cwd: "/workspace", commandTimeoutMs: 120_000 });
+			} catch (error) {
+				if (isPlatformTransientError(error) || isDurableObjectCodeUpdateReset(error)) {
+					return Response.json({ jobId: job.jobId, state: "runner-unavailable", classification: "sandbox-runtime-updating" });
+				}
+				throw error;
+			}
 			try {
 				// Configure Git directly rather than interpolating a shell variable into
 				// the command. The short-lived assertion reaches only this session's
