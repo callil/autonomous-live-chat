@@ -1,0 +1,24 @@
+import assert from "node:assert/strict";
+import {
+	AUTHORING_ENVELOPE_POLICY,
+	DELIVERY_POLICY,
+	PLATFORM_LIMITS,
+	durableRecordBytes,
+	fitsDurableRecord,
+	storageDeleteBatches,
+} from "../contracts/platform-policy.js";
+
+assert.equal(PLATFORM_LIMITS.cloudflareDurableObject.keyAndValueBytes, 2_000_000, "record admission follows Cloudflare's documented SQLite Durable Object limit");
+assert.equal(PLATFORM_LIMITS.cloudflareDurableObject.deleteKeysPerCall, 128, "batch deletion follows Cloudflare's documented async KV API limit");
+assert.ok(DELIVERY_POLICY.historyRecordsPerPage <= PLATFORM_LIMITS.cloudflareDurableObject.getKeysPerCall, "one history page always fits one documented multi-get");
+assert.equal(DELIVERY_POLICY.historyPageBytes, 2 * PLATFORM_LIMITS.cloudflareDurableObject.keyAndValueBytes, "a delivery page is byte-bounded as well as record-bounded");
+assert.equal(AUTHORING_ENVELOPE_POLICY.safeTextCharacters, 120, "the sanitized target text schema is named and shared by the server contract");
+
+const fitting = { text: "x".repeat(128) };
+assert.ok(fitsDurableRecord("message:test", fitting));
+assert.equal(durableRecordBytes("message:test", fitting), Buffer.byteLength("message:test") + Buffer.byteLength(JSON.stringify(fitting)));
+
+const deleteBatches = storageDeleteBatches(Array.from({ length: 129 }, (_, index) => `annotation:${index}`));
+assert.deepEqual(deleteBatches.map((batch) => batch.length), [128, 1], "deletes crossing the Cloudflare boundary are split without dropping keys");
+
+console.log("platform-derived storage and delivery policy contracts passed");
