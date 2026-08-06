@@ -23,7 +23,7 @@
 .ah-panel form { display: grid; gap: 8px; margin-top: 10px; }
 .ah-panel label { color: var(--ah-muted); font-size: 12px; }
 .ah-panel textarea { min-height: 88px; padding: 9px; color: var(--ah-text); background: var(--ah-surface); border: 1px solid var(--ah-border); border-radius: 8px; resize: vertical; }
-.ah-form-meta span { color: var(--ah-muted); font-size: 11px; }
+.ah-form-meta { justify-content: flex-end; }
 .ah-form-meta button { padding: 7px 11px; color: #fff; background: var(--ah-bg); border: 0; border-radius: 7px; cursor: pointer; }
 .ah-form-meta button:disabled { opacity: .45; cursor: default; }
 .ah-panel p { margin: 0; color: var(--ah-muted); }

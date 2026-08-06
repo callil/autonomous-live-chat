@@ -112,7 +112,7 @@ export function prepareNativeGitJob(input) {
 		branch: branchRef(node.branch),
 		parentBranch: index === 0 ? "main" : branchRef(stack.nodes[index - 1].branch),
 		pullRequestBase: index === 0 ? "main" : branchRef(stack.nodes[index - 1].branch),
-		intent: node.intent.slice(0, 280),
+		intent: node.intent,
 	}));
 
 	return {
@@ -183,6 +183,6 @@ export function createNativeGitAuditEvent({ jobId, kind, at = Date.now(), nodeId
 		...(nodeId && { nodeId }),
 		...(commandId && { commandId }),
 		...(exitCode !== undefined && { exitCode }),
-		...(typeof detail === "string" && detail.trim() && { detail: detail.trim().slice(0, 280) }),
+		...(typeof detail === "string" && detail.trim() && { detail: detail.trim() }),
 	};
 }

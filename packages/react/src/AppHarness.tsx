@@ -11,7 +11,6 @@ export type AppHarnessProps = {
   onRequest: (submission: AppHarnessSubmission) => Promise<void> | void;
   onOpenActivity?: () => void;
   activityCount?: number;
-  requestLimit?: number;
 };
 
 const TARGET_SELECTOR = "[data-app-harness-id], [data-target-id]";
@@ -20,7 +19,7 @@ function CrosshairIcon() {
   return <svg aria-hidden="true" viewBox="0 0 20 20"><circle cx="10" cy="10" r="4"/><path d="M10 2v4M10 14v4M2 10h4M14 10h4"/></svg>;
 }
 
-export function AppHarness({ children, onRequest, onOpenActivity, activityCount = 0, requestLimit = 500 }: AppHarnessProps) {
+export function AppHarness({ children, onRequest, onOpenActivity, activityCount = 0 }: AppHarnessProps) {
   const composerId = useId();
   const [open, setOpen] = useState(false);
   const [targeting, setTargeting] = useState(false);
@@ -64,7 +63,7 @@ export function AppHarness({ children, onRequest, onOpenActivity, activityCount 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     const normalized = request.trim();
-    if (!target || !normalized || normalized.length > requestLimit || status === "submitting") return;
+    if (!target || !normalized || status === "submitting") return;
     setStatus("submitting");
     try {
       await onRequest({ request: normalized, target });
@@ -85,14 +84,14 @@ export function AppHarness({ children, onRequest, onOpenActivity, activityCount 
           {onOpenActivity && <button type="button" data-app-harness-id="activity-control" data-app-harness-label="Activity control" onClick={onOpenActivity}>Activity{activityCount ? ` · ${activityCount}` : ""}</button>}
         </div> : <form aria-labelledby={composerId} onSubmit={submit}>
           <label id={composerId} htmlFor={`${composerId}-request`}>Target: {target.label ?? target.targetId}</label>
-          <textarea id={`${composerId}-request`} autoFocus maxLength={requestLimit} value={request} onChange={(event) => setRequest(event.target.value)} placeholder="Describe the change" />
-          <div className="ah-form-meta"><span>{request.length} / {requestLimit}</span><button type="submit" disabled={!request.trim() || status === "submitting"}>{status === "submitting" ? "Submitting…" : "Submit"}</button></div>
+          <textarea id={`${composerId}-request`} autoFocus value={request} onChange={(event) => setRequest(event.target.value)} placeholder="Describe the change" />
+          <div className="ah-form-meta"><button type="submit" disabled={!request.trim() || status === "submitting"}>{status === "submitting" ? "Submitting…" : "Submit"}</button></div>
           {status === "submitted" && <p role="status">Request submitted.</p>}
           {status === "error" && <p role="alert">The request could not be submitted.</p>}
           <button className="ah-back" type="button" onClick={() => { setTarget(undefined); setRequest(""); setStatus("idle"); }}>Choose another target</button>
         </form>}
       </section>}
-      <button className="ah-launcher" type="button" data-app-harness-id="authoring-launcher" data-app-harness-label="App Harness launcher" aria-label={open ? "Close App Harness" : "Open App Harness"} aria-expanded={open} onClick={() => setOpen((value) => !value)}><CrosshairIcon />{!open && activityCount > 0 && <span>{activityCount > 9 ? "9+" : activityCount}</span>}</button>
+      <button className="ah-launcher" type="button" data-app-harness-id="authoring-launcher" data-app-harness-label="App Harness launcher" aria-label={open ? "Close App Harness" : "Open App Harness"} aria-expanded={open} onClick={() => setOpen((value) => !value)}><CrosshairIcon />{!open && activityCount > 0 && <span>{activityCount}</span>}</button>
     </div>
   </>;
 }
