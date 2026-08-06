@@ -5,7 +5,8 @@
   "scripts": {
     "deploy": "wrangler deploy",
     "cf-typegen": "wrangler types",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:documentation-policy": "node scripts/test-documentation-policy.mjs"
   },
   "devDependencies": {
     "@cloudflare/sandbox": "0.12.4",

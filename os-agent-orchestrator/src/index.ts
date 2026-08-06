@@ -23,11 +23,9 @@ type SafeManifest = {
 	stack: { id: string; generation: number; lane: string };
 };
 
-type AccentColor = "blue" | "green" | "purple" | "orange";
 type Classification = { changeType: "visual" | "content" | "data" | "behavior" | "infrastructure"; scope: "localized" | "bounded" | "broad"; risk: "low" | "medium" | "high"; affectedSurface: "ui" | "copy" | "data" | "behavior" | "infrastructure"; reversible: boolean; executionEligibility: "eligible" | "needs_review"; ciProfile: "visual" | "content" | "behavior" | "data" | "infrastructure" };
 
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/;
-const COLORS = new Set<AccentColor>(["blue", "green", "purple", "orange"]);
 
 function authorized(request: Request, env: Env): boolean {
 	return request.headers.get("authorization") === `Bearer ${env.APP_HARNESS_ORCHESTRATOR_SECRET}`;
@@ -68,10 +66,10 @@ function planSchema() {
 	return {
 		type: "object",
 		additionalProperties: false,
-		required: ["decision", "color", "rationale", "classification"],
+		required: ["decision", "patch", "rationale", "classification"],
 		properties: {
 			decision: { type: "string", enum: ["approved", "needs_review"] },
-			color: { type: ["string", "null"], enum: ["blue", "green", "purple", "orange", null] },
+			patch: { type: ["string", "null"], maxLength: 12000 },
 			rationale: { type: "string", maxLength: 240 },
 			classification: { type: "object", additionalProperties: false, required: ["changeType", "scope", "risk", "affectedSurface", "reversible", "executionEligibility", "ciProfile"], properties: {
 				changeType: { type: "string", enum: ["visual", "content", "data", "behavior", "infrastructure"] },
@@ -86,18 +84,18 @@ function planSchema() {
 	};
 }
 
-function validatedPlan(value: unknown): ({ decision: "approved"; color: AccentColor; rationale: string } | { decision: "needs_review"; rationale: string }) & { classification: Classification } | null {
+function validatedPlan(value: unknown): ({ decision: "approved"; patch: string; rationale: string } | { decision: "needs_review"; rationale: string }) & { classification: Classification } | null {
 	if (!value || typeof value !== "object") return null;
 	const plan = value as Record<string, unknown>;
 	if (typeof plan.rationale !== "string" || !plan.rationale.trim() || plan.rationale.length > 240 || !plan.classification || typeof plan.classification !== "object") return null;
 	const classification = plan.classification as Record<string, unknown>;
 	if (!["visual", "content", "data", "behavior", "infrastructure"].includes(classification.changeType as string) || !["localized", "bounded", "broad"].includes(classification.scope as string) || !["low", "medium", "high"].includes(classification.risk as string) || !["ui", "copy", "data", "behavior", "infrastructure"].includes(classification.affectedSurface as string) || typeof classification.reversible !== "boolean" || !["eligible", "needs_review"].includes(classification.executionEligibility as string) || !["visual", "content", "behavior", "data", "infrastructure"].includes(classification.ciProfile as string)) return null;
 	const safeClassification = classification as unknown as Classification;
-	if (plan.decision === "approved" && typeof plan.color === "string" && COLORS.has(plan.color as AccentColor)) {
-		if (safeClassification.executionEligibility !== "eligible") return null;
-		return { decision: "approved", color: plan.color as AccentColor, rationale: plan.rationale.trim(), classification: safeClassification };
+	if (plan.decision === "approved" && typeof plan.patch === "string" && plan.patch.startsWith("--- a/") && plan.patch.includes("+++ b/")) {
+		if (safeClassification.executionEligibility !== "eligible" || safeClassification.changeType !== "content" || safeClassification.scope !== "localized" || safeClassification.risk !== "low" || !safeClassification.reversible || safeClassification.ciProfile !== "content") return null;
+		return { decision: "approved", patch: plan.patch, rationale: plan.rationale.trim(), classification: safeClassification };
 	}
-	if (plan.decision === "needs_review" && plan.color === null) return { decision: "needs_review", rationale: plan.rationale.trim(), classification: safeClassification };
+	if (plan.decision === "needs_review" && plan.patch === null) return { decision: "needs_review", rationale: plan.rationale.trim(), classification: safeClassification };
 	return null;
 }
 
@@ -122,10 +120,10 @@ function responseText(value: unknown): string | null {
 async function askModel(manifest: SafeManifest, env: Env): Promise<Response> {
 	const instructions = [
 		"You are the App Harness Cloudflare OS planning agent.",
-		"Return a plan only for an unambiguous request to set this app's accent color to blue, green, purple, or orange.",
-		"You may not propose source edits, shell commands, repository URLs, credentials, dependencies, configuration changes, authentication changes, or any operation outside that single allowlisted change.",
-		"If the bounded manifest does not request exactly that change, return needs_review with color null.",
-		"Always classify with the bounded taxonomy. An approved accent change is visual, localized, low risk, affects ui, reversible, execution eligible, and uses the visual CI profile. Classification can never waive the allowlist.",
+		"You are allowed to propose one small documentation-only change in README.md or a file below docs/. Return a standard unified diff with paths beginning a/ and b/.",
+		"Never touch source code, workflows, package files, credentials, configuration, lockfiles, or any file outside README.md and docs/. Do not emit shell commands or prose outside the JSON fields.",
+		"If the request is not an unambiguous, localized documentation update, return needs_review with patch null.",
+		"An approved change must classify as content, localized, low risk, affectedSurface ui or copy, reversible true, execution eligible, and content CI profile. Classification can never waive the file policy.",
 		"Do not include user data beyond a brief rationale.",
 	].join(" ");
 	try {
@@ -162,7 +160,7 @@ async function askModel(manifest: SafeManifest, env: Env): Promise<Response> {
 			model: { id: result.id, model: env.MODEL_ID },
 			rationale: plan.rationale,
 			classification: plan.classification,
-			plan: { change: { kind: "accent-color", color: plan.color } },
+			plan: { change: { kind: "documentation-patch", patch: plan.patch } },
 		});
 	} catch {
 		return Response.json({ state: "agent-unavailable", classification: "model-response-unavailable" }, { status: 502 });

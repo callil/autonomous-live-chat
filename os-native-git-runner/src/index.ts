@@ -19,10 +19,8 @@ type NativeGitJob = {
 	candidate?: unknown;
 };
 
-type AccentColor = "blue" | "green" | "purple" | "orange";
-
 type CandidatePlan = {
-	change: { kind: "accent-color"; color: AccentColor };
+	change: { kind: "documentation-patch"; patch: string };
 	stack: {
 		stackId: string;
 		nodeId: string;
@@ -37,12 +35,6 @@ type CandidatePlan = {
 const JOB_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/;
 const BRANCH = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,159}$/;
 const SHA = /^[0-9a-f]{40}$/i;
-const ACCENT_COLORS: Readonly<Record<AccentColor, string>> = {
-	blue: "#3478f6",
-	green: "#10a37f",
-	purple: "#8b5cf6",
-	orange: "#ef7d32",
-};
 const encoder = new TextEncoder();
 
 function base64Url(bytes: Uint8Array): string {
@@ -76,7 +68,7 @@ function safeCandidate(input: unknown): CandidatePlan | null {
 	if (!change || typeof change !== "object" || !stack || typeof stack !== "object") return null;
 	const rawChange = change as Record<string, unknown>;
 	const rawStack = stack as Record<string, unknown>;
-	if (rawChange.kind !== "accent-color" || typeof rawChange.color !== "string" || !(rawChange.color in ACCENT_COLORS)) return null;
+	if (rawChange.kind !== "documentation-patch" || typeof rawChange.patch !== "string" || !safeDocumentationPatch(rawChange.patch)) return null;
 	const stackId = typeof rawStack.stackId === "string" && JOB_ID.test(rawStack.stackId) ? rawStack.stackId : null;
 	const nodeId = typeof rawStack.nodeId === "string" && JOB_ID.test(rawStack.nodeId) ? rawStack.nodeId : null;
 	const branch = safeBranch(rawStack.branch);
@@ -89,9 +81,16 @@ function safeCandidate(input: unknown): CandidatePlan | null {
 	// exception: it is based on main and receives its base SHA from checkout.
 	if (pullRequestBase !== parentBranch || (parentBranch !== "main" && parentBaseSha === null)) return null;
 	return {
-		change: { kind: "accent-color", color: rawChange.color as AccentColor },
+		change: { kind: "documentation-patch", patch: rawChange.patch },
 		stack: { stackId, nodeId, branch, parentBranch, parentBaseSha, pullRequestBase, issueNumber },
 	};
+}
+
+/** A patch may affect only prose files. Reject path tricks and binary/git metadata. */
+function safeDocumentationPatch(patch: string): boolean {
+	if (!patch.startsWith("--- a/") || patch.length > 12_000 || /\0|\.\.\//u.test(patch)) return false;
+	const paths = [...patch.matchAll(/^(?:--- a\/|\+\+\+ b\/)([^\n]+)$/gmu)].map((match) => match[1]);
+	return paths.length >= 2 && paths.every((path) => path === "README.md" || (path.startsWith("docs/") && path.endsWith(".md")));
 }
 
 function classifyGitTransportFailure(stderr: string): "github-unreachable" | "github-authorization-rejected" | "github-upstream-unavailable" | "git-transport-failed" {
@@ -188,7 +187,6 @@ async function createStackPullRequest(
 	headSha: string,
 ): Promise<{ url: string; number: number } | { classification: "pull-request-create-failed" }> {
 	try {
-		const { color } = candidate.change;
 		const existing = await fetch(`https://api.github.com/repos/${job.repository}/pulls?state=open&head=${encodeURIComponent(`callil:${candidate.stack.branch}`)}&base=${encodeURIComponent(candidate.stack.pullRequestBase)}`, {
 			headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${token}`, "User-Agent": "app-harness-os-native-git", "X-GitHub-Api-Version": "2022-11-28" },
 		});
@@ -207,7 +205,7 @@ async function createStackPullRequest(
 				"X-GitHub-Api-Version": "2022-11-28",
 			},
 			body: JSON.stringify({
-				title: `App Harness: set accent color to ${color}`,
+				title: "App Harness: documentation candidate",
 				head: candidate.stack.branch,
 				base: candidate.stack.pullRequestBase,
 				body: [
@@ -218,7 +216,7 @@ async function createStackPullRequest(
 					`- Node: \`${candidate.stack.nodeId}\``,
 					`- Parent base: \`${candidate.stack.parentBranch}\``,
 					`- Candidate head: \`${headSha}\``,
-					"- Runner executed only the validated accent-color plan.",
+					"- Runner applied only a validated README/docs unified patch, then ran the content checks.",
 				].join("\n"),
 			}),
 		});
@@ -249,8 +247,7 @@ async function createSessionAfterRuntimeUpdate(
 
 /**
  * A deliberately tiny production Sandbox runner. The only currently live
- * operation is a fixed command probe, used to verify isolated shell execution
- * without accepting a repository URL, shell text, model output, or credential.
+	 * operation is a fixed command probe, used to verify isolated shell execution.
  *
  * The job endpoint uses a GitHub App private key held only by this Worker to
  * mint a short-lived installation token for the one allowed repository. The
@@ -358,22 +355,19 @@ export default {
 					});
 				}
 
-				const sourcePath = `${checkoutDirectory}/public/index.html`;
-				const source = await session.readFile(sourcePath);
-				const nextSource = source.content.replace(/--accent:\s*#[0-9a-f]{3,8}/iu, `--accent: ${ACCENT_COLORS[candidate.change.color]}`);
-				if (!source.success || nextSource === source.content) {
-					return Response.json({ jobId: job.jobId, state: "candidate-failed", classification: "allowlisted-target-not-found" });
-				}
-				const write = await session.writeFile(sourcePath, nextSource);
-				if (!write.success) return Response.json({ jobId: job.jobId, state: "candidate-failed", classification: "allowlisted-write-failed" });
+				const patchPath = `${checkoutDirectory}/candidate.patch`;
+				const patchWrite = await session.writeFile(patchPath, candidate.change.patch);
+				if (!patchWrite.success) return Response.json({ jobId: job.jobId, state: "candidate-failed", classification: "candidate-patch-write-failed" });
 
 				const commandStages: Array<[string, string, Record<string, string> | undefined]> = [
 					["branch", `git -C ${checkoutDirectory} checkout -b ${candidate.stack.branch}`, undefined],
 					["identity", `git -C ${checkoutDirectory} config user.name \"App Harness OS\"`, undefined],
 					["identity", `git -C ${checkoutDirectory} config user.email \"app-harness-os@users.noreply.github.com\"`, undefined],
+					["apply", `git -C ${checkoutDirectory} apply --whitespace=error-all candidate.patch`, undefined],
 					["validate", `git -C ${checkoutDirectory} diff --check`, undefined],
-					["stage", `git -C ${checkoutDirectory} add -- public/index.html`, undefined],
-					["commit", `git -C ${checkoutDirectory} commit -m \"App Harness: set accent color to ${candidate.change.color}\"`, undefined],
+					["policy", `git -C ${checkoutDirectory} diff --name-only | grep -E '^(README\\.md|docs/[^/]+\\.md)$'`, undefined],
+					["stage", `git -C ${checkoutDirectory} add -- README.md docs`, undefined],
+					["commit", `git -C ${checkoutDirectory} commit -m \"App Harness: update documentation\"`, undefined],
 					// The branch name is derived solely from the durable stack ID, issue, and
 					// generation. Retrying this same job may update only that same candidate.
 					["push", `git -C ${checkoutDirectory} push --force --set-upstream origin ${candidate.stack.branch}`, gitEnv],
