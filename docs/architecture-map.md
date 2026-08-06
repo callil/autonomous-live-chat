@@ -10,7 +10,8 @@ flowchart LR
   Room -- "private RPC" --> Workspace["Cloudflare OS\none persistent repo workspace/chat"]
   Workspace -- "typed APP_HARNESS capability\nworkItemId + issueNumber only" --> Bridge["OsExecutionBridge"]
   Bridge --> Room
-  Room --> Runner["Cloudflare Sandbox\nephemeral NanoCodex child"]
+	Room -- "short enqueue + status RPC" --> RunnerJob["RunnerJob Durable Object\ndurable execution record"]
+	RunnerJob --> Runner["Cloudflare Sandbox\nephemeral NanoCodex child"]
   Runner --> Git["GitHub branch / PR stack"]
   Git --> CI["GitHub Actions\nvalidation + promotion"]
   CI --> Deploy["Wrangler deploy"]
@@ -27,7 +28,7 @@ flowchart LR
 | [Cloudflare OS Workshop](https://app-harness-os.coda-a.workers.dev) | Persistent repository operator context, agent conversation, resources, and Gatekeeper capabilities. |
 | App Harness custom Gatekeeper | Adds one typed `enqueueRepositoryTask` capability; it cannot carry source, prompts, commands, repository selection, or credentials. |
 | `OsExecutionBridge` | Capability-only exported Worker entrypoint. It verifies the work item/issue against durable state and queues the deterministic pipeline. It has no public HTTP route. |
-| [Native Git Sandbox runner](https://app-harness-os-native-git.coda-a.workers.dev) | Creates a disposable checkout and runs a bounded NanoCodex implementation child with native engineering tools. |
+| [Native Git Sandbox runner](https://app-harness-os-native-git.coda-a.workers.dev) | Durably enqueues each job, creates a disposable checkout, and runs a bounded NanoCodex implementation child with native engineering tools. |
 | Git credential proxy + GitHub App | Mints short-lived installation credentials scoped to this repository. The private key never enters the Sandbox. |
 | Stack ledger + GitHub Actions | Verifies branch/PR provenance, handles ordered stacks/restacks, runs unprivileged checks, merges, deploys, and signs completion evidence. |
 
@@ -35,7 +36,9 @@ flowchart LR
 
 The OS workspace key is the repository and the chat key is `repository-main`, so operator context survives individual tasks. The work-item UUID is the external message key and the callback correlation key. The existing room creates the callback with Cloudflare's `ctx.restore()` primitive; no callback Worker or second Durable Object is involved, and OS can redeliver the response safely after restarts. The Gatekeeper capability can also be retried safely: the Durable Object creates exactly one fixed `observe-main` effect for the work item.
 
-The NanoCodex implementation child is intentionally not persistent. It receives the current checkout and task, can parallelize read-only investigation with built-in subagents, and disappears after leaving independently verifiable Git artifacts. This keeps long-term context in OS and task execution isolated.
+The runner job record is persistent; the NanoCodex implementation child is intentionally not. App Harness uses short enqueue/status RPCs, while a runner Durable Object owns the long Sandbox alarm and its retries. A coordinator or Worker rollout therefore cannot strand a twelve-minute caller lease. The child receives the current checkout and task, can parallelize read-only investigation with built-in subagents, and disappears after leaving independently verifiable Git artifacts. This keeps long-term context in OS and task execution isolated.
+
+Production deploys are explicit. The App Harness and native runner are disconnected from Cloudflare Workers Builds because GitHub Actions already owns their reviewed deployment workflows; two independent repository-triggered deployers could roll a Sandbox during an active job. Runner releases deploy only when their dedicated workflow is invoked.
 
 ## Trust boundaries
 
@@ -44,7 +47,7 @@ The NanoCodex implementation child is intentionally not persistent. It receives 
 | Person → Workshop | Cloudflare Access account-member policy. |
 | App Harness → OS | Private service-binding RPC to `ExternalMessageGateway`; no shared HTTP bearer secret. |
 | OS → App Harness execution | Custom Gatekeeper → private `OsExecutionBridge` RPC, fixed props, two bounded identifiers. |
-| App Harness → runner | Private service binding plus the runner’s existing bounded job contract. |
+| App Harness → runner | Private service binding, short enqueue/status RPCs, and a runner Durable Object that owns long execution. |
 | Runner → GitHub | Process-scoped GitHub App installation credential; no App private key in the child. |
 | Candidate → merge/deploy | Unprivileged CI, immutable SHAs, stack generation, one promotion lock, signed callback. |
 

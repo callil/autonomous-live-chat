@@ -12,6 +12,7 @@ import {
 
 const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
 const dockerfile = await readFile(new URL("../Dockerfile", import.meta.url), "utf8");
+const config = await readFile(new URL("../wrangler.jsonc", import.meta.url), "utf8");
 const entrypoint = new URL("../agent-entrypoint.mjs", import.meta.url);
 
 const instructions = buildNanocodexInstructions({
@@ -53,7 +54,12 @@ assert.match(source, /classification: "sandbox-runtime-interrupted"/u);
 assert.match(source, /state: "runner-unavailable"/u);
 assert.match(source, /new version rollout/u);
 assert.match(source, /class NativeGitRunner extends WorkerEntrypoint/u);
-assert.match(source, /async runJob\(job: NativeGitJob\)/u);
+assert.match(source, /async enqueueJob\(job: NativeGitJob\)/u);
+assert.match(source, /async getJob\(jobId: string\)/u);
+assert.match(source, /class RunnerJob extends DurableObject/u);
+assert.match(source, /async alarm\(\): Promise<void>/u);
+assert.match(config, /"class_name": "RunnerJob"/u);
+assert.match(config, /"tag": "v2"/u);
 assert.doesNotMatch(source, /session\.exec\(`node \/opt\/app-harness\/agent-entrypoint\.mjs/u);
 assert.match(source, /GH_TOKEN: installation\.token/u);
 assert.match(source, /candidate-working-tree-dirty/u);

@@ -198,7 +198,8 @@ type OsWorkspaceGateway = {
 };
 
 type OsNativeGitRunnerGateway = {
-	runJob(job: ReturnType<typeof createOsNativeGitJob>): Promise<unknown>;
+	enqueueJob(job: ReturnType<typeof createOsNativeGitJob>): Promise<unknown>;
+	getJob(jobId: string): Promise<unknown>;
 };
 
 type OsWorkspaceResponse = { text: string; idempotencyKey: string };
@@ -292,6 +293,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		super(ctx, env);
 		this.ctx.blockConcurrencyWhile(() => this.scheduleCoordinatorAlarm());
 		this.ctx.waitUntil(this.recoverAutoRestackStops());
+		this.ctx.waitUntil(this.recoverSynchronousRunnerLeases());
 	}
 
 	[restore](params: unknown): RpcTarget {
@@ -723,6 +725,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 				case "submit-os-workspace": await this.processOsWorkspaceSubmission(claim); break;
 				case "observe-main": await this.processMainObservation(claim); break;
 				case "run-os": await this.processOsRunner(claim); break;
+				case "poll-os": await this.processOsRunnerPoll(claim); break;
 				case "dispatch-promotion": await this.processPromotionDispatch(claim); break;
 				case "github-status": await this.processGithubStatus(claim); break;
 				case "github-close": await this.processGithubClose(claim); break;
@@ -834,7 +837,34 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 			generation: ledger.generation,
 			parentBaseSha: ledger.generationBaseSha,
 		});
-		const body = await (this.env.OS_NATIVE_GIT_RUNNER as OsNativeGitRunnerGateway).runJob(runnerJob);
+		const body = await (this.env.OS_NATIVE_GIT_RUNNER as OsNativeGitRunnerGateway).enqueueJob(runnerJob);
+		const queued = body && typeof body === "object" ? body as Record<string, unknown> : {};
+		if (queued.state !== "queued" && queued.state !== "running" && queued.state !== "terminal") throw new Error("Native Git runner did not durably accept the job.");
+		if (await this.completeClaim(claim, { workflow, workItem, ledger, nextKind: "poll-os", nextStage: "queued", nextDelayMs: 5_000 })) {
+			this.ctx.waitUntil(this.appendGitHubIssueStatus(workItem, "Cloudflare OS durably accepted the native Git job; isolated execution is in progress."));
+		}
+	}
+
+	private async processOsRunnerPoll(claim: { job: CoordinatorJob; effect: CoordinatorEffect; leaseToken: string }): Promise<void> {
+		const workflow = await this.getWorkflow(claim.job.id);
+		const workItem = await this.getWorkItem(claim.job.workItemId);
+		const ledger = await this.ctx.storage.get<StackLedger>(this.ledgerKey(claim.job.workItemId));
+		if (!workflow || !workItem?.osNativeGit || !ledger || !this.env.OS_NATIVE_GIT_RUNNER) throw new Error("Native Git polling lost its durable capability state.");
+		const status = await (this.env.OS_NATIVE_GIT_RUNNER as OsNativeGitRunnerGateway).getJob(workItem.osNativeGit.jobId);
+		const record = status && typeof status === "object" ? status as Record<string, unknown> : {};
+		if (record.state === "queued" || record.state === "running") {
+			await this.completeClaim(claim, { workflow, workItem, ledger, nextKind: "poll-os", nextStage: "queued", nextDelayMs: 5_000 });
+			return;
+		}
+		if (record.state !== "terminal" || !("result" in record)) throw new Error("Native Git durable job status is unavailable.");
+		await this.reconcileOsRunnerResult(claim, record.result);
+	}
+
+	private async reconcileOsRunnerResult(claim: { job: CoordinatorJob; effect: CoordinatorEffect; leaseToken: string }, body: unknown): Promise<void> {
+		const workflow = await this.getWorkflow(claim.job.id);
+		const workItem = await this.getWorkItem(claim.job.workItemId);
+		let ledger = await this.ctx.storage.get<StackLedger>(this.ledgerKey(claim.job.workItemId));
+		if (!workflow || !workItem?.githubIssue || !workItem.osNativeGit?.workspace || !ledger) throw new Error("Native Git result reconciliation lost its durable state.");
 		const value = body && typeof body === "object" ? body as Record<string, unknown> : {};
 		const agent = normalizeAgentProvenance(value.agent);
 		if (agent) workItem.osNativeGit.agent = agent;
@@ -951,7 +981,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 
 	private async completeClaim(
 		claim: CoordinatorClaim,
-		input: { workflow: WorkflowRecord; workItem: HarnessWorkItem; ledger?: StackLedger; nextKind: string | null; nextStage: string },
+		input: { workflow: WorkflowRecord; workItem: HarnessWorkItem; ledger?: StackLedger; nextKind: string | null; nextStage: string; nextDelayMs?: number },
 	): Promise<boolean> {
 		const now = Date.now();
 		const nextEffectId = input.nextKind ? this.effectId(claim.job.id, input.nextKind) : null;
@@ -969,7 +999,9 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 				...(input.ledger ? [txn.put(this.ledgerKey(input.workItem.id), input.ledger)] : []),
 			]);
 			if (input.nextKind && nextEffectId) {
-				await txn.put(this.outboxKey(nextEffectId), createCoordinatorEffect({ id: nextEffectId, jobId: job.id, workItemId: input.workItem.id, kind: input.nextKind, now }));
+				const next = createCoordinatorEffect({ id: nextEffectId, jobId: job.id, workItemId: input.workItem.id, kind: input.nextKind, now });
+				if (input.nextDelayMs) next.availableAt = now + input.nextDelayMs;
+				await txn.put(this.outboxKey(nextEffectId), next);
 			}
 			return true;
 		});
@@ -1143,6 +1175,51 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 			await this.scheduleCoordinatorAlarm();
 			this.ctx.waitUntil(this.appendGitHubIssueStatus(current, "Open root stack resumed automatically against the current main SHA."));
 		}
+	}
+
+	/** Move pre-dispatcher long RPC leases onto the short enqueue/poll protocol. */
+	private async recoverSynchronousRunnerLeases(): Promise<void> {
+		if (!this.env.OS_NATIVE_GIT_RUNNER) return;
+		const effects = [...(await this.ctx.storage.list<CoordinatorEffect>({ prefix: OUTBOX_PREFIX })).values()]
+			.filter((effect) => effect.kind === "run-os" && effect.state === "leased" && effect.leaseToken);
+		for (const effect of effects) {
+			const workItem = await this.getWorkItem(effect.workItemId);
+			if (!workItem?.workflowId || !workItem.osNativeGit) continue;
+			let remote: Record<string, unknown> = {};
+			try {
+				const value = await (this.env.OS_NATIVE_GIT_RUNNER as OsNativeGitRunnerGateway).getJob(workItem.osNativeGit.jobId);
+				if (value && typeof value === "object") remote = value as Record<string, unknown>;
+			} catch {
+				continue;
+			}
+			const now = Date.now();
+			await this.ctx.storage.transaction(async (txn) => {
+				const currentEffect = await txn.get<CoordinatorEffect>(this.outboxKey(effect.id));
+				const job = await txn.get<CoordinatorJob>(this.jobKey(workItem.workflowId!));
+				let ledger = await txn.get<StackLedger>(this.ledgerKey(workItem.id));
+				if (!currentEffect || !job || currentEffect.state !== "leased" || currentEffect.leaseToken !== effect.leaseToken || job.lease?.token !== effect.leaseToken) return;
+				if (remote.state === "queued" || remote.state === "running" || remote.state === "terminal") {
+					const pollId = this.effectId(job.id, "poll-os");
+					const poll = createCoordinatorEffect({ id: pollId, jobId: job.id, workItemId: workItem.id, kind: "poll-os", now });
+					await Promise.all([
+						txn.put(this.outboxKey(currentEffect.id), { ...currentEffect, state: "delivered", leaseToken: null, leaseExpiresAt: null, updatedAt: now }),
+						txn.put(this.outboxKey(poll.id), poll),
+						txn.put(this.jobKey(job.id), { ...job, stage: "queued", currentEffectId: pollId, lease: null, updatedAt: now }),
+					]);
+					return;
+				}
+				if (ledger?.runner.stage === "running" && ledger.runner.attemptToken === effect.leaseToken) {
+					const retried = applyStackEvent(ledger, { type: "runner-attempt-retryable", eventId: `dispatcher-upgrade-${effect.attempts}`, generation: ledger.generation, attemptToken: effect.leaseToken! });
+					if (retried.disposition === "applied") ledger = retried.ledger;
+				}
+				await Promise.all([
+					txn.put(this.outboxKey(currentEffect.id), { ...currentEffect, state: "pending", availableAt: now, leaseToken: null, leaseExpiresAt: null, updatedAt: now }),
+					txn.put(this.jobKey(job.id), { ...job, stage: "queued", lease: null, updatedAt: now }),
+					...(ledger ? [txn.put(this.ledgerKey(workItem.id), ledger)] : []),
+				]);
+			});
+		}
+		await this.scheduleCoordinatorAlarm();
 	}
 
 	private async applyWorkflowCallback(callback: WorkflowCallback): Promise<void> {

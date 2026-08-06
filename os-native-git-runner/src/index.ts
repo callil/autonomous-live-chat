@@ -1,5 +1,5 @@
 import { getSandbox, isDurableObjectCodeUpdateReset, isPlatformTransientError, type Sandbox } from "@cloudflare/sandbox";
-import { WorkerEntrypoint } from "cloudflare:workers";
+import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import {
 	buildNanocodexInstructions,
 	NANOCODEX_DEFAULT_MODEL,
@@ -12,6 +12,7 @@ export { Sandbox } from "@cloudflare/sandbox";
 
 type Env = {
 	Sandbox: DurableObjectNamespace<Sandbox>;
+	RUNNER_JOB: DurableObjectNamespace<RunnerJob>;
 	ALLOWED_REPOSITORY: string;
 	APP_HARNESS_RUNNER_SECRET: string;
 	GITHUB_APP_ID: string;
@@ -420,8 +421,47 @@ const httpHandler = {
 
 /** Private capability surface for the App Harness service binding. */
 export class NativeGitRunner extends WorkerEntrypoint<Env> {
-	async runJob(job: NativeGitJob): Promise<unknown> {
-		const response = await httpHandler.fetch(new Request("https://runner.internal/v1/native-git/jobs", {
+	async enqueueJob(job: NativeGitJob): Promise<unknown> {
+		if (!safeJob(job, this.env) || (job.candidate !== undefined && !safeCandidate(job.candidate))) throw new Error("Native Git job is outside the runner contract.");
+		return this.env.RUNNER_JOB.getByName(job.jobId as string).enqueue(job);
+	}
+
+	async getJob(jobId: string): Promise<unknown> {
+		if (!JOB_ID.test(jobId)) throw new Error("Native Git job ID is invalid.");
+		return this.env.RUNNER_JOB.getByName(jobId).status();
+	}
+}
+
+type RunnerJobStatus = {
+	state: "queued" | "running" | "terminal";
+	attempts: number;
+	result?: unknown;
+};
+
+/** Durable dispatcher: enqueue/status RPCs are short; the alarm owns the long Sandbox run. */
+export class RunnerJob extends DurableObject<Env> {
+	async enqueue(job: NativeGitJob): Promise<RunnerJobStatus> {
+		if (!safeJob(job, this.env) || (job.candidate !== undefined && !safeCandidate(job.candidate))) throw new Error("Native Git job is outside the runner contract.");
+		const existing = await this.ctx.storage.get<RunnerJobStatus>("status");
+		if (existing) return existing;
+		const status: RunnerJobStatus = { state: "queued", attempts: 0 };
+		await this.ctx.storage.put({ job, status });
+		await this.ctx.storage.setAlarm(Date.now() + 25);
+		return status;
+	}
+
+	async status(): Promise<RunnerJobStatus | { state: "not-found" }> {
+		return (await this.ctx.storage.get<RunnerJobStatus>("status")) ?? { state: "not-found" };
+	}
+
+	async alarm(): Promise<void> {
+		const job = await this.ctx.storage.get<NativeGitJob>("job");
+		const current = await this.ctx.storage.get<RunnerJobStatus>("status");
+		if (!job || !current || current.state === "terminal") return;
+		const attempts = current.attempts + 1;
+		await this.ctx.storage.put("status", { state: "running", attempts } satisfies RunnerJobStatus);
+		try {
+			const response = await httpHandler.fetch(new Request("https://runner.internal/v1/native-git/jobs", {
 			method: "POST",
 			headers: {
 				Authorization: `Bearer ${this.env.APP_HARNESS_RUNNER_SECRET}`,
@@ -429,8 +469,17 @@ export class NativeGitRunner extends WorkerEntrypoint<Env> {
 			},
 			body: JSON.stringify(job),
 		}), this.env);
-		if (!response.ok) throw new Error(`Native Git runner rejected its private RPC request (${response.status}).`);
-		return response.json();
+			if (!response.ok) throw new Error(`Native Git runner rejected its durable job (${response.status}).`);
+			await this.ctx.storage.put("status", { state: "terminal", attempts, result: await response.json() } satisfies RunnerJobStatus);
+		} catch (error) {
+			if (attempts >= 3) {
+				await this.ctx.storage.put("status", { state: "terminal", attempts, result: { state: "runner-unavailable", classification: "sandbox-runtime-interrupted" } } satisfies RunnerJobStatus);
+				return;
+			}
+			await this.ctx.storage.put("status", { state: "queued", attempts } satisfies RunnerJobStatus);
+			await this.ctx.storage.setAlarm(Date.now() + attempts * 5_000);
+			throw error;
+		}
 	}
 }
 

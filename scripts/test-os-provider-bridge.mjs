@@ -28,6 +28,9 @@ assert.doesNotMatch(workerSource, /OS_RESPONSE_TARGETS/u);
 assert.match(workerConfig, /allow_irrevocable_stub_storage/u);
 assert.match(workerConfig, /"entrypoint": "NativeGitRunner"/u);
 assert.doesNotMatch(workerSource, /OS_NATIVE_GIT_RUNNER_SECRET/u);
+assert.match(workerSource, /\.enqueueJob\(runnerJob\)/u);
+assert.match(workerSource, /\.getJob\(workItem\.osNativeGit\.jobId\)/u);
+assert.doesNotMatch(workerSource, /\.runJob\(runnerJob\)/u);
 
 // Every request reuses one repository workspace/chat. The durable work item is
 // both the message idempotency key and response-correlation key.
