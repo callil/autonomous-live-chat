@@ -88,7 +88,7 @@ jobs:
               const safe = {
                 state: typeof value.state === "string" ? value.state : "invalid-response",
                 exitCode: Number.isInteger(value.exitCode) ? value.exitCode : null,
-                classification: "repository-checkout-not-verified",
+                classification: typeof value.classification === "string" ? value.classification : "repository-checkout-not-verified",
               };
               console.error(JSON.stringify(safe));
               process.exit(1);

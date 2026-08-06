@@ -59,6 +59,25 @@ function classifyGitTransportFailure(stderr: string): "proxy-unreachable" | "pro
 	return "git-transport-failed";
 }
 
+type ProxyPreparation =
+	| { assertion: string; classification?: never }
+	| { assertion?: never; classification: "proxy-unreachable" | "proxy-authorization-rejected" | "proxy-upstream-unavailable" | "proxy-discovery-rejected" };
+
+async function prepareApprovedProxy(job: { jobId: string; repository: string; generation: number }, env: Env): Promise<ProxyPreparation> {
+	const assertion = await signedProxyAssertion(job, env.GIT_PROXY_ASSERTION_SECRET);
+	try {
+		const response = await fetch(`${env.GIT_PROXY_ORIGIN}/${job.repository}.git/info/refs?service=git-upload-pack`, {
+			headers: { Authorization: `Bearer ${assertion}`, "Git-Protocol": "version=2" },
+		});
+		if (response.ok) return { assertion };
+		if (response.status === 401 || response.status === 403 || response.status === 404) return { classification: "proxy-authorization-rejected" };
+		if (response.status >= 500) return { classification: "proxy-upstream-unavailable" };
+		return { classification: "proxy-discovery-rejected" };
+	} catch {
+		return { classification: "proxy-unreachable" };
+	}
+}
+
 async function createSessionAfterRuntimeUpdate(
 	sandbox: ReturnType<typeof getSandbox>,
 	options: Parameters<ReturnType<typeof getSandbox>["createSession"]>[0],
@@ -128,6 +147,10 @@ export default {
 			if (env.GIT_PROXY_ORIGIN !== "https://app-harness-os-git-proxy.coda-a.workers.dev") {
 				return Response.json({ error: "Runner Git proxy origin is not approved." }, { status: 503 });
 			}
+			const proxy = await prepareApprovedProxy(job, env);
+			if ("classification" in proxy) {
+				return Response.json({ jobId: job.jobId, state: "checkout-failed", classification: proxy.classification });
+			}
 
 			const sandbox = getSandbox(env.Sandbox, `app-harness-${job.jobId}-g${job.generation}`, { enableDefaultSession: false });
 			// A retried HTTP request must not collide with an interrupted prior
@@ -150,7 +173,7 @@ export default {
 				await session.setEnvVars({
 					GIT_CONFIG_COUNT: "1",
 					GIT_CONFIG_KEY_0: "http.extraHeader",
-					GIT_CONFIG_VALUE_0: `Authorization: Bearer ${await signedProxyAssertion(job, env.GIT_PROXY_ASSERTION_SECRET)}`,
+					GIT_CONFIG_VALUE_0: `Authorization: Bearer ${proxy.assertion}`,
 				});
 				const clone = await session.exec(
 					"git clone --depth 1 https://app-harness-os-git-proxy.coda-a.workers.dev/callil/autonomous-live-chat.git /workspace/repository",
