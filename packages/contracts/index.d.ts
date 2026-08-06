@@ -8,7 +8,7 @@ export const PLATFORM_LIMITS: {
 };
 
 export const DELIVERY_POLICY: {
-	readonly historyRecordsPerPage: 64;
+	readonly historyRecordsPerPage: number;
 	readonly historyPageBytes: number;
 };
 

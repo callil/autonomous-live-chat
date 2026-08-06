@@ -31,7 +31,7 @@ import {
 	fitsDurableRecord,
 	storageDeleteBatches,
 	utf8Bytes,
-} from "../../../infra/contracts/platform-policy.js";
+} from "@app-harness/contracts";
 
 type ChatMessage = {
 	id: string;

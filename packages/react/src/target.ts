@@ -1,3 +1,5 @@
+import { AUTHORING_ENVELOPE_POLICY } from "@app-harness/contracts";
+
 export type AppHarnessRectangle = {
   x: number;
   y: number;
@@ -17,8 +19,8 @@ export type AppHarnessTarget = {
 
 export type TargetSnapshot = Omit<AppHarnessTarget, "rect"> & { rect: AppHarnessRectangle };
 
-const TARGET_ID = /^[a-z0-9_-]{1,64}$/iu;
-const PAGE = /^\/[a-zA-Z0-9/_-]{0,159}$/u;
+const TARGET_ID = new RegExp(`^[a-z0-9_-]{1,${AUTHORING_ENVELOPE_POLICY.targetIdCharacters}}$`, "iu");
+const PAGE = new RegExp(`^/[a-zA-Z0-9/_-]{0,${AUTHORING_ENVELOPE_POLICY.pagePathCharacters - 1}}$`, "u");
 
 function bounded(value: string | null | undefined, maximum: number): string | undefined {
   const normalized = value?.trim().replace(/\s+/gu, " ");
@@ -35,9 +37,9 @@ export function createTargetEnvelope(snapshot: TargetSnapshot): AppHarnessTarget
   return {
     targetId: snapshot.targetId,
     tag,
-    role: bounded(snapshot.role, 48),
-    label: bounded(snapshot.label, 120),
-    text: bounded(snapshot.text, 120),
+    role: bounded(snapshot.role, AUTHORING_ENVELOPE_POLICY.roleCharacters),
+    label: bounded(snapshot.label, AUTHORING_ENVELOPE_POLICY.safeTextCharacters),
+    text: bounded(snapshot.text, AUTHORING_ENVELOPE_POLICY.safeTextCharacters),
     page: snapshot.page,
     rect: Object.fromEntries(Object.entries(snapshot.rect).map(([key, value]) => [key, Math.round(value * 100) / 100])) as AppHarnessRectangle,
   };
@@ -45,7 +47,7 @@ export function createTargetEnvelope(snapshot: TargetSnapshot): AppHarnessTarget
 
 export function targetAttributes(targetId: string, label: string): Record<string, string> {
   if (!TARGET_ID.test(targetId)) throw new Error("App Harness target IDs must be stable, readable identifiers.");
-  const safeLabel = bounded(label, 120);
+  const safeLabel = bounded(label, AUTHORING_ENVELOPE_POLICY.safeTextCharacters);
   if (!safeLabel) throw new Error("App Harness targets need a concise label.");
   return { "data-app-harness-id": targetId, "data-app-harness-label": safeLabel };
 }

@@ -5,7 +5,7 @@
   "type": "module",
   "workspaces": [
     "apps/demo",
-    "packages/react",
+    "packages/*",
     "infra/workers/*"
   ],
   "scripts": {
