@@ -1,0 +1,106 @@
+name: Deploy OS native Git runner
+
+on:
+  workflow_dispatch:
+    inputs:
+      verify_sandbox:
+        description: Run the fixed Git shell probe after deployment
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: app-harness-os-native-git-runner-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      APP_HARNESS_RUNNER_SECRET: ${{ secrets.APP_HARNESS_RUNNER_SECRET }}
+      APP_HARNESS_GITHUB_APP_ID: ${{ secrets.APP_HARNESS_GITHUB_APP_ID }}
+      APP_HARNESS_GITHUB_APP_INSTALLATION_ID: ${{ secrets.APP_HARNESS_GITHUB_APP_INSTALLATION_ID }}
+      APP_HARNESS_GITHUB_APP_PRIVATE_KEY: ${{ secrets.APP_HARNESS_GITHUB_APP_PRIVATE_KEY }}
+      APP_HARNESS_OPENAI_API_KEY: ${{ secrets.APP_HARNESS_OPENAI_API_KEY }}
+      APP_HARNESS_SANDBOX_CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install and verify runner
+        run: |
+          npm ci
+          npm --workspace @app-harness/native-git-runner run cf-typegen
+          npm --workspace @app-harness/native-git-runner run typecheck
+
+      # Wrangler reads the value only from stdin. It is never written to the
+      # repository, emitted into logs, or passed into the Sandbox container.
+      # Do this before the image upload: each secret write creates a Worker
+      # version, and the final deploy must be the only version transition
+      # immediately before the live probe. That avoids interrupting a Sandbox
+      # Durable Object while the verification request is starting.
+      - name: Install runner bridge secrets before deployment
+        shell: bash
+        run: |
+          test -n "$APP_HARNESS_RUNNER_SECRET"
+          printf '%s' "$APP_HARNESS_RUNNER_SECRET" | npm --workspace @app-harness/native-git-runner exec -- wrangler secret put APP_HARNESS_RUNNER_SECRET --name app-harness-os-native-git
+          test -n "$APP_HARNESS_GITHUB_APP_ID"
+          printf '%s' "$APP_HARNESS_GITHUB_APP_ID" | npm --workspace @app-harness/native-git-runner exec -- wrangler secret put GITHUB_APP_ID --name app-harness-os-native-git
+          test -n "$APP_HARNESS_GITHUB_APP_INSTALLATION_ID"
+          printf '%s' "$APP_HARNESS_GITHUB_APP_INSTALLATION_ID" | npm --workspace @app-harness/native-git-runner exec -- wrangler secret put GITHUB_APP_INSTALLATION_ID --name app-harness-os-native-git
+          test -n "$APP_HARNESS_GITHUB_APP_PRIVATE_KEY"
+          printf '%s' "$APP_HARNESS_GITHUB_APP_PRIVATE_KEY" | npm --workspace @app-harness/native-git-runner exec -- wrangler secret put GITHUB_APP_PRIVATE_KEY --name app-harness-os-native-git
+          test -n "$APP_HARNESS_OPENAI_API_KEY"
+          printf '%s' "$APP_HARNESS_OPENAI_API_KEY" | npm --workspace @app-harness/native-git-runner exec -- wrangler secret put OPENAI_API_KEY --name app-harness-os-native-git
+          test -n "$APP_HARNESS_SANDBOX_CLOUDFLARE_API_TOKEN"
+          printf '%s' "$APP_HARNESS_SANDBOX_CLOUDFLARE_API_TOKEN" | npm --workspace @app-harness/native-git-runner exec -- wrangler secret put SANDBOX_CLOUDFLARE_API_TOKEN --name app-harness-os-native-git
+
+      # GitHub-hosted Ubuntu supplies Docker. Wrangler builds and pushes the
+      # image to Cloudflare's registry; no developer laptop participates.
+      # This is deliberately the final Worker version transition before the
+      # probe and native checkout verification.
+      - name: Build image and deploy runner to Cloudflare
+        run: npm --workspace @app-harness/native-git-runner run deploy
+
+      - name: Verify isolated Sandbox shell
+        if: inputs.verify_sandbox
+        run: |
+          curl --fail --silent --show-error \
+            --retry 8 --retry-all-errors --retry-delay 2 \
+            --request POST \
+            --header "Authorization: Bearer ${APP_HARNESS_RUNNER_SECRET}" \
+            https://app-harness-os-native-git.coda-a.workers.dev/v1/probe
+
+      - name: Verify repository-scoped native checkout
+        if: inputs.verify_sandbox
+        run: |
+          response="$(curl --fail --silent --show-error \
+            --retry 8 --retry-all-errors --retry-delay 2 \
+            --request POST \
+            --header "Authorization: Bearer ${APP_HARNESS_RUNNER_SECRET}" \
+            --header "Content-Type: application/json" \
+            --data '{"jobId":"bridge-verification-g1","repository":"callil/autonomous-live-chat","generation":1}' \
+            https://app-harness-os-native-git.coda-a.workers.dev/v1/native-git/jobs)"
+          node -e '
+            const value = JSON.parse(process.argv[1]);
+            const validHead = typeof value.head === "string" && /^[0-9a-f]{40}$/i.test(value.head);
+            if (value.state !== "checked-out" || !validHead) {
+              const safe = {
+                state: typeof value.state === "string" ? value.state : "invalid-response",
+                exitCode: Number.isInteger(value.exitCode) ? value.exitCode : null,
+                classification: typeof value.classification === "string" ? value.classification : "repository-checkout-not-verified",
+              };
+              console.error(JSON.stringify(safe));
+              process.exit(1);
+            }
+            console.log(JSON.stringify({ state: value.state, head: value.head, classification: "repository-checkout-verified" }));
+          ' "$response"

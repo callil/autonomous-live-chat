@@ -1,0 +1,49 @@
+name: Deploy OS Git credential proxy
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: app-harness-os-git-credential-proxy-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      GIT_PROXY_ASSERTION_SECRET: ${{ secrets.GIT_PROXY_ASSERTION_SECRET }}
+      APP_HARNESS_IDENTITY_SECRET: ${{ secrets.APP_HARNESS_IDENTITY_SECRET }}
+      APP_HARNESS_GITHUB_APP_ID: ${{ secrets.APP_HARNESS_GITHUB_APP_ID }}
+      APP_HARNESS_GITHUB_APP_INSTALLATION_ID: ${{ secrets.APP_HARNESS_GITHUB_APP_INSTALLATION_ID }}
+      APP_HARNESS_GITHUB_APP_PRIVATE_KEY: ${{ secrets.APP_HARNESS_GITHUB_APP_PRIVATE_KEY }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - name: Install and verify proxy
+        run: |
+          npm ci
+          npm --workspace @app-harness/github-bridge run cf-typegen
+          npm --workspace @app-harness/github-bridge run typecheck
+      - name: Deploy default-deny credential proxy
+        run: npm --workspace @app-harness/github-bridge exec -- wrangler deploy
+      - name: Install proxy secrets
+        shell: bash
+        run: |
+          test -n "$GIT_PROXY_ASSERTION_SECRET"
+          test -n "$APP_HARNESS_IDENTITY_SECRET"
+          test -n "$APP_HARNESS_GITHUB_APP_ID"
+          test -n "$APP_HARNESS_GITHUB_APP_INSTALLATION_ID"
+          test -n "$APP_HARNESS_GITHUB_APP_PRIVATE_KEY"
+          printf '%s' "$GIT_PROXY_ASSERTION_SECRET" | npm --workspace @app-harness/github-bridge exec -- wrangler secret put GIT_PROXY_ASSERTION_SECRET --name app-harness-os-git-proxy
+          printf '%s' "$APP_HARNESS_IDENTITY_SECRET" | npm --workspace @app-harness/github-bridge exec -- wrangler secret put APP_HARNESS_IDENTITY_SECRET --name app-harness-os-git-proxy
+          printf '%s' "$APP_HARNESS_GITHUB_APP_ID" | npm --workspace @app-harness/github-bridge exec -- wrangler secret put GITHUB_APP_ID --name app-harness-os-git-proxy
+          printf '%s' "$APP_HARNESS_GITHUB_APP_INSTALLATION_ID" | npm --workspace @app-harness/github-bridge exec -- wrangler secret put GITHUB_APP_INSTALLATION_ID --name app-harness-os-git-proxy
+          printf '%s' "$APP_HARNESS_GITHUB_APP_PRIVATE_KEY" | npm --workspace @app-harness/github-bridge exec -- wrangler secret put GITHUB_APP_PRIVATE_KEY --name app-harness-os-git-proxy

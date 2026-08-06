@@ -1,22 +1,19 @@
 {
-	"name": "app-harness-reference",
-	"version": "0.0.0",
-	"private": true,
-	"type": "module",
-	"scripts": {
-		"test:composer": "node scripts/test-message-composer.mjs",
-		"test:stack": "node scripts/test-stack-scheduler.mjs",
-		"test:native-git-preflight": "node scripts/test-os-native-git-preflight.mjs",
-		"test:os-provider-bridge": "node scripts/test-os-provider-bridge.mjs",
-		"test:coordinator": "node scripts/test-durable-coordinator.mjs",
-    "deploy": "wrangler deploy",
-    "dev": "wrangler dev",
-    "start": "wrangler dev",
-    "cf-typegen": "wrangler types"
-  },
-  "devDependencies": {
-    "@types/node": "^26.1.2",
-    "typescript": "^5.5.2",
-    "wrangler": "^4.119.0"
+  "name": "app-harness",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/demo",
+    "packages/react",
+    "infra/workers/*"
+  ],
+  "scripts": {
+    "dev": "npm --workspace @app-harness/demo run dev",
+    "deploy": "npm --workspace @app-harness/demo run deploy",
+    "cf-typegen": "npm --workspace @app-harness/demo run cf-typegen && npm --workspace @app-harness/native-git-runner run cf-typegen && npm --workspace @app-harness/github-bridge run cf-typegen",
+    "typecheck": "npm run cf-typegen && npm --workspace @app-harness/demo run typecheck && npm --workspace @app-harness/react run typecheck && npm --workspace @app-harness/native-git-runner run typecheck && npm --workspace @app-harness/github-bridge run typecheck",
+    "test": "npm --workspace @app-harness/demo test && node infra/tests/stack-scheduler.test.mjs && node infra/tests/stack-ledger.test.mjs && node infra/tests/native-git-preflight.test.mjs && node infra/tests/os-provider-bridge.test.mjs && node infra/tests/durable-coordinator.test.mjs && node infra/tests/os-stack-gate.test.mjs && npm --workspace @app-harness/react test && npm --workspace @app-harness/native-git-runner test && npm --workspace @app-harness/github-bridge test",
+    "check": "npm run typecheck && npm test && git diff --check"
   }
 }

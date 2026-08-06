@@ -74,7 +74,7 @@ jobs:
         id: candidate
         env:
           ALLOW_MERGED: true
-        run: node scripts/os-stack-gate.mjs verify-pr
+        run: node infra/scripts/os-stack-gate.mjs verify-pr
       - name: Wait for newest signed validation bound to this PR, head, and base
         id: validation
         env:
@@ -82,7 +82,7 @@ jobs:
           EXPECTED_BASE: ${{ steps.candidate.outputs.candidate_base_sha }}
           EXPECTED_HEAD: ${{ steps.candidate.outputs.head_sha }}
           PR: ${{ steps.candidate.outputs.pull_request }}
-        run: node scripts/os-stack-gate.mjs wait-status
+        run: node infra/scripts/os-stack-gate.mjs wait-status
 
   integrate:
     needs: prepare
@@ -130,16 +130,7 @@ jobs:
       - name: Install exact integration dependencies without privileged secrets
         run: npm ci
       - name: Test exact current-main integration without privileged secrets
-        run: |
-          npm run cf-typegen
-          npx tsc --noEmit
-          npm run test:stack
-          npm run test:native-git-preflight
-          npm run test:os-provider-bridge
-          npm run test:coordinator
-          npm --prefix os-native-git-runner run test:runner-contract
-          node scripts/test-os-stack-gate.mjs
-          git diff --check
+        run: npm run check
 
   promote:
     needs: [prepare, integrate]
@@ -173,7 +164,7 @@ jobs:
         env:
           ALLOW_MERGED: true
           GH_TOKEN: ${{ github.token }}
-        run: node scripts/os-stack-gate.mjs verify-pr
+        run: node infra/scripts/os-stack-gate.mjs verify-pr
       - name: Merge only the tested immutable head
         if: env.ALREADY_MERGED != 'true'
         env:
@@ -217,15 +208,7 @@ jobs:
         run: npm ci
       - name: Revalidate current main during already-merged recovery
         if: env.ALREADY_MERGED == 'true'
-        run: |
-          npm run cf-typegen
-          npx tsc --noEmit
-          npm run test:stack
-          npm run test:native-git-preflight
-          npm run test:os-provider-bridge
-          npm run test:coordinator
-          node scripts/test-os-stack-gate.mjs
-          git diff --check
+        run: npm run check
       - name: Deploy verified current main
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -233,7 +216,7 @@ jobs:
         run: |
           remote_main="$(gh api "repos/${GH_REPO}/git/ref/heads/main" --jq '.object.sha')"
           test "$remote_main" = "${{ steps.verify_merge.outputs.deployment_sha }}"
-          npx wrangler deploy
+          npm run deploy
   callback:
     needs: [prepare, integrate, promote]
     if: always()

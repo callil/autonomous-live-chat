@@ -1,0 +1,16 @@
+{
+  "name": "@app-harness/native-git-runner",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "cf-typegen": "wrangler types",
+    "typecheck": "tsc --noEmit",
+    "test": "node scripts/test-nanocodex-runner.mjs"
+  },
+  "devDependencies": {
+    "@cloudflare/sandbox": "0.12.4",
+    "typescript": "^5.9.3",
+    "wrangler": "^4.119.0"
+  }
+}
