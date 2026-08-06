@@ -32,6 +32,8 @@ NanoCodex 0.3 is an ephemeral coding child, not the central orchestrator. Ordina
 
 Cloudflare may restart a Sandbox during a runtime rollout. A disappeared process, the known rollout signal, an upstream 5xx, or an empty runner response is treated as infrastructure interruption: the durable coordinator releases the attempt lease and retries up to three times. A structured NanoCodex implementation, validation, or policy failure is not retried blindly and instead moves the work item to review.
 
+The App Harness calls the runner through a named `NativeGitRunner` service-binding RPC entrypoint. The binding itself is the Cloudflare capability, so this private hop has no duplicated shared bearer secret to rotate or desynchronize. The runner's public verification endpoints remain separately authenticated.
+
 The child receives the full checkout and normal engineering tools. Its output wrapper retains only bounded provenance (model, response IDs, tool names) plus independently verified Git/GitHub artifacts. Transcripts, tool arguments, diffs, credentials, and shell output are not copied into the public ledger.
 
 ## Truth boundary

@@ -46,7 +46,8 @@
 		},
 		{
 			"binding": "OS_NATIVE_GIT_RUNNER",
-			"service": "app-harness-os-native-git"
+			"service": "app-harness-os-native-git",
+			"entrypoint": "NativeGitRunner"
 		},
 		{
 			"binding": "GITHUB_IDENTITY_BRIDGE",
