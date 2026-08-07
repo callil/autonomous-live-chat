@@ -42,3 +42,30 @@ history, #128–#139) are exactly what allowed request A to reconcile to
 
 No step in either request involved a manual implementation, a hand-created
 branch or PR, a direct merge, or an invented status.
+
+## Request C — first full pass of the event-driven architecture (2026-08-07)
+
+Request text (submitted through the production room protocol): *"Give the
+letter inside each avatar circle a dynamically generated color derived from
+the user's name, so every user's initial gets a stable distinct color."*
+
+Completed end to end in seventeen minutes on the rebuilt stack: pure-Workers
+operator (one Durable Object per work item, strict schema tools), event-driven
+pokes with no lease or wake machinery, disposable Sandbox runs with
+per-attempt identity, push-based completion, and live coding-agent heartbeats
+in the public feed.
+
+| Step | Evidence |
+| --- | --- |
+| Durable ledger entry | work item seq 20, submitted 18:05:48Z |
+| Classification + GitHub issue | <https://github.com/callil/autonomous-live-chat/issues/176> (closed automatically) |
+| Isolated coding-agent run, native Git | branch `app-harness-os/176/g1`; live heartbeats (cloned 18:06:04Z, editing 18:06:05Z) |
+| One-node stack PR | <https://github.com/callil/autonomous-live-chat/pull/177> |
+| Immutable candidate CI | <https://github.com/callil/autonomous-live-chat/actions/runs/31205635404> |
+| Serialized promotion, merge, deploy | <https://github.com/callil/autonomous-live-chat/actions/runs/31206551592> (merged 18:22:27Z) |
+| Production change | name-derived colors render on every avatar initial |
+| Truthful completion | ledger `completed`; issue auto-closed |
+
+No step involved a manual implementation, a hand-created branch or PR, a
+direct merge, or an invented status. The platform work that enabled it
+(PRs #147–#178) is the day's record of every root cause found and closed.
