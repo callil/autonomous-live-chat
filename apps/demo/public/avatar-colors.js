@@ -1,6 +1,6 @@
 function avatarColor(name) {
   let hash = 2166136261;
-  for (const character of name.trim().normalize('NFKC').toLocaleLowerCase()) {
+  for (const character of name.trim().normalize('NFKC').toLowerCase()) {
     hash ^= character.codePointAt(0);
     hash = Math.imul(hash, 16777619);
   }
