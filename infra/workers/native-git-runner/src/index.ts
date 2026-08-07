@@ -37,7 +37,7 @@ const JOB_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/u;
 const BRANCH = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,159}$/u;
 const SHA = /^[0-9a-f]{40}$/iu;
 const RUNNER_IMAGE_REVISION = "nc031-async010";
-const NANOCODEX_EXECUTION_TIMEOUT_MS = 720_000;
+const NANOCODEX_EXECUTION_TIMEOUT_MS = 300_000;
 // The Worker's own backstop, past every in-container watchdog. If a process is
 // still non-terminal this long after it started, the container-side deadlines
 // have all failed to fire and the run is wedged for good.
