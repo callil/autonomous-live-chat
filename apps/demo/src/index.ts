@@ -166,7 +166,7 @@ const MESSAGE_SEQUENCE_KEY = "sequence:message";
 const ANNOTATION_SEQUENCE_KEY = "sequence:annotation";
 const WORK_ITEM_SEQUENCE_KEY = "sequence:work-item";
 const LEDGER_MIGRATION_KEY = "migration:ledger-only:v1";
-const CLEAN_OPERATOR_STATE_KEY = "migration:clean-operator-state:v1";
+const CLEAN_OPERATOR_STATE_KEY = "migration:clean-operator-state:v2";
 const WAKE_BATCH_SIZE = 16;
 const WAKE_RETRY_BASE_MS = 1_000;
 const OPERATOR_LEASE_MAX_MS = 15 * 60_000;
@@ -183,8 +183,8 @@ const OPERATOR_EMAIL = "callil.capuozzo@gmail.com";
 // Cloudflare OS freezes workspace resources and chat capability types. Create
 // one clean permanent operator identity after the exact Gatekeeper schema is
 // live; experimental workspaces are never reused.
-const OPERATOR_GADGET_KEY = "app-harness-operator";
-const OPERATOR_CHAT_KEY = "ledger-operator";
+const OPERATOR_GADGET_KEY = "app-harness-operator-v2";
+const OPERATOR_CHAT_KEY = "ledger-operator-v2";
 const OPERATOR_INSTRUCTION = "Operate APP_HARNESS. Read getWorkItem({workItemId}) and listActions({workItemId}), then progress one step only: claim -> classification -> issue -> plan -> implementation -> candidate -> validating -> promotion -> deployed -> completed. Declared observations: getMainSha, inspectImplementation, getCandidate, observeCandidateValidation, findPromotionRun, inspectPromotionRun. Declared writes: stageClaim, stageClassification, stageIssue, stagePlan, stageImplementation, stageCandidate, stagePromotion, stageState, stageRelease, stageDefer. Reconcile existing effects first and use declared argument types only; never invent methods. stageRelease and stageDefer are parking exits: after either, stop. If blocked or unchanged, stop. Reply exactly PROGRESSED, PARKED:<code>, or COMPLETE.";
 const GITHUB_REPOSITORY = "callil/autonomous-live-chat";
 const PRODUCTION_DEPLOYMENT_HOST = "autonomous-live-chat.coda-a.workers.dev";
