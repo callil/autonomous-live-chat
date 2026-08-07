@@ -187,7 +187,20 @@ export function commandFor(name, args, ctx) {
 			if (!ctx.candidatePr || !ctx.candidateHeadSha) throw new Error("No validated candidate is recorded for promotion yet.");
 			return { kind: "promote", pullRequestNumber: ctx.candidatePr, headSha: ctx.candidateHeadSha, dispatchKey: ctx.minted };
 		}
-		case "stageState": return { kind: "record-state", phase: args.phase, ...stageArtifacts(args.artifacts), message: args.message, source: args.source };
+		case "stageState": {
+			// Evidence is loop-owned: whatever facts the snapshot carries override
+			// anything the model typed, so a retyped or invented merge SHA can
+			// never reach the ledger. The model chooses the phase; the loop
+			// supplies the proof.
+			const staged = stageArtifacts(args.artifacts);
+			const facts = ctx.facts ?? {};
+			const artifacts = { ...(staged.artifacts ?? {}) };
+			if (facts.validation) artifacts.validation = facts.validation;
+			if (facts.merged) artifacts.merged = facts.merged;
+			if (facts.mainDeploy) artifacts.mainDeploy = facts.mainDeploy;
+			if (facts.promotion) artifacts.promotion = facts.promotion;
+			return { kind: "record-state", phase: args.phase, ...(Object.keys(artifacts).length ? { artifacts } : {}), message: args.message, source: args.source };
+		}
 		default: throw new Error(`Unknown operator stage tool '${name}'.`);
 	}
 }

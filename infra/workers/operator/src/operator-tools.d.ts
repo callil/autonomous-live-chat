@@ -17,6 +17,7 @@ export type StageContext = {
 	issueNumber: number;
 	candidatePr: number;
 	candidateHeadSha: string;
+	facts?: Record<string, Record<string, unknown> | undefined>;
 };
 
 export const SYSTEM_PROMPT: string;
