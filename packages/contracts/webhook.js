@@ -13,6 +13,7 @@ const DELIVERY_ID = /^[A-Za-z0-9][A-Za-z0-9-]{0,99}$/u;
 
 export const GITHUB_CANDIDATE_WORKFLOW_PATH = ".github/workflows/os-stack-ci.yml";
 export const GITHUB_PROMOTION_WORKFLOW_PATH = ".github/workflows/os-stack-promote.yml";
+export const GITHUB_MAIN_DEPLOY_WORKFLOW_PATH = ".github/workflows/deploy-demo-on-main.yml";
 export const GITHUB_CANDIDATE_BRANCH_PREFIX = "app-harness-os/";
 /** Must match the `run-name` interpolation in os-stack-promote.yml. */
 export const GITHUB_PROMOTION_RUN_PREFIX = "App Harness promotion · ";
@@ -84,20 +85,40 @@ export function extractGithubWebhookFact({ event, payload }) {
 			if (!IDENTIFIER.test(dispatchKey)) return null;
 			return { kind: "promotion", ...base, dispatchKey };
 		}
+		if (run.path.startsWith(GITHUB_MAIN_DEPLOY_WORKFLOW_PATH)) {
+			// The auto-merge fast lane's deploy leg: a completed main deploy is
+			// promotion-equivalent evidence. The run deploys exactly its head
+			// revision, so head_sha is the identity — matched later against the
+			// merged fact's merge commit.
+			if (run.event !== "push" && run.event !== "workflow_dispatch") return null;
+			if (run.head_branch !== "main") return null;
+			if (typeof run.head_sha !== "string" || !SHA.test(run.head_sha)) return null;
+			return { kind: "main-deploy", ...base, headSha: run.head_sha };
+		}
 		return null;
 	}
 	if (event === "pull_request") {
-		// A wake accelerator plus corroborating fact only: the runner's own
-		// completion callback stays the authoritative candidate path because it
-		// alone carries the active run's bearer credential and reports failure.
-		if (payload.action !== "opened") return null;
 		const pull = payload.pull_request;
 		if (!pull || typeof pull !== "object" || !pull.head || typeof pull.head !== "object") return null;
 		const url = githubHtmlUrl(pull.html_url);
 		if (!Number.isSafeInteger(pull.number) || pull.number < 1 || !url) return null;
 		if (typeof pull.head.ref !== "string" || !pull.head.ref.startsWith(GITHUB_CANDIDATE_BRANCH_PREFIX)) return null;
 		if (typeof pull.head.sha !== "string" || !SHA.test(pull.head.sha)) return null;
-		return { kind: "candidate", number: pull.number, url, headSha: pull.head.sha, branch: pull.head.ref };
+		if (payload.action === "opened") {
+			// A wake accelerator plus corroborating fact only: the runner's own
+			// completion callback stays the authoritative candidate path because it
+			// alone carries the active run's bearer credential and reports failure.
+			return { kind: "candidate", number: pull.number, url, headSha: pull.head.sha, branch: pull.head.ref };
+		}
+		if (payload.action === "closed") {
+			// The fast lane's merge evidence: a candidate PR that closed merged.
+			// The merge commit is what the main deploy workflow will report as its
+			// head revision, so it is stored as the join key between the two facts.
+			if (pull.merged !== true) return null;
+			if (typeof pull.merge_commit_sha !== "string" || !SHA.test(pull.merge_commit_sha)) return null;
+			return { kind: "merged", number: pull.number, url, headSha: pull.head.sha, branch: pull.head.ref, mergeCommitSha: pull.merge_commit_sha };
+		}
+		return null;
 	}
 	return null;
 }
@@ -105,19 +126,24 @@ export function extractGithubWebhookFact({ event, payload }) {
 /** Re-validate a fact that crossed the bridge->ledger service boundary. */
 export function normalizeGithubWebhookFact(value) {
 	if (!value || typeof value !== "object") return null;
-	if (value.kind === "validation" || value.kind === "promotion") {
+	if (value.kind === "validation" || value.kind === "promotion" || value.kind === "main-deploy") {
 		const base = workflowRunBase({ id: value.runId, html_url: value.url, conclusion: value.conclusion, created_at: value.createdAt });
 		if (!base) return null;
-		if (value.kind === "validation") {
-			return typeof value.headSha === "string" && SHA.test(value.headSha) ? { kind: "validation", ...base, headSha: value.headSha } : null;
+		if (value.kind === "promotion") {
+			return typeof value.dispatchKey === "string" && IDENTIFIER.test(value.dispatchKey) ? { kind: "promotion", ...base, dispatchKey: value.dispatchKey } : null;
 		}
-		return typeof value.dispatchKey === "string" && IDENTIFIER.test(value.dispatchKey) ? { kind: "promotion", ...base, dispatchKey: value.dispatchKey } : null;
+		return typeof value.headSha === "string" && SHA.test(value.headSha) ? { kind: value.kind, ...base, headSha: value.headSha } : null;
 	}
-	if (value.kind === "candidate") {
+	if (value.kind === "candidate" || value.kind === "merged") {
 		const url = githubHtmlUrl(value.url);
 		if (!Number.isSafeInteger(value.number) || value.number < 1 || !url) return null;
 		if (typeof value.branch !== "string" || !value.branch.startsWith(GITHUB_CANDIDATE_BRANCH_PREFIX)) return null;
 		if (typeof value.headSha !== "string" || !SHA.test(value.headSha)) return null;
+		if (value.kind === "merged") {
+			return typeof value.mergeCommitSha === "string" && SHA.test(value.mergeCommitSha)
+				? { kind: "merged", number: value.number, url, headSha: value.headSha, branch: value.branch, mergeCommitSha: value.mergeCommitSha }
+				: null;
+		}
 		return { kind: "candidate", number: value.number, url, headSha: value.headSha, branch: value.branch };
 	}
 	return null;
@@ -129,7 +155,7 @@ export function normalizeGithubWebhookFact(value) {
  * candidate/validation artifacts, so an old-generation head revision no longer
  * matches anything and the event drops on the floor.
  */
-export function matchGithubFactToWorkItem(fact, items, promotions = []) {
+export function matchGithubFactToWorkItem(fact, items, promotions = [], merges = []) {
 	const ordered = [...items].toSorted((left, right) => (left.createdAt ?? 0) - (right.createdAt ?? 0));
 	if (fact.kind === "validation") {
 		return ordered.find((item) => item.artifacts?.candidate?.headSha === fact.headSha)?.id ?? null;
@@ -141,6 +167,18 @@ export function matchGithubFactToWorkItem(fact, items, promotions = []) {
 	if (fact.kind === "candidate") {
 		return ordered.find((item) => item.plan?.branch === fact.branch)?.id ?? null;
 	}
+	if (fact.kind === "merged") {
+		// The merged PR carries both immutable candidate identities: prefer the
+		// recorded candidate head revision, fall back to the plan branch.
+		return ordered.find((item) => item.artifacts?.candidate?.headSha === fact.headSha || item.plan?.branch === fact.branch)?.id ?? null;
+	}
+	if (fact.kind === "main-deploy") {
+		// A main deploy run deploys whatever main is; the only honest join is
+		// its head revision against a recorded merged fact's merge commit,
+		// which the caller supplies from the per-item fact records.
+		const live = new Set(ordered.map((item) => item.id));
+		return merges.find((entry) => entry.mergeCommitSha === fact.headSha && live.has(entry.workItemId))?.workItemId ?? null;
+	}
 	return null;
 }
 
@@ -151,8 +189,9 @@ export function matchGithubFactToWorkItem(fact, items, promotions = []) {
  */
 export function mergeGithubFact(existing, fact, now) {
 	const facts = existing && typeof existing === "object" ? existing : {};
-	if (fact.kind === "validation" || fact.kind === "promotion") {
-		const current = facts[fact.kind];
+	if (fact.kind === "validation" || fact.kind === "promotion" || fact.kind === "main-deploy") {
+		const key = fact.kind === "main-deploy" ? "mainDeploy" : fact.kind;
+		const current = facts[key];
 		if (current) {
 			if (current.runId === fact.runId) {
 				// Same run: only a new non-null conclusion is new evidence.
@@ -163,13 +202,18 @@ export function mergeGithubFact(existing, fact, now) {
 			}
 		}
 		const merged = { runId: fact.runId, url: fact.url, conclusion: fact.conclusion, createdAt: fact.createdAt, at: now };
-		if (fact.kind === "validation") merged.headSha = fact.headSha;
-		else merged.dispatchKey = fact.dispatchKey;
-		return { ...facts, [fact.kind]: merged };
+		if (fact.kind === "promotion") merged.dispatchKey = fact.dispatchKey;
+		else merged.headSha = fact.headSha;
+		return { ...facts, [key]: merged };
 	}
 	if (fact.kind === "candidate") {
 		if (facts.candidate && facts.candidate.headSha === fact.headSha) return null;
 		return { ...facts, candidate: { number: fact.number, url: fact.url, headSha: fact.headSha, branch: fact.branch, at: now } };
+	}
+	if (fact.kind === "merged") {
+		// Idempotent per merge commit: a candidate merges exactly once.
+		if (facts.merged && facts.merged.mergeCommitSha === fact.mergeCommitSha) return null;
+		return { ...facts, merged: { number: fact.number, url: fact.url, headSha: fact.headSha, branch: fact.branch, mergeCommitSha: fact.mergeCommitSha, at: now } };
 	}
 	return null;
 }

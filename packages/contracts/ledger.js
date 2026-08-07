@@ -226,19 +226,27 @@ export function recordLedgerExternalState(item, { phase, artifacts = {}, now }) 
 	// validation artifacts (for example the CI run reference) idempotently.
 	if (phase === "validating" && item.phase !== "candidate" && item.phase !== "validating") throw new Error("Only a candidate can enter validation.");
 	if (phase === "promoting" && item.phase !== "validating") throw new Error("Only a validated candidate can enter promotion.");
-	// A deployed record straight from validating is legal when promotion
-	// evidence exists: either the observed run reference or the durable
-	// dispatch key of the applied promote command.
-	if (phase === "deployed" && item.phase !== "promoting" && !(item.phase === "validating" && (artifacts.promotion ?? item.artifacts.promotion))) {
-		throw new Error("Recording deployed requires phase promoting, or promotion evidence in artifacts.promotion.");
-	}
-	// A dispatch receipt is intent, not deployment: deployed requires the
-	// promotion run's own success conclusion, so completed can never precede
-	// the merge it claims.
+	// Deployed is legal on exactly two evidence paths. Promotion lane: phase
+	// promoting, or validating with promotion evidence (the observed run
+	// reference or the durable dispatch key of the applied promote command).
+	// Auto-merge fast lane: validating with the merged pull request AND the
+	// main deploy run as evidence. No evidence, no deployed.
 	{
 		const promotion = artifacts.promotion ?? item.artifacts.promotion;
-		if (phase === "deployed" && (promotion == null || promotion.conclusion !== "success")) {
-			throw new Error("Recording deployed requires the promotion run's success conclusion in artifacts.promotion.");
+		const merged = artifacts.merged ?? item.artifacts.merged;
+		const mainDeploy = artifacts.mainDeploy ?? item.artifacts.mainDeploy;
+		const autoMergeEvidence = merged != null && mainDeploy != null;
+		if (phase === "deployed" && item.phase !== "promoting" && !(item.phase === "validating" && (promotion || autoMergeEvidence))) {
+			throw new Error("Recording deployed requires phase promoting, or promotion evidence in artifacts.promotion, or merged plus main-deploy evidence.");
+		}
+		// A dispatch receipt or a merge alone is intent, not deployment: deployed
+		// requires a deploy run's own success conclusion — the promotion run's,
+		// or the main deploy run's alongside the merged fact — so completed can
+		// never precede the deployment it claims.
+		const promotionDeployed = promotion != null && promotion.conclusion === "success";
+		const autoMergeDeployed = autoMergeEvidence && mainDeploy.conclusion === "success";
+		if (phase === "deployed" && !promotionDeployed && !autoMergeDeployed) {
+			throw new Error("Recording deployed requires a success conclusion in artifacts.promotion, or artifacts.merged plus a success conclusion in artifacts.mainDeploy.");
 		}
 	}
 	if (phase === "completed" && item.phase !== "deployed") throw new Error("Only a deployed candidate can complete.");

@@ -54,16 +54,38 @@ const candidate = extractGithubWebhookFact({
 	payload: { action: "opened", pull_request: { number: 55, html_url: "https://github.com/callil/autonomous-live-chat/pull/55", head: { ref: "app-harness-os/42/g1", sha: SHA_A } } },
 });
 assert.deepEqual(candidate, { kind: "candidate", number: 55, url: "https://github.com/callil/autonomous-live-chat/pull/55", headSha: SHA_A, branch: "app-harness-os/42/g1" }, "an opened candidate pull request becomes a corroborating fact");
-assert.equal(extractGithubWebhookFact({ event: "pull_request", payload: { action: "closed", pull_request: { number: 55, html_url: "https://github.com/x/y/pull/55", head: { ref: "app-harness-os/42/g1", sha: SHA_A } } } }), null);
+assert.equal(extractGithubWebhookFact({ event: "pull_request", payload: { action: "closed", pull_request: { number: 55, html_url: "https://github.com/x/y/pull/55", head: { ref: "app-harness-os/42/g1", sha: SHA_A } } } }), null, "a closed-unmerged candidate carries no fact");
 assert.equal(extractGithubWebhookFact({ event: "pull_request", payload: { action: "opened", pull_request: { number: 55, html_url: "https://github.com/x/y/pull/55", head: { ref: "feature/other", sha: SHA_A } } } }), null);
 assert.equal(extractGithubWebhookFact({ event: "check_suite", payload: { action: "completed" } }), null, "unsubscribed events never produce facts");
 
+// ---- auto-merge fast lane: merged and main-deploy facts ----
+const MERGE_SHA = "c".repeat(40);
+const merged = extractGithubWebhookFact({
+	event: "pull_request",
+	payload: { action: "closed", pull_request: { number: 55, html_url: "https://github.com/callil/autonomous-live-chat/pull/55", merged: true, merge_commit_sha: MERGE_SHA, head: { ref: "app-harness-os/42/g1", sha: SHA_A } } },
+});
+assert.deepEqual(merged, { kind: "merged", number: 55, url: "https://github.com/callil/autonomous-live-chat/pull/55", headSha: SHA_A, branch: "app-harness-os/42/g1", mergeCommitSha: MERGE_SHA }, "a candidate PR closed merged becomes a merged fact carrying the merge commit join key");
+assert.equal(extractGithubWebhookFact({ event: "pull_request", payload: { action: "closed", pull_request: { number: 55, html_url: "https://github.com/callil/autonomous-live-chat/pull/55", merged: false, merge_commit_sha: MERGE_SHA, head: { ref: "app-harness-os/42/g1", sha: SHA_A } } } }), null, "closed without merged=true is never merge evidence");
+assert.equal(extractGithubWebhookFact({ event: "pull_request", payload: { action: "closed", pull_request: { number: 55, html_url: "https://github.com/callil/autonomous-live-chat/pull/55", merged: true, merge_commit_sha: "short", head: { ref: "app-harness-os/42/g1", sha: SHA_A } } } }), null, "a merged fact requires a full merge commit SHA");
+assert.equal(extractGithubWebhookFact({ event: "pull_request", payload: { action: "closed", pull_request: { number: 55, html_url: "https://github.com/callil/autonomous-live-chat/pull/55", merged: true, merge_commit_sha: MERGE_SHA, head: { ref: "feature/other", sha: SHA_A } } } }), null, "merges outside the candidate branch namespace are dropped");
+
+const mainDeploy = extractGithubWebhookFact({
+	event: "workflow_run",
+	payload: { action: "completed", workflow_run: candidateRun({ path: ".github/workflows/deploy-demo-on-main.yml", event: "push", head_branch: "main", head_sha: MERGE_SHA }) },
+});
+assert.deepEqual(mainDeploy, { kind: "main-deploy", runId: 900, url: RUN_URL, conclusion: "success", createdAt: "2026-08-06T20:00:00Z", headSha: MERGE_SHA }, "a completed main deploy run becomes promotion-equivalent evidence");
+assert.ok(extractGithubWebhookFact({ event: "workflow_run", payload: { action: "completed", workflow_run: candidateRun({ path: ".github/workflows/deploy-demo-on-main.yml", event: "workflow_dispatch", head_branch: "main", head_sha: MERGE_SHA }) } }), "a manually dispatched main deploy still carries evidence");
+assert.equal(extractGithubWebhookFact({ event: "workflow_run", payload: { action: "completed", workflow_run: candidateRun({ path: ".github/workflows/deploy-demo-on-main.yml", event: "push", head_branch: "feature/x", head_sha: MERGE_SHA }) } }), null, "a deploy run off main is never deployment evidence");
+assert.equal(extractGithubWebhookFact({ event: "workflow_run", payload: { action: "completed", workflow_run: candidateRun({ path: ".github/workflows/deploy-demo-on-main.yml", event: "pull_request_target", head_branch: "main", head_sha: MERGE_SHA }) } }), null, "only push and workflow_dispatch deploy runs are trusted");
+
 // ---- boundary re-validation round-trips every extracted fact ----
-for (const fact of [validation, promotion, candidate]) {
+for (const fact of [validation, promotion, candidate, merged, mainDeploy]) {
 	assert.deepEqual(normalizeGithubWebhookFact(JSON.parse(JSON.stringify(fact))), fact, `${fact.kind} fact survives the service boundary`);
 }
 assert.equal(normalizeGithubWebhookFact({ kind: "validation", runId: 900, url: RUN_URL, conclusion: "success", createdAt: "2026-08-06T20:00:00Z", headSha: "short" }), null);
 assert.equal(normalizeGithubWebhookFact({ kind: "promotion", runId: 900, url: RUN_URL, conclusion: "success", createdAt: "2026-08-06T20:00:00Z", dispatchKey: "bad key" }), null);
+assert.equal(normalizeGithubWebhookFact({ kind: "main-deploy", runId: 900, url: RUN_URL, conclusion: "success", createdAt: "2026-08-06T20:00:00Z", headSha: "short" }), null);
+assert.equal(normalizeGithubWebhookFact({ ...merged, mergeCommitSha: "short" }), null, "a merged fact without a full merge commit dies at the boundary");
 assert.equal(normalizeGithubWebhookFact({ kind: "elsewhere" }), null);
 
 // ---- matching: immutable identities, oldest live item wins ----
@@ -76,6 +98,12 @@ assert.equal(matchGithubFactToWorkItem({ ...validation, headSha: SHA_B }, items)
 assert.equal(matchGithubFactToWorkItem(promotion, items, [{ workItemId: "item-old", dispatchKey: "dispatch-work-42" }]), "item-old", "promotion matches by the promote action's durable dispatch key");
 assert.equal(matchGithubFactToWorkItem(promotion, items, [{ workItemId: "item-gone", dispatchKey: "dispatch-work-42" }]), null, "a promotion for a non-live work item is dropped");
 assert.equal(matchGithubFactToWorkItem(candidate, items), "item-old", "candidate corroboration matches by the plan branch");
+assert.equal(matchGithubFactToWorkItem(merged, items), "item-old", "a merged fact matches by the recorded candidate head revision");
+assert.equal(matchGithubFactToWorkItem({ ...merged, headSha: SHA_B }, items), "item-old", "a merged fact still matches by the plan branch when the head revision is unrecorded");
+assert.equal(matchGithubFactToWorkItem({ ...merged, headSha: SHA_B, branch: "app-harness-os/99/g1" }, items), null, "a merge outside every live identity is dropped");
+assert.equal(matchGithubFactToWorkItem(mainDeploy, items, [], [{ workItemId: "item-old", mergeCommitSha: MERGE_SHA }]), "item-old", "a main deploy matches by head revision against the recorded merge commit");
+assert.equal(matchGithubFactToWorkItem(mainDeploy, items, [], [{ workItemId: "item-old", mergeCommitSha: SHA_B }]), null, "a deploy of someone else's merge commit never matches");
+assert.equal(matchGithubFactToWorkItem(mainDeploy, items, [], [{ workItemId: "item-gone", mergeCommitSha: MERGE_SHA }]), null, "a main deploy for a non-live work item is dropped");
 
 // ---- merge: monotonic, never downgrades recorded evidence ----
 const first = mergeGithubFact({ runnerResult: { runId: "run-1" } }, validation, 1_000);
@@ -97,6 +125,17 @@ const corroborated = mergeGithubFact(promoted, candidate, 4_000);
 assert.equal(corroborated.candidate.headSha, SHA_A);
 assert.equal(mergeGithubFact(corroborated, candidate, 5_000), null, "candidate corroboration is idempotent per head revision");
 assert.equal(mergeGithubFact(corroborated, { ...candidate, headSha: SHA_B, number: 56 }, 5_000).candidate.number, 56, "a restacked candidate replaces the corroboration");
+
+// ---- fast lane merge: merged join key, then the deploy run rides in ----
+const withMerge = mergeGithubFact(corroborated, merged, 6_000);
+assert.deepEqual(withMerge.merged, { number: 55, url: "https://github.com/callil/autonomous-live-chat/pull/55", headSha: SHA_A, branch: "app-harness-os/42/g1", mergeCommitSha: MERGE_SHA, at: 6_000 });
+assert.equal(withMerge.validation.runId, 901, "the merged fact never disturbs recorded workflow evidence");
+assert.equal(mergeGithubFact(withMerge, merged, 7_000), null, "a redelivered merged fact adds nothing: a candidate merges exactly once");
+const withDeploy = mergeGithubFact(withMerge, mainDeploy, 8_000);
+assert.deepEqual(withDeploy.mainDeploy, { runId: 900, url: RUN_URL, conclusion: "success", createdAt: "2026-08-06T20:00:00Z", headSha: MERGE_SHA, at: 8_000 }, "the main deploy run records under its own key");
+assert.equal(mergeGithubFact(withDeploy, mainDeploy, 9_000), null, "a redelivered identical deploy run adds nothing");
+assert.equal(mergeGithubFact(withDeploy, { ...mainDeploy, conclusion: null }, 9_000), null, "a null conclusion never downgrades recorded deploy evidence");
+assert.equal(mergeGithubFact(withDeploy, { ...mainDeploy, runId: 902, createdAt: "2026-08-06T22:00:00Z", conclusion: "failure" }, 9_000).mainDeploy.runId, 902, "a newer deploy run replaces the recorded one");
 
 // ---- transport dedupe: delivery GUID markers with bounded retention ----
 assert.equal(normalizeGithubDeliveryId("72d3162e-cc78-11e3-81ab-4c9367dc0958"), "72d3162e-cc78-11e3-81ab-4c9367dc0958");

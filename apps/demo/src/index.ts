@@ -145,7 +145,11 @@ type ExternalFacts = {
 	runnerProgress?: { runId: string; step: string; at: number; events?: string[] };
 	validation?: { runId: number; url: string; conclusion: string | null; createdAt: string; headSha: string; at: number };
 	promotion?: { runId: number; url: string; conclusion: string | null; createdAt: string; dispatchKey: string; at: number };
+	/** The auto-merge fast lane's deploy leg: the main deploy run whose head revision is the item's merge commit. */
+	mainDeploy?: { runId: number; url: string; conclusion: string | null; createdAt: string; headSha: string; at: number };
 	candidate?: { number: number; url: string; headSha: string; branch: string; at: number };
+	/** The auto-merge fast lane's merge leg: the candidate PR closed merged, carrying the merge commit join key. */
+	merged?: { number: number; url: string; headSha: string; branch: string; mergeCommitSha: string; at: number };
 };
 type ExternalFactInput =
 	| { source: "runner"; workItemId: string; runId: string; fact: NonNullable<ExternalFacts["runnerResult"]> }
@@ -587,7 +591,16 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 				for (const action of page.values()) if (action.command.kind === "promote") promotions.push({ workItemId: action.workItemId, dispatchKey: action.command.dispatchKey });
 			}
 		}
-		const workItemId = matchGithubFactToWorkItem(parsed.fact, live, promotions);
+		const merges: Array<{ workItemId: string; mergeCommitSha: string }> = [];
+		if (parsed.fact.kind === "main-deploy") {
+			// A main deploy run deploys whatever main is; the recorded merged
+			// fact's merge commit is the only honest join to a work item.
+			for (const item of live) {
+				const facts = await this.ctx.storage.get<ExternalFacts>(`${EXTERNAL_FACT_PREFIX}${item.id}`);
+				if (facts?.merged?.mergeCommitSha) merges.push({ workItemId: item.id, mergeCommitSha: facts.merged.mergeCommitSha });
+			}
+		}
+		const workItemId = matchGithubFactToWorkItem(parsed.fact, live, promotions, merges);
 		if (!workItemId) return { accepted: false };
 		const merged = await this.ctx.storage.transaction(async (txn) => {
 			if (await txn.get(githubDeliveryMarkerKey(parsed.deliveryId))) return { fresh: false };
@@ -1071,6 +1084,12 @@ function operatorSnapshot(item: StoredWorkItem | undefined, actions: StoredOpera
 	const promotionFact = facts?.promotion;
 	const promotion = promotionFact && actions.some((action) => action.command.kind === "promote" && action.command.dispatchKey === promotionFact.dispatchKey) ? promotionFact : undefined;
 	const candidate = facts?.candidate && item.phase === "implementing" && item.plan && facts.candidate.branch === item.plan.branch ? facts.candidate : undefined;
+	// Auto-merge fast lane facts: the merged fact is gated by the recorded
+	// candidate's immutable head revision (or the plan branch), and the main
+	// deploy run only ever rides alongside the merged fact whose merge commit
+	// it deployed — a deploy of someone else's merge can never masquerade.
+	const merged = facts?.merged && (candidateArtifact?.headSha === facts.merged.headSha || (item.plan && facts.merged.branch === item.plan.branch)) ? facts.merged : undefined;
+	const mainDeploy = merged && facts?.mainDeploy && facts.mainDeploy.headSha === merged.mergeCommitSha ? facts.mainDeploy : undefined;
 	// Surface a stalled implementation run as a fact: the disposable runner
 	// derives its own process identity, so a re-staged implement command with
 	// a fresh runId starts a clean isolated run instead of resuming a corpse.
@@ -1104,7 +1123,7 @@ function operatorSnapshot(item: StoredWorkItem | undefined, actions: StoredOpera
 		...(nextStep ? { nextStep } : {}),
 		...(planProblem ? { planProblem } : {}),
 		...(implementationProblem ? { implementationProblem } : {}),
-		...(runnerResult || runnerProgress || validation || promotion || candidate
+		...(runnerResult || runnerProgress || validation || promotion || candidate || merged || mainDeploy
 			? {
 				facts: {
 					...(runnerResult ? { runnerResult } : {}),
@@ -1112,6 +1131,8 @@ function operatorSnapshot(item: StoredWorkItem | undefined, actions: StoredOpera
 					...(candidate ? { candidate } : {}),
 					...(validation ? { validation } : {}),
 					...(promotion ? { promotion } : {}),
+					...(merged ? { merged } : {}),
+					...(mainDeploy ? { mainDeploy } : {}),
 				},
 			}
 			: {}),
@@ -1208,6 +1229,8 @@ function normalizeExternalFactInput(value: unknown): ExternalFactInput | null {
 function githubFactMessage(fact: GithubWebhookFact): string {
 	if (fact.kind === "validation") return `GitHub reported the candidate validation run finished: ${fact.conclusion ?? "unknown"}.`;
 	if (fact.kind === "promotion") return `GitHub reported the promotion run finished: ${fact.conclusion ?? "unknown"}.`;
+	if (fact.kind === "main-deploy") return `GitHub reported the main deploy run finished: ${fact.conclusion ?? "unknown"}.`;
+	if (fact.kind === "merged") return `GitHub reported candidate pull request #${fact.number} merged to main.`;
 	return `GitHub reported candidate pull request #${fact.number} opened.`;
 }
 
@@ -1254,7 +1277,7 @@ function assertDeploymentUrl(value: unknown): string {
 function normalizeArtifacts(value: unknown): Record<string, unknown> {
 	if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Artifacts must be an object.");
 	const raw = value as Record<string, unknown>;
-	const allowed = new Set(["issue", "candidate", "validation", "promotion", "deploymentUrl", "githubCiUrl"]);
+	const allowed = new Set(["issue", "candidate", "validation", "promotion", "merged", "mainDeploy", "deploymentUrl", "githubCiUrl"]);
 	for (const key of Object.keys(raw)) if (!allowed.has(key)) throw new Error(`Unknown artifact '${key}'.`);
 	const normalized: Record<string, unknown> = {};
 	if (raw.issue !== undefined) normalized.issue = assertGitHubIssue(raw.issue);
@@ -1263,11 +1286,18 @@ function normalizeArtifacts(value: unknown): Record<string, unknown> {
 		const candidate = raw.candidate as { pullRequestNumber?: unknown; pullRequestUrl?: unknown; headSha?: unknown; branch?: unknown; implementationKey?: unknown; runId?: unknown; pullRequestBase?: unknown; stackId?: unknown; generation?: unknown; nodeId?: unknown };
 		normalized.candidate = { ...candidate, pullRequestUrl: assertGitHubPullRequestUrl(candidate.pullRequestUrl, candidate.pullRequestNumber) };
 	}
-	for (const key of ["validation", "promotion"] as const) {
+	for (const key of ["validation", "promotion", "mainDeploy"] as const) {
 		if (raw[key] === undefined) continue;
 		if (!raw[key] || typeof raw[key] !== "object") throw new Error(`${key} artifact is invalid.`);
 		const artifact = raw[key] as { url?: unknown };
 		normalized[key] = { ...artifact, url: assertGitHubActionsUrl(artifact.url) };
+	}
+	if (raw.merged !== undefined) {
+		if (!raw.merged || typeof raw.merged !== "object") throw new Error("Merged artifact is invalid.");
+		const merged = raw.merged as { number?: unknown; url?: unknown; headSha?: unknown; mergeCommitSha?: unknown; branch?: unknown };
+		if (typeof merged.headSha !== "string" || !/^[0-9a-f]{40}$/u.test(merged.headSha)) throw new Error("Merged artifact requires the candidate's immutable head SHA.");
+		if (typeof merged.mergeCommitSha !== "string" || !/^[0-9a-f]{40}$/u.test(merged.mergeCommitSha)) throw new Error("Merged artifact requires the merge commit SHA.");
+		normalized.merged = { ...merged, url: assertGitHubPullRequestUrl(merged.url, merged.number) };
 	}
 	if (raw.githubCiUrl !== undefined) normalized.githubCiUrl = assertGitHubActionsUrl(raw.githubCiUrl);
 	if (raw.deploymentUrl !== undefined) normalized.deploymentUrl = assertDeploymentUrl(raw.deploymentUrl);
