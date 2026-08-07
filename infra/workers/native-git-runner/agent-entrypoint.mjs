@@ -61,7 +61,7 @@ if (
 	|| typeof request.prompt !== "string" || !request.prompt.trim()
 	|| typeof request.instructions !== "string" || !request.instructions.trim()
 	|| typeof request.cwd !== "string" || !request.cwd.startsWith(ROOT_PREFIX)
-	|| typeof request.model !== "string" || !MODEL.test(request.model) || request.model !== AGENT_MODEL
+	|| typeof request.model !== "string" || !MODEL.test(request.model)
 ) await fail("agent-input-invalid");
 
 const apiKey = process.env.OPENAI_API_KEY;

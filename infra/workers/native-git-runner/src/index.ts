@@ -36,7 +36,7 @@ type RunIds = { sandboxId: string; sessionId: string; runId: string; checkoutDir
 const JOB_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/u;
 const BRANCH = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,159}$/u;
 const SHA = /^[0-9a-f]{40}$/iu;
-const RUNNER_IMAGE_REVISION = "da052-async011";
+const RUNNER_IMAGE_REVISION = "da052-async012";
 // The SDK-side process timeout. This MUST sit strictly above the in-container
 // RUN_DEADLINE_MS (300s) plus the watchdog's emit-and-callback grace (~17s):
 // when the two were equal, the platform SIGKILL always beat the in-container
