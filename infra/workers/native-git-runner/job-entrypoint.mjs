@@ -86,7 +86,6 @@ const AGENT_TIMEOUT_MS = 260_000;
 // only), so it runs in the checkout without npm ci. An npm install would blow
 // the run budget; this is the whole reason the local gate is affordable.
 const LOCAL_TEST_TIMEOUT_MS = 30_000;
-const AUTO_MERGE_TIMEOUT_MS = 30_000;
 const SUPERSEDED_CLOSE_TIMEOUT_MS = 30_000;
 const GH_STACK_TIMEOUT_MS = 120_000;
 const GITHUB_FETCH_TIMEOUT_MS = 30_000;
@@ -246,12 +245,33 @@ function oneNodeStackView(stdout, branch) {
 	}
 }
 
+// gh-stack's documented exit codes, classified so the ledger can distinguish
+// unwinnable, backoff, and retryable stack failures instead of burning
+// generations on a generic classification: 9 = stacked PRs not enabled for
+// the repository (unwinnable — never retry), 8 = stack locked by another
+// process (back off), 4 = GitHub API failure (retryable), 2/6 = local stack
+// tracking missing or ambiguous, 3/7 = rebase conflict or a rebase already in
+// progress (restack states). Everything else keeps the step's own fallback.
+const GH_STACK_EXIT_CLASSIFICATIONS = new Map([
+	[2, "stack-tracking-invalid"],
+	[3, "stack-rebase-conflict"],
+	[4, "stack-github-api-failed"],
+	[6, "stack-tracking-invalid"],
+	[7, "stack-rebase-conflict"],
+	[8, "stack-locked"],
+	[9, "stack-feature-disabled"],
+]);
+
+function classifyGhStackFailure(result, fallback) {
+	return GH_STACK_EXIT_CLASSIFICATIONS.get(result.exitCode) ?? fallback;
+}
+
 async function submitOneNodeStack(request, expectedHead) {
 	const { branch } = request.candidate.stack;
 	const initialized = await run("gh", ["stack", "init", "--base", "main", branch], { cwd: request.checkoutDirectory, timeoutMs: GH_STACK_TIMEOUT_MS });
-	if (!initialized.success) return { classification: "stack-initialization-failed" };
+	if (!initialized.success) return { classification: classifyGhStackFailure(initialized, "stack-initialization-failed") };
 	const submitted = await run("gh", ["stack", "submit", "--auto", "--open"], { cwd: request.checkoutDirectory, timeoutMs: GH_STACK_TIMEOUT_MS });
-	if (!submitted.success) return { classification: "stack-submission-failed" };
+	if (!submitted.success) return { classification: classifyGhStackFailure(submitted, "stack-submission-failed") };
 	const [head, pushed, view] = await Promise.all([
 		run("git", ["-C", request.checkoutDirectory, "rev-parse", "HEAD"], { timeoutMs: GIT_TIMEOUT_MS }),
 		run("git", ["-C", request.checkoutDirectory, "ls-remote", "--heads", "origin", `refs/heads/${branch}`], { timeoutMs: GIT_TIMEOUT_MS }),
@@ -259,7 +279,7 @@ async function submitOneNodeStack(request, expectedHead) {
 	]);
 	if (!head.success || head.stdout.trim() !== expectedHead) return { classification: "stack-head-changed" };
 	if (!pushed.success || pushed.stdout.trim().split(/\s+/u)[0] !== expectedHead) return { classification: "stack-head-not-pushed" };
-	if (!view.success) return { classification: "stack-view-failed" };
+	if (!view.success) return { classification: classifyGhStackFailure(view, "stack-view-failed") };
 	const topology = oneNodeStackView(view.stdout, branch);
 	return topology ? { topology } : { classification: "stack-topology-invalid" };
 }
@@ -441,15 +461,14 @@ async function main() {
 	if ("classification" in pullRequest) return artifact(request, "candidate-failed", { classification: pullRequest.classification, agent });
 	appendProgress("pull-request-annotated");
 
-	// Fast lane: arm GitHub auto-merge so the PR merges itself the moment the
-	// required provenance and validate-candidate checks pass. Best effort and
-	// non-fatal by design — the operator's promotion dispatch stays the
-	// fallback merge path, so a failure here costs latency, never the run.
-	const autoMergeArm = await run("gh", ["pr", "merge", String(pullRequest.number), "--auto", "--squash"], { cwd: request.checkoutDirectory, timeoutMs: AUTO_MERGE_TIMEOUT_MS });
-	postHeartbeat(autoMergeArm.success ? "auto-merge-armed" : "auto-merge-unarmed");
+	// No GitHub auto-merge arming: every candidate PR is a server-side stack
+	// member, and the legacy pull request merge endpoints cannot merge a
+	// stack. The stack-merge dispatcher is the single merge path — the
+	// operator stages `promote` when the validation fact is green, and the
+	// trusted promotion workflow performs the cascade merge.
 
 	// Restack hygiene: this generation supersedes the previous one, so its PR —
-	// still open only when auto-merge never landed it (usually a post-submission
+	// still open when its merge never landed (usually a post-submission
 	// conflict) — is closed here. Bounded and non-fatal by design: gh fails
 	// harmlessly when no open PR exists for the prior branch, and a failure to
 	// close costs a stale open PR, never the run.
@@ -459,7 +478,7 @@ async function main() {
 		postHeartbeat(supersededClose.success ? "superseded-pr-closed" : "superseded-pr-close-skipped");
 	}
 
-	return artifact(request, "pull-request-opened", { baseSha, headSha, pullRequest, autoMerge: { armed: autoMergeArm.success }, stack: { id: request.candidate.stack.stackId, nodeId: request.candidate.stack.nodeId, branch: request.candidate.stack.branch, parentBranch: request.candidate.stack.parentBranch, topology: submitted.topology }, agent });
+	return artifact(request, "pull-request-opened", { baseSha, headSha, pullRequest, stack: { id: request.candidate.stack.stackId, nodeId: request.candidate.stack.nodeId, branch: request.candidate.stack.branch, parentBranch: request.candidate.stack.parentBranch, topology: submitted.topology }, agent });
 }
 
 // A wedged child process must never exceed the run budget silently: emit a

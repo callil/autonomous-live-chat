@@ -67,7 +67,13 @@ export function validatePullRequest(pr, commit, files, options, comparison) {
 	if (!stackMatch || Number(stackMatch[2]) !== generation) throw new Error("Pull request stack generation provenance is invalid.");
 	if (options.expectedStack && stackMatch[1] !== options.expectedStack) throw new Error("Pull request stack id does not match orchestration.");
 	if (lineValue(body, /- Node: `([^`]+)`/u, "node") !== "root") throw new Error("One-node stack provenance must identify the root node.");
-	if (lineValue(body, /- Parent base: `([^`]+)`/u, "parent") !== base.ref) throw new Error("Pull request parent provenance is invalid.");
+	// A retargeted survivor keeps its recorded parent marker while GitHub has
+	// already retargeted base.ref to main. Accept the mismatch only with proof
+	// that the recorded parent base is an ancestor of current main — i.e. the
+	// parent actually merged. A no-op today (the parent is always main),
+	// load-bearing for retargeted survivors later. Fail closed otherwise.
+	const parentMarker = lineValue(body, /- Parent base: `([^`]+)`/u, "parent");
+	if (parentMarker !== base.ref && !parentBaseMergedIntoMain(options.parentMarkerComparison)) throw new Error("Pull request parent provenance is invalid.");
 	if (lineValue(body, /- Candidate head: `([0-9a-f]{40})`/iu, "head").toLowerCase() !== headSha) throw new Error("Pull request head provenance is invalid.");
 	// The ledger-declared CI profile rides the same provenance markers: content
 	// and visual candidates earn the scoped validation fast path. The marker is
@@ -87,6 +93,41 @@ export function validatePullRequest(pr, commit, files, options, comparison) {
 		alreadyMerged: Boolean(merged),
 		mergeSha: merged ? pr.merge_commit_sha.toLowerCase() : "",
 	};
+}
+
+// One compare/main...parentBaseSha call: an ancestor of current main reads as
+// behind (or identical) with nothing ahead. Anything else — ahead, diverged,
+// or a missing comparison — fails closed.
+export function parentBaseMergedIntoMain(comparison) {
+	return Boolean(comparison) && (comparison.status === "behind" || comparison.status === "identical") && comparison.ahead_by === 0;
+}
+
+// GitHub's stack object is server-authoritative membership: unlike the PR
+// body markers, it cannot be edited by anyone with write access to the pull
+// request. A pull request carries at most one `stack` object, so a present,
+// coherent membership IS "member of exactly one stack". `stack` is the
+// membership from the pull request response; `stackDetail` is the stack read
+// from /repos/{repo}/stacks/{number}, whose `pull_requests` array is ordered
+// bottom to top with 1-based positions from the bottom.
+export function validateStackMembership(pr, stackDetail, options = {}) {
+	const membership = pr?.stack;
+	if (!membership || typeof membership !== "object" || !Number.isInteger(membership.number) || membership.number < 1) throw new Error("Candidate is not a member of a native pull request stack.");
+	if (membership.base?.ref !== "main") throw new Error("Candidate stack must be based on main.");
+	if (!Number.isInteger(membership.position) || membership.position < 1 || !Number.isInteger(membership.size) || membership.size < membership.position) throw new Error("Candidate stack position provenance is invalid.");
+	if (!stackDetail || typeof stackDetail !== "object" || stackDetail.number !== membership.number) throw new Error("GitHub returned a different stack than the candidate's membership.");
+	if (stackDetail.base?.ref !== "main") throw new Error("Candidate stack must be based on main.");
+	const members = Array.isArray(stackDetail.pull_requests) ? stackDetail.pull_requests : null;
+	if (!members || members.length !== membership.size) throw new Error("Stack member provenance is missing or inconsistent.");
+	if (members.filter((member) => member?.number === pr.number).length !== 1) throw new Error("Candidate must appear exactly once in its stack.");
+	if (members[membership.position - 1]?.number !== pr.number) throw new Error("Candidate stack position does not match the stack's member order.");
+	if (options.requireBottom) {
+		// Promotion only ever merges the bottom of the cascade: the first open
+		// member from the bottom must be this candidate, or an all-or-nothing
+		// `gh stack merge` would sweep unverified members in with it.
+		const bottomOpen = members.find((member) => member?.state === "open");
+		if (!bottomOpen || bottomOpen.number !== pr.number) throw new Error("Only the bottom open stack member can be promoted.");
+	}
+	return { stackNumber: membership.number, position: membership.position, size: membership.size };
 }
 
 export function validateCandidateFiles(files) {
@@ -175,16 +216,22 @@ async function verifyPullRequestCommand() {
 	// otherwise read as diverged the moment any sibling lands. Textual
 	// mergeability stays GitHub's job; the trusted claim verified here is
 	// that the history is exactly the recorded base plus new work.
-	const recordedParentBase = (typeof pr.body === "string" ? pr.body : "").match(/- Parent base: `[^`]+` at `([0-9a-f]{40})`/u)?.[1];
+	const body = typeof pr.body === "string" ? pr.body : "";
+	const recordedParentBase = body.match(/- Parent base: `[^`]+` at `([0-9a-f]{40})`/u)?.[1];
 	if (!recordedParentBase) throw new Error("Pull request provenance must record the parent base revision.");
-	const [files, commit, comparison] = await Promise.all([
+	// The ancestor-of-main proof for a retargeted survivor's parent marker: one
+	// compare call, made only when the marker no longer names the base branch.
+	const parentMarker = body.match(/- Parent base: `([^`]+)`/u)?.[1];
+	const [files, commit, comparison, parentMarkerComparison] = await Promise.all([
 		pullRequestFiles(repo, pullRequest),
 		api(`repos/${repo}/git/commits/${pr.head.sha}`),
 		api(`repos/${repo}/compare/${recordedParentBase}...${pr.head.sha}`),
+		parentMarker && parentMarker !== pr.base?.ref ? api(`repos/${repo}/compare/main...${recordedParentBase}`) : undefined,
 	]);
 	const result = validatePullRequest(pr, commit, files, {
 		repo,
 		recordedParentBase,
+		parentMarkerComparison,
 		expectedParent: process.env.EXPECTED_PARENT,
 		expectedHead,
 		expectedIssue: process.env.EXPECTED_ISSUE ? integer(process.env.EXPECTED_ISSUE, "EXPECTED_ISSUE") : undefined,
@@ -193,6 +240,17 @@ async function verifyPullRequestCommand() {
 		allowMerged: process.env.ALLOW_MERGED === "true",
 		appLogin: process.env.APP_HARNESS_OS_APP_LOGIN,
 	}, comparison);
+	// Server-side stack membership, asserted for every open candidate: each
+	// candidate is submitted through `gh stack submit`, so an open candidate is
+	// always a stack member. The already-merged recovery path skips this — a
+	// completed merge has left its stack, and the recorded merge evidence is
+	// what the promote job verifies instead. REQUIRE_BOTTOM is set only by the
+	// promotion workflow: only the bottom open member of the cascade may merge.
+	if (!result.alreadyMerged) {
+		const stackNumber = pr.stack?.number;
+		if (!Number.isInteger(stackNumber) || stackNumber < 1) throw new Error("Candidate is not a member of a native pull request stack.");
+		validateStackMembership(pr, await api(`repos/${repo}/stacks/${stackNumber}`), { requireBottom: process.env.REQUIRE_BOTTOM === "true" });
+	}
 	await output({
 		pull_request: result.pullRequest,
 		head_sha: result.headSha,

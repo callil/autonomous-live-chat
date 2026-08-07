@@ -137,7 +137,7 @@ assert.match(jobEntrypointSource, /candidate-working-tree-dirty/u);
 assert.match(jobEntrypointSource, /stack-head-not-pushed/u);
 assert.doesNotMatch(jobEntrypointSource, /console\.log/u, "the background process emits only bounded JSONL");
 
-// --- Fast lane: local test gate and auto-merge arming ------------------------
+// --- Local test gate and the single merge path -------------------------------
 
 // The dependency-free demo test runs in the checkout BEFORE anything is
 // pushed; npm ci would blow the run budget and must never appear here.
@@ -148,13 +148,25 @@ assert.match(jobEntrypointSource, /local-tests-failed/u);
 assert.match(jobEntrypointSource, /local-tests-timeout/u, "a hung local test is classified distinctly, not folded into failure");
 assert.ok(jobEntrypointSource.indexOf('["apps/demo/test/composer.test.mjs"]') < jobEntrypointSource.indexOf("await submitOneNodeStack"), "local tests run before the branch is pushed");
 
-// Auto-merge is armed immediately after the PR is annotated: bounded and
-// non-fatal, with the operator's promotion dispatch as the fallback path.
-assert.match(jobEntrypointSource, /AUTO_MERGE_TIMEOUT_MS = 30_000/u);
-assert.match(jobEntrypointSource, /gh", \["pr", "merge", String\(pullRequest\.number\), "--auto", "--squash"\]/u, "auto-merge is armed with squash, matching the promotion merge strategy");
-assert.match(jobEntrypointSource, /autoMerge: \{ armed: autoMergeArm\.success \}/u, "the terminal artifact reports whether the fast lane is armed");
-assert.match(jobEntrypointSource, /postHeartbeat\(autoMergeArm\.success \? "auto-merge-armed" : "auto-merge-unarmed"\)/u, "arming emits a progress heartbeat either way and never fails the run");
-assert.ok(jobEntrypointSource.indexOf('"--auto", "--squash"') > jobEntrypointSource.indexOf("pull-request-annotated"), "auto-merge arms only after the PR exists and is annotated");
+// No auto-merge arming: every candidate PR is a server-side stack member and
+// the legacy pull request merge endpoints cannot merge a stack. The
+// stack-merge dispatcher — the operator's promote stage into the trusted
+// promotion workflow — is the single merge path.
+assert.doesNotMatch(jobEntrypointSource, /"pr", "merge"/u, "the runner never touches the legacy pull request merge endpoint");
+assert.doesNotMatch(jobEntrypointSource, /autoMerge|AUTO_MERGE/u, "the fast-lane arming and its artifact field are gone");
+assert.match(jobEntrypointSource, /single merge path/u, "the source names the promotion dispatch as the only merge path");
+
+// gh-stack's documented exit codes classify into distinct ledger
+// classifications, so the operator can tell unwinnable (9) from backoff (8),
+// retryable API failure (4), broken local tracking (2/6), and rebase states
+// (3/7) instead of looping on a generic stack failure.
+assert.match(jobEntrypointSource, /const GH_STACK_EXIT_CLASSIFICATIONS = new Map\(\[/u);
+for (const [code, classification] of [[2, "stack-tracking-invalid"], [3, "stack-rebase-conflict"], [4, "stack-github-api-failed"], [6, "stack-tracking-invalid"], [7, "stack-rebase-conflict"], [8, "stack-locked"], [9, "stack-feature-disabled"]]) {
+	assert.match(jobEntrypointSource, new RegExp(`\\[${code}, "${classification}"\\]`, "u"), `gh-stack exit ${code} classifies as ${classification}`);
+}
+assert.match(jobEntrypointSource, /classifyGhStackFailure\(initialized, "stack-initialization-failed"\)/u, "an unclassified init failure keeps its step fallback");
+assert.match(jobEntrypointSource, /classifyGhStackFailure\(submitted, "stack-submission-failed"\)/u, "an unclassified submit failure keeps its step fallback");
+assert.match(jobEntrypointSource, /classifyGhStackFailure\(view, "stack-view-failed"\)/u, "an unclassified view failure keeps its step fallback");
 
 // Restack hygiene: the new generation's run closes the prior generation's PR
 // if still open — bounded, non-fatal, and only after the new PR exists.
@@ -162,7 +174,7 @@ assert.match(jobEntrypointSource, /SUPERSEDED_CLOSE_TIMEOUT_MS = 30_000/u, "the 
 assert.match(jobEntrypointSource, /request\.job\.generation > 1/u, "generation one has no predecessor to close");
 assert.match(jobEntrypointSource, /gh", \["pr", "close", supersededBranch, "--comment"/u, "the prior generation's PR is closed by its branch name with a superseded comment");
 assert.match(jobEntrypointSource, /postHeartbeat\(supersededClose\.success \? "superseded-pr-closed" : "superseded-pr-close-skipped"\)/u, "the close emits a heartbeat either way and never fails the run");
-assert.ok(jobEntrypointSource.indexOf('["pr", "close", supersededBranch') > jobEntrypointSource.indexOf('"--auto", "--squash"'), "the superseded PR closes only after the new candidate PR exists and its fast lane is armed");
+assert.ok(jobEntrypointSource.indexOf('["pr", "close", supersededBranch') > jobEntrypointSource.indexOf("pull-request-annotated"), "the superseded PR closes only after the new candidate PR exists and is annotated");
 
 // The ledger-declared CI profile rides the provenance markers so the trusted
 // gate can grant content/visual candidates the scoped validation fast path.

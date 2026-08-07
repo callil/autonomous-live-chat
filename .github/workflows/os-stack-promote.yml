@@ -47,6 +47,10 @@ jobs:
       EXPECTED_ISSUE: ${{ inputs.issue_number }}
       EXPECTED_GENERATION: ${{ inputs.generation }}
       EXPECTED_STACK: ${{ inputs.stack_id }}
+      # Promotion verifies against the server-side stack object: the candidate
+      # must be the bottom open member of its stack, so the cascade merge below
+      # can only ever land exactly this one pull request.
+      REQUIRE_BOTTOM: "true"
     steps:
       - name: Require the currently supported one-node stack promotion policy
         env:
@@ -163,15 +167,50 @@ jobs:
         env:
           ALLOW_MERGED: true
           GH_TOKEN: ${{ github.token }}
+          REQUIRE_BOTTOM: "true"
         run: node infra/scripts/os-stack-gate.mjs verify-pr
-      - name: Merge only the tested immutable head
+      # Every candidate is submitted with `gh stack submit`, so every candidate
+      # PR is a server-side stack member — and GitHub documents that the legacy
+      # pull request merge endpoints cannot merge a stack. The merge below goes
+      # through the pinned gh-stack CLI instead. Same release-pin + sha256
+      # discipline as infra/workers/native-git-runner/Dockerfile.
+      - name: Install the release-pinned gh stack CLI extension
+        if: env.ALREADY_MERGED != 'true'
+        env:
+          GH_STACK_VERSION: "0.1.0"
+          GH_STACK_AMD64_SHA256: 358552dd7dce0a46ce153fe196270cec482b84f080947890aad4061a8d44bc0b
+        run: |
+          curl --fail --location --retry 3 "https://github.com/github/gh-stack/releases/download/v${GH_STACK_VERSION}/linux-amd64" --output /tmp/gh-stack
+          echo "${GH_STACK_AMD64_SHA256}  /tmp/gh-stack" | sha256sum --check
+          mkdir -p "$HOME/.local/share/gh/extensions/gh-stack"
+          install -m 0755 /tmp/gh-stack "$HOME/.local/share/gh/extensions/gh-stack/gh-stack"
+      - name: Merge only the tested immutable head through the native stack cascade
         if: env.ALREADY_MERGED != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           remote_main="$(gh api "repos/${GH_REPO}/git/ref/heads/main" --jq '.object.sha')"
           test "$remote_main" = "$CURRENT_MAIN"
-          gh pr merge "$PR" --repo "$GH_REPO" --squash --delete-branch --match-head-commit "$EXPECTED_HEAD"
+          # The gate's bottom-open-member assertion holds here, so for this
+          # bottom node the all-or-nothing cascade merges exactly one PR. The
+          # head-SHA guarantee --match-head-commit used to provide is carried
+          # by the pre-merge reverify above, the remote-main equality test
+          # here, and the post-merge exact-tree verification below.
+          set +e
+          gh stack merge "$PR" --squash -y
+          status=$?
+          set -e
+          # gh-stack's documented exit codes, classified so the promotion run
+          # log names the failure mode instead of a generic non-zero exit.
+          case "$status" in
+            0) ;;
+            9) echo '::error::gh stack merge exit 9: stacked pull requests are not enabled for this repository — unwinnable, do not re-dispatch.'; exit 9 ;;
+            8) echo '::error::gh stack merge exit 8: the stack is locked by another process — back off, then re-dispatch the promotion.'; exit 8 ;;
+            4) echo '::error::gh stack merge exit 4: GitHub API failure — retryable; re-dispatch the promotion.'; exit 4 ;;
+            3) echo '::error::gh stack merge exit 3: rebase conflict — the candidate needs a restack (next generation, fresh base).'; exit 3 ;;
+            7) echo '::error::gh stack merge exit 7: a rebase is already in progress on this stack — wait for it to settle, then re-dispatch.'; exit 7 ;;
+            *) echo "::error::gh stack merge failed with unclassified exit ${status}."; exit "$status" ;;
+          esac
       - name: Verify exact merged tree and select deployment SHA
         id: verify_merge
         env:

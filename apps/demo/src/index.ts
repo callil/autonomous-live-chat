@@ -159,10 +159,10 @@ type ExternalFacts = {
 	runnerProgress?: { runId: string; step: string; at: number; events?: string[] };
 	validation?: { runId: number; url: string; conclusion: string | null; createdAt: string; headSha: string; at: number };
 	promotion?: { runId: number; url: string; conclusion: string | null; createdAt: string; dispatchKey: string; at: number };
-	/** The auto-merge fast lane's deploy leg: the main deploy run whose head revision is the item's merge commit. */
+	/** The merge evidence chain's deploy leg: the main deploy run whose head revision is the item's merge commit. */
 	mainDeploy?: { runId: number; url: string; conclusion: string | null; createdAt: string; headSha: string; at: number };
 	candidate?: { number: number; url: string; headSha: string; branch: string; at: number };
-	/** The auto-merge fast lane's merge leg: the candidate PR closed merged, carrying the merge commit join key. */
+	/** The merge evidence chain's merge leg: the candidate PR closed merged, carrying the merge commit join key. */
 	merged?: { number: number; url: string; headSha: string; branch: string; mergeCommitSha: string; at: number };
 };
 type ExternalFactInput =
@@ -202,12 +202,14 @@ const STALLED_IMPLEMENTATION_MS = 6 * 60_000;
 // The final safety net behind event pokes: one slow sweep re-pokes every live
 // work item, so a lost fire-and-forget poke costs minutes, never the item.
 const SWEEP_INTERVAL_MS = 2 * 60_000;
-// Merge watch: a validated candidate normally auto-merges within a minute or
-// two. Past this window with no merged fact, the snapshot records a
-// merge-timeout problem — the ledger queries no GitHub state itself; the
-// operator observes the candidate PR through the bridge and restacks a
-// conflicted candidate. The sweep's re-poke (and the WAITING re-poke) is what
-// delivers the problem to the next turn.
+// Merge watch: after a successful validation the operator stages the
+// promotion dispatch — the single merge path (candidates are stack members,
+// so they never auto-merge). Past this window with no promotion or merged
+// fact, the snapshot records a merge-timeout problem — the ledger queries no
+// GitHub state itself; the operator dispatches the promotion now, or observes
+// a conflicted candidate through the bridge and restacks it. The sweep's
+// re-poke (and the WAITING re-poke) is what delivers the problem to the next
+// turn.
 const MERGE_WATCH_TIMEOUT_MS = 4 * 60_000;
 // Lifetime wake budget per work item: an operator that consumes this many
 // pokes without reaching a terminal phase is not converging. Park it.
@@ -1318,24 +1320,25 @@ function operatorSnapshot(item: StoredWorkItem | undefined, actions: StoredOpera
 		? { dispatchKey: appliedPromote.command.dispatchKey, dispatchedAt: appliedPromote.updatedAt }
 		: undefined;
 	const candidate = facts?.candidate && item.phase === "implementing" && item.plan && facts.candidate.branch === item.plan.branch ? facts.candidate : undefined;
-	// Auto-merge fast lane facts: the merged fact is gated by the recorded
+	// Merge evidence facts: the merged fact is gated by the recorded
 	// candidate's immutable head revision (or the plan branch), and the main
 	// deploy run rides alongside a merged fact whose merge commit it contains:
 	// exactly (the run's head IS the merge commit), or by descent — main
 	// history is linear, so a successful run created after the merged fact was
 	// recorded deployed a descendant of the merge commit. Back-to-back merges
-	// whose own queued deploy run GitHub canceled still complete on the fast
-	// lane instead of falling back to a full promotion run.
+	// whose own queued deploy run GitHub canceled still complete on this
+	// evidence chain instead of needing a second promotion run.
 	const merged = facts?.merged && (candidateArtifact?.headSha === facts.merged.headSha || (item.plan && facts.merged.branch === item.plan.branch)) ? facts.merged : undefined;
 	const mainDeploy = merged && facts?.mainDeploy && (facts.mainDeploy.headSha === merged.mergeCommitSha || (facts.mainDeploy.conclusion === "success" && Date.parse(facts.mainDeploy.createdAt) > merged.at)) ? facts.mainDeploy : undefined;
-	// Merge-watch problem fact: GitHub sends no event when a PR becomes
-	// conflicted, so an armed auto-merge that never lands is invisible by push.
-	// Validation succeeded, the watch window passed, and neither a merged fact
-	// nor a promotion fact arrived: name the problem so the operator observes
-	// the candidate PR via the bridge and restacks a conflicted candidate now.
+	// Merge-watch problem fact: a promotion dispatch that was never staged (or
+	// whose fact was lost) is invisible by push, and GitHub sends no event
+	// when a PR becomes conflicted. Validation succeeded, the watch window
+	// passed, and neither a merged fact nor a promotion fact arrived: name the
+	// problem so the operator dispatches the promotion now — the single merge
+	// path — and restacks a conflicted candidate via the bridge observation.
 	let mergeTimeoutProblem: string | undefined;
 	if (validation && validation.conclusion === "success" && !merged && !facts?.promotion && Date.now() - validation.at > MERGE_WATCH_TIMEOUT_MS) {
-		mergeTimeoutProblem = "Validation succeeded but the merge did not land within the merge watch window. Observe the candidate pull request state with observeCandidatePullRequest: if mergeableState is dirty the candidate is conflicted — restack now with stagePlan (next generation, fresh getMainSha baseSha).";
+		mergeTimeoutProblem = "Validation succeeded but no promotion fact and no merged fact arrived within the merge watch window. Dispatch the merge now with stagePromotion — the operator-staged promotion dispatch is the single merge path; candidates never auto-merge. If the candidate may be conflicted, observe the candidate pull request state with observeCandidatePullRequest: if mergeableState is dirty the candidate is conflicted — restack now with stagePlan (next generation, fresh getMainSha baseSha).";
 	}
 	// Surface a stalled implementation run as a fact: the disposable runner
 	// derives its own process identity, so a re-staged implement command with
