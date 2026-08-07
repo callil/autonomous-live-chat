@@ -15,19 +15,17 @@ export type ExecuteEnv = {
  */
 export async function executeCommand(env: ExecuteEnv, workItem: LedgerWorkItem, command: OperatorCommand): Promise<unknown> {
 	switch (command.kind) {
-		case "claim": return workItemReceipt(await env.LEDGER.claim({ workItemId: workItem.id, leaseId: command.leaseId, leaseMs: command.leaseMs }));
-		case "release": return workItemReceipt(await env.LEDGER.release({ workItemId: workItem.id, leaseId: command.leaseId }));
 		case "classify": {
 			if (workItem.artifacts.issue !== undefined) {
 				const issueNumber = issueNumberFrom(workItem);
 				await env.GITHUB.updateClassification({ issueNumber, classification: githubClassificationForDecision(command.classification.decision), modelClassification: asModelClassification(command.classification) });
 				await env.GITHUB.postStatus({ issueNumber, eventId: `${workItem.id}-accepted`, body: command.classification.decision === "eligible" ? "### Accepted\n\nThe operator classified this request and admitted it to the autonomous repository workflow." : `### ${statusHeading(command.classification.decision)}\n\n${command.message}` });
 			}
-			return workItemReceipt(await env.LEDGER.recordClassification({ workItemId: workItem.id, leaseId: command.leaseId, classification: command.classification, message: command.message }));
+			return workItemReceipt(await env.LEDGER.recordClassification({ workItemId: workItem.id, classification: command.classification, message: command.message }));
 		}
 		case "plan": {
 			await postIssueStatus(env, workItem, "planned", command.message);
-			return workItemReceipt(await env.LEDGER.recordPlan({ workItemId: workItem.id, leaseId: command.leaseId, plan: command.plan, message: command.message }));
+			return workItemReceipt(await env.LEDGER.recordPlan({ workItemId: workItem.id, plan: command.plan, message: command.message }));
 		}
 		case "create-issue": {
 			const issue = await env.GITHUB.createIssue({ eventId: workItem.id, title: command.title, body: command.body, classification: command.classification });
@@ -36,7 +34,6 @@ export async function executeCommand(env: ExecuteEnv, workItem: LedgerWorkItem, 
 			await env.GITHUB.postStatus({ issueNumber: issue.issueNumber, eventId: `${workItem.id}-accepted`, body: "### Accepted\n\nThe operator classified this request and admitted it to the autonomous repository workflow." });
 			const recorded = await env.LEDGER.recordArtifacts({
 				workItemId: workItem.id,
-				leaseId: command.leaseId,
 				artifacts: { issue: { number: issue.issueNumber, url: issue.issueUrl } },
 				message: issue.existing ? `Reconciled existing GitHub issue #${issue.issueNumber}.` : `Created GitHub issue #${issue.issueNumber}.`,
 				source: "github",
@@ -66,12 +63,12 @@ export async function executeCommand(env: ExecuteEnv, workItem: LedgerWorkItem, 
 				},
 			});
 			await postIssueStatus(env, workItem, "implementation", "### Building\n\nThe App Harness coding agent is editing the repository in an isolated Cloudflare Sandbox run.");
-			const started = await env.LEDGER.startImplementation({ workItemId: workItem.id, leaseId: command.leaseId, runId: command.runId });
+			const started = await env.LEDGER.startImplementation({ workItemId: workItem.id, runId: command.runId });
 			return { disposition: started.disposition, implementationRunId: command.runId, ledger: workItemReceipt(started.item), runner };
 		}
 		case "record-candidate": {
 			await postIssueStatus(env, workItem, "candidate", `### Pull request ready\n\n[PR #${command.pullRequestNumber}](${command.pullRequestUrl}) is the root node of this request's one-node stack. Candidate CI is running against immutable head \`${command.headSha}\`.`);
-			return workItemReceipt(await env.LEDGER.recordCandidate({ workItemId: workItem.id, leaseId: command.leaseId, runId: command.runId, branch: command.branch, headSha: command.headSha, pullRequestNumber: command.pullRequestNumber, pullRequestUrl: command.pullRequestUrl, message: command.message }));
+			return workItemReceipt(await env.LEDGER.recordCandidate({ workItemId: workItem.id, runId: command.runId, branch: command.branch, headSha: command.headSha, pullRequestNumber: command.pullRequestNumber, pullRequestUrl: command.pullRequestUrl, message: command.message }));
 		}
 		case "promote": {
 			if (!workItem.plan) throw new Error("A promotion command requires the durable stack plan.");
@@ -96,9 +93,8 @@ export async function executeCommand(env: ExecuteEnv, workItem: LedgerWorkItem, 
 			} else {
 				await postIssueStatus(env, workItem, command.phase, `### ${statusHeading(command.phase)}\n\n${command.message}`);
 			}
-			return workItemReceipt(await env.LEDGER.recordExternalState({ workItemId: workItem.id, leaseId: command.leaseId, phase: command.phase, artifacts: command.artifacts, message: command.message, source: command.source }));
+			return workItemReceipt(await env.LEDGER.recordExternalState({ workItemId: workItem.id, phase: command.phase, artifacts: command.artifacts, message: command.message, source: command.source }));
 		}
-		case "defer": return workItemReceipt(await env.LEDGER.defer({ workItemId: workItem.id, leaseId: command.leaseId, delayMs: command.delayMs, message: command.message }));
 	}
 }
 

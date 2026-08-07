@@ -32,7 +32,6 @@ export type LedgerWorkItem = {
 	version: number;
 	phase: string;
 	request: unknown;
-	lease: null | { operatorId: string; id: string; expiresAt: number };
 	classification: LedgerClassification | null;
 	plan: LedgerPlan | null;
 	activeImplementation?: { key: string; runId: string; attempt: number; startedAt: number } | null;
@@ -44,16 +43,13 @@ export type EventSource = "cloudflare-os" | "github" | "runner" | "ci" | "system
 
 /** Exact command selected by the bounded operator model, one per tool call. */
 export type OperatorCommand =
-	| { kind: "claim"; leaseId: string; leaseMs: number }
-	| { kind: "release"; leaseId: string }
-	| { kind: "classify"; leaseId: string; classification: LedgerClassification; message: string }
-	| { kind: "plan"; leaseId: string; plan: LedgerPlan; message: string }
-	| { kind: "create-issue"; leaseId: string; title: string; body: string; classification: "triage" | "agent" | "needs-review" | "rejected" | "deployed" }
-	| { kind: "implement"; leaseId: string; runId: string }
-	| { kind: "record-candidate"; leaseId: string; runId: string; branch: string; headSha: string; pullRequestNumber: number; pullRequestUrl: string; message: string }
-	| { kind: "promote"; leaseId: string; pullRequestNumber: number; headSha: string; dispatchKey: string }
-	| { kind: "record-state"; leaseId: string; phase: ExternalPhase; artifacts?: Record<string, unknown>; message: string; source: EventSource }
-	| { kind: "defer"; leaseId: string; delayMs: number; message: string };
+	| { kind: "classify"; classification: LedgerClassification; message: string }
+	| { kind: "plan"; plan: LedgerPlan; message: string }
+	| { kind: "create-issue"; title: string; body: string; classification: "triage" | "agent" | "needs-review" | "rejected" | "deployed" }
+	| { kind: "implement"; runId: string }
+	| { kind: "record-candidate"; runId: string; branch: string; headSha: string; pullRequestNumber: number; pullRequestUrl: string; message: string }
+	| { kind: "promote"; pullRequestNumber: number; headSha: string; dispatchKey: string }
+	| { kind: "record-state"; phase: ExternalPhase; artifacts?: Record<string, unknown>; message: string; source: EventSource };
 
 /** Persisted solely by LedgerService before any command executes. */
 export type StagedOperatorAction = {
@@ -80,20 +76,17 @@ export type BeginOperatorAction = {
 
 /** Private RPC surface for the sole durable App Harness ledger. */
 export interface AppHarnessLedger {
-	claim(input: { workItemId: string; leaseId: string; leaseMs: number }): Promise<LedgerWorkItem>;
-	release(input: { workItemId: string; leaseId: string }): Promise<LedgerWorkItem>;
-	defer(input: { workItemId: string; leaseId: string; delayMs: number; message: string }): Promise<LedgerWorkItem>;
-	recordClassification(input: { workItemId: string; leaseId: string; classification: LedgerClassification; message: string }): Promise<LedgerWorkItem>;
-	recordPlan(input: { workItemId: string; leaseId: string; plan: LedgerPlan; message: string }): Promise<LedgerWorkItem>;
-	recordArtifacts(input: { workItemId: string; leaseId: string; artifacts: Record<string, unknown>; message: string; source: EventSource }): Promise<LedgerWorkItem>;
-	startImplementation(input: { workItemId: string; leaseId: string; runId: string }): Promise<{ disposition: string; item: LedgerWorkItem }>;
-	recordCandidate(input: { workItemId: string; leaseId: string; runId: string; branch: string; headSha: string; pullRequestNumber: number; pullRequestUrl: string; message: string }): Promise<LedgerWorkItem>;
-	recordExternalState(input: { workItemId: string; leaseId: string; phase: ExternalPhase; artifacts?: Record<string, unknown>; message: string; source: EventSource }): Promise<LedgerWorkItem>;
+	snapshotWorkItem(input: { workItemId: string }): Promise<{ state: string; version: number; terminal: boolean } | null>;
+	recordClassification(input: { workItemId: string; classification: LedgerClassification; message: string }): Promise<LedgerWorkItem>;
+	recordPlan(input: { workItemId: string; plan: LedgerPlan; message: string }): Promise<LedgerWorkItem>;
+	recordArtifacts(input: { workItemId: string; artifacts: Record<string, unknown>; message: string; source: EventSource }): Promise<LedgerWorkItem>;
+	startImplementation(input: { workItemId: string; runId: string }): Promise<{ disposition: string; item: LedgerWorkItem }>;
+	recordCandidate(input: { workItemId: string; runId: string; branch: string; headSha: string; pullRequestNumber: number; pullRequestUrl: string; message: string }): Promise<LedgerWorkItem>;
+	recordExternalState(input: { workItemId: string; phase: ExternalPhase; artifacts?: Record<string, unknown>; message: string; source: EventSource }): Promise<LedgerWorkItem>;
 	stageOperatorAction(input: { workItemId: string; expectedVersion: number; command: OperatorCommand }): Promise<StagedOperatorAction>;
 	beginOperatorAction(input: { actionId: number }): Promise<BeginOperatorAction>;
 	completeOperatorAction(input: { actionId: number; idempotencyKey: string; executionToken: string; result: unknown }): Promise<StagedOperatorAction>;
 	rejectOperatorAction(input: { actionId: number; executionToken: string; error?: string }): Promise<StagedOperatorAction>;
-	recordOperatorNote(input: { workItemId: string; expectedVersion: number; turn: number; response: { text: string; idempotencyKey: string } }): Promise<void>;
 }
 
 /** Disposable Cloudflare Sandbox direct-agent implementation surface. */

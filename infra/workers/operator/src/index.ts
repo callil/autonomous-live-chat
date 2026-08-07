@@ -1,8 +1,8 @@
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import type { AppHarnessLedger, GitHubRepositoryBinding, NativeGitRunnerBinding, StagedOperatorAction } from "./contracts";
 import { executeCommand } from "./execute";
-import { callModel, ModelError, withRetry, type ModelMessage, type ToolCall } from "./model";
-import { commandFor, OBSERVATION_TOOLS, PARKING_TOOLS, SYSTEM_PROMPT, TOOLS } from "./operator-tools.js";
+import { callModel, MODEL_CALL_TIMEOUT_MS, ModelError, withRetry, type ModelMessage, type ToolCall } from "./model";
+import { commandFor, OBSERVATION_TOOLS, SYSTEM_PROMPT, TOOLS } from "./operator-tools.js";
 
 type Env = {
 	OPERATOR_TURN: DurableObjectNamespace<OperatorTurn>;
@@ -20,19 +20,14 @@ type Env = {
 	OPERATOR_PAUSED?: string;
 };
 
-type OperatorWake = { workItemId: string; version: number; turn: number; wakeKey: string; state: string };
+type OperatorWake = { workItemId: string };
 
 type CallRecord = { name: string; ok: boolean; error?: string };
 
 type TurnState = {
-	wakeKey: string;
 	workItemId: string;
-	/** The wake's revision: the note settles against exactly this version. */
-	wakeVersion: number;
-	turnNumber: number;
 	/** Advancing expectedVersion for staging, refreshed from each receipt. */
 	version: number;
-	leaseId: string | null;
 	activeRunId: string;
 	/** The runner's own process identifier, absorbed from the implement receipt. */
 	runnerRunId?: string;
@@ -47,39 +42,38 @@ type TurnState = {
 	pending?: { callId: string; name: string; args: Record<string, unknown>; minted: string };
 	calls: CallRecord[];
 	outcome?: string;
-	noteDue?: boolean;
-	noteAttempts?: number;
 };
 
-type TurnOutcome = { outcome: string; toolCalls: number; tokens: number; endedAt: number };
 type Snapshot = {
 	version?: number;
-	leaseId?: string | null;
 	activeImplementation?: { runId?: string } | null;
 	plan?: { branch?: string } | null;
 	artifacts?: { issue?: { number?: number } };
 };
 
-// Wide enough for a slow model round plus real actions in one turn; the
-// demo's 180s wake response lease must always exceed this plus one bounded
-// (45s) model call still in flight.
-const TURN_WALL_CLOCK_MS = 120_000;
-const TURN_ALARM_BACKSTOP_MS = TURN_WALL_CLOCK_MS + 10_000;
-const NOTE_RETRY_MS = 5_000;
-const NOTE_ATTEMPT_BUDGET = 3;
+// Adaptive turn budgeting: the outer envelope is generous because nothing
+// re-delivers underneath a live turn any more. Each model call and tool call
+// carries its own timeout, and before each model call the loop checks whether
+// a bounded call still fits inside the envelope; otherwise the turn ends
+// cleanly and the next event (or the DO's own alarm) re-drives it.
+const TURN_ENVELOPE_MS = 10 * 60_000;
+const OBSERVATION_TIMEOUT_MS = 30_000;
+const STAGE_TIMEOUT_MS = 120_000;
+const SNAPSHOT_TIMEOUT_MS = 15_000;
+// A turn that ends WAITING re-pokes itself: DO-local alarm, no ledger involved.
+const WAITING_REPOKE_MS = 60_000;
+// Crash backstop: if the isolate dies mid-turn, the alarm resumes the
+// persisted transcript from its pending record.
+const TURN_ALARM_BACKSTOP_MS = 60_000;
 const TOOL_RESULT_MAX_CHARS = 4_000;
 const ACTION_RESULT_MAX_CHARS = 600;
 const RECENT_TURNS_KEPT = 20;
 
-/** Demo-facing wake transport. One structured wake, one bounded model turn. */
+/** Demo-facing wake transport: one fire-and-forget poke, no payload beyond the item. */
 export class OperatorGateway extends WorkerEntrypoint<Env> {
 	async submitWake(input: OperatorWake): Promise<{ accepted: true } | { accepted: false; message: string }> {
 		if (this.env.OPERATOR_PAUSED === "true") return { accepted: false, message: "The operator worker is paused." };
-		if (!input || typeof input.workItemId !== "string" || !/^[0-9a-f-]{36}$/iu.test(input.workItemId)
-			|| !Number.isSafeInteger(input.version) || input.version < 1
-			|| !Number.isSafeInteger(input.turn) || input.turn < 1
-			|| typeof input.wakeKey !== "string" || !input.wakeKey
-			|| typeof input.state !== "string") {
+		if (!input || typeof input.workItemId !== "string" || !/^[0-9a-f-]{36}$/iu.test(input.workItemId)) {
 			return { accepted: false, message: "The wake is outside the operator contract." };
 		}
 		return this.env.OPERATOR_TURN.getByName(input.workItemId).acceptWake(input);
@@ -88,59 +82,36 @@ export class OperatorGateway extends WorkerEntrypoint<Env> {
 
 /**
  * One Durable Object per work item: serialized turns, a persisted transcript,
- * and alarm-driven crash resume. The ledger stays the sole durable authority;
- * this object owns only the conversation and its budgets.
+ * and alarm-driven crash resume. The ledger stays the sole durable authority
+ * and emits pokes; this object owns its own lifecycle — it reads a fresh
+ * ledger snapshot at the start of every turn, runs one bounded model loop,
+ * and re-drives itself by its own alarm when it chooses to wait.
  */
 export class OperatorTurn extends DurableObject<Env> {
 	async acceptWake(wake: OperatorWake): Promise<{ accepted: true } | { accepted: false; message: string }> {
-		const prior = await this.ctx.storage.get<TurnOutcome>(`outcome:${wake.wakeKey}`);
-		if (prior) return { accepted: true };
-		const current = await this.ctx.storage.get<TurnState>("turn");
-		if (current?.status === "running") {
-			if (current.wakeKey === wake.wakeKey) return { accepted: true };
-			return { accepted: false, message: "An operator turn is already in flight for this work item." };
-		}
-		const snapshot = parseSnapshot(wake.state);
-		const turn: TurnState = {
-			wakeKey: wake.wakeKey,
-			workItemId: wake.workItemId,
-			wakeVersion: wake.version,
-			turnNumber: wake.turn,
-			version: snapshot.version ?? wake.version,
-			leaseId: typeof snapshot.leaseId === "string" ? snapshot.leaseId : null,
-			activeRunId: snapshot.activeImplementation?.runId ?? "",
-			planBranch: snapshot.plan?.branch ?? "",
-			issueNumber: Number.isSafeInteger(snapshot.artifacts?.issue?.number) ? snapshot.artifacts!.issue!.number! : 0,
-			messages: [
-				{ role: "system", content: SYSTEM_PROMPT },
-				{ role: "user", content: `State: ${wake.state}` },
-			],
-			toolCalls: 0,
-			tokens: 0,
-			startedAt: Date.now(),
-			status: "running",
-			calls: [],
-		};
-		// Durable before any model call, so a restart resumes instead of
-		// restarting; the alarm is both the driver and the crash backstop.
-		await this.ctx.storage.put("turn", turn);
-		await this.ctx.storage.setAlarm(Date.now());
+		// A poke carries no state: it only marks that something changed. If a
+		// turn is running it finishes first and the mark starts the next one.
+		await this.ctx.storage.put("poked", wake.workItemId);
+		const turn = await this.ctx.storage.get<TurnState>("turn");
+		if (!turn || turn.status !== "running") await this.ctx.storage.setAlarm(Date.now());
 		return { accepted: true };
 	}
 
 	async alarm(): Promise<void> {
 		const turn = await this.ctx.storage.get<TurnState>("turn");
-		if (!turn) return;
-		if (turn.status === "done") {
-			if (turn.noteDue) await this.deliverNote(turn);
+		if (turn?.status === "running") {
+			// A running turn under the alarm means the isolate died mid-drive:
+			// resume the persisted transcript, unless the envelope is spent.
+			if (Date.now() - turn.startedAt > TURN_ENVELOPE_MS) {
+				await this.finish(turn, "PARKED:turn-envelope");
+				return;
+			}
+			await this.ctx.storage.setAlarm(Date.now() + TURN_ALARM_BACKSTOP_MS);
+			await this.drive(turn);
 			return;
 		}
-		if (Date.now() - turn.startedAt > TURN_WALL_CLOCK_MS) {
-			await this.finish(turn, "PARKED:time-budget");
-			return;
-		}
-		await this.ctx.storage.setAlarm(Date.now() + TURN_ALARM_BACKSTOP_MS);
-		await this.drive(turn);
+		const poked = await this.ctx.storage.get<string>("poked");
+		if (poked) await this.startTurn(poked);
 	}
 
 	async status(): Promise<unknown> {
@@ -152,11 +123,47 @@ export class OperatorTurn extends DurableObject<Env> {
 		return {
 			workItemId: turn?.workItemId ?? null,
 			turn: turn
-				? { status: turn.status, wakeKey: turn.wakeKey, turnNumber: turn.turnNumber, toolCalls: turn.toolCalls, tokens: turn.tokens, startedAt: turn.startedAt, outcome: turn.outcome ?? null, calls: turn.calls, state: turn.messages.find((entry) => entry.role === "user")?.content ?? null }
+				? { status: turn.status, toolCalls: turn.toolCalls, tokens: turn.tokens, startedAt: turn.startedAt, outcome: turn.outcome ?? null, calls: turn.calls, state: turn.messages.find((entry) => entry.role === "user")?.content ?? null }
 				: null,
 			recentTurns: recent ?? [],
 			spendToday: spend ?? { turns: 0, toolCalls: 0, tokens: 0 },
 		};
+	}
+
+	private async startTurn(workItemId: string): Promise<void> {
+		await this.ctx.storage.delete("poked");
+		let ledgerSnapshot: { state: string; version: number; terminal: boolean } | null;
+		try {
+			ledgerSnapshot = await withTimeout(this.env.LEDGER.snapshotWorkItem({ workItemId }), SNAPSHOT_TIMEOUT_MS, "snapshotWorkItem");
+		} catch (error) {
+			// An unreachable ledger is not a lost item: the next event or the
+			// ledger's periodic sweep pokes again.
+			console.error("The operator could not read the ledger snapshot.", { workItemId, error });
+			return;
+		}
+		if (!ledgerSnapshot || ledgerSnapshot.terminal) return;
+		const snapshot = parseSnapshot(ledgerSnapshot.state);
+		const turn: TurnState = {
+			workItemId,
+			version: snapshot.version ?? ledgerSnapshot.version,
+			activeRunId: snapshot.activeImplementation?.runId ?? "",
+			planBranch: snapshot.plan?.branch ?? "",
+			issueNumber: Number.isSafeInteger(snapshot.artifacts?.issue?.number) ? snapshot.artifacts!.issue!.number! : 0,
+			messages: [
+				{ role: "system", content: SYSTEM_PROMPT },
+				{ role: "user", content: `State: ${ledgerSnapshot.state}` },
+			],
+			toolCalls: 0,
+			tokens: 0,
+			startedAt: Date.now(),
+			status: "running",
+			calls: [],
+		};
+		// Durable before any model call, so a restart resumes instead of
+		// restarting; the alarm is both the driver and the crash backstop.
+		await this.ctx.storage.put("turn", turn);
+		await this.ctx.storage.setAlarm(Date.now() + TURN_ALARM_BACKSTOP_MS);
+		await this.drive(turn);
 	}
 
 	private async drive(turn: TurnState): Promise<void> {
@@ -165,13 +172,14 @@ export class OperatorTurn extends DurableObject<Env> {
 			// record replays the identical command, and the ledger's effect keys
 			// return the existing action rather than double-executing.
 			if (turn.pending) {
-				const ended = await this.performPending(turn);
-				if (ended) return;
+				await this.performPending(turn);
 				continue;
 			}
 			if (turn.toolCalls >= Number(this.env.MAX_TOOL_CALLS_PER_TURN)) return this.finish(turn, "PARKED:tool-budget");
 			if (turn.tokens >= Number(this.env.MAX_TOKENS_PER_TURN)) return this.finish(turn, "PARKED:token-budget");
-			if (Date.now() - turn.startedAt > TURN_WALL_CLOCK_MS) return this.finish(turn, "PARKED:time-budget");
+			// Adaptive budgeting: only start a bounded model call that still fits
+			// within the turn envelope; otherwise end the turn cleanly.
+			if (Date.now() - turn.startedAt + MODEL_CALL_TIMEOUT_MS > TURN_ENVELOPE_MS) return this.finish(turn, "PARKED:turn-envelope");
 
 			let reply;
 			try {
@@ -182,7 +190,7 @@ export class OperatorTurn extends DurableObject<Env> {
 				});
 			} catch (error) {
 				// A dead provider is not a work-item failure: park this turn and let
-				// the ledger's bounded wake retry re-drive it later.
+				// the next event or the ledger sweep re-drive it later.
 				return this.finish(turn, `PARKED:model-unavailable:${String(error instanceof Error ? error.message : error).slice(0, 80)}`);
 			}
 			turn.tokens += reply.usage?.total_tokens ?? 0;
@@ -202,19 +210,22 @@ export class OperatorTurn extends DurableObject<Env> {
 		}
 	}
 
-	private async performPending(turn: TurnState): Promise<boolean> {
+	private async performPending(turn: TurnState): Promise<void> {
 		const pending = turn.pending!;
-		const result = await this.invokeTool(turn, pending);
+		// Every tool call carries its own budget: observations are quick reads,
+		// stage/execute may boot a sandbox run. A timeout is data the model sees.
+		const budget = OBSERVATION_TOOLS.has(pending.name) ? OBSERVATION_TIMEOUT_MS : STAGE_TIMEOUT_MS;
+		let result: Record<string, unknown>;
+		try {
+			result = await withTimeout(this.invokeTool(turn, pending), budget, pending.name);
+		} catch (error) {
+			result = { error: String(error instanceof Error ? error.message : error).slice(0, 300) };
+		}
 		turn.messages.push({ role: "tool", tool_call_id: pending.callId, content: JSON.stringify(result).slice(0, TOOL_RESULT_MAX_CHARS) });
 		const failure = (result as { error?: unknown }).error;
 		turn.calls.push({ name: pending.name, ok: failure === undefined, ...(typeof failure === "string" ? { error: failure.slice(0, 200) } : {}) });
 		turn.pending = undefined;
 		await this.ctx.storage.put("turn", turn);
-		if (PARKING_TOOLS.has(pending.name) && (result as { state?: unknown }).state === "completed") {
-			await this.finish(turn, "PARKED:operator-exit");
-			return true;
-		}
-		return false;
 	}
 
 	private async invokeTool(turn: TurnState, pending: NonNullable<TurnState["pending"]>): Promise<Record<string, unknown>> {
@@ -231,25 +242,18 @@ export class OperatorTurn extends DurableObject<Env> {
 						// The process id is a loop-owned fact from the implement receipt,
 						// never a model argument: the ledger and runner identifiers are
 						// distinct and the runner refuses a mismatched inspection.
-						if (!turn.runnerRunId) return { error: "The runner process id is not known in this turn. The completion callback will wake this item; stage a defer if there is nothing else to do." };
+						if (!turn.runnerRunId) return { error: "The runner process id is not known in this turn. The completion callback will wake this item; reply WAITING if there is nothing else to do." };
 						return { run: await this.env.RUNNER.inspectRun({ jobId: turn.workItemId, generation: Number(args.generation), runId: turn.runnerRunId }) };
 					}
 				}
 			}
-			// The lease is a loop-owned fact: when none is live, claim before any
-			// lease-requiring command instead of letting the model reason about it.
-			if (turn.leaseId === null && name !== "stageClaim") {
-				const claimed = await this.stageAndExecute(turn, "claim", { kind: "claim", leaseId: crypto.randomUUID(), leaseMs: 900_000 } as Parameters<AppHarnessLedger["stageOperatorAction"]>[0]["command"]);
-				if (claimed.error) return { error: `The work item could not be claimed first: ${claimed.error}` };
-			}
 			const command = commandFor(name, args, {
-				leaseId: turn.leaseId,
 				minted,
 				activeRunId: turn.activeRunId,
 				planBranch: turn.planBranch,
 				issueNumber: turn.issueNumber,
 			});
-			return this.stageAndExecute(turn, name, command);
+			return this.stageAndExecute(turn, command);
 		} catch (error) {
 			// Tool-level failure is data, not a crash: the model sees it and corrects.
 			return { error: String(error instanceof Error ? error.message : error).slice(0, 300) };
@@ -257,7 +261,7 @@ export class OperatorTurn extends DurableObject<Env> {
 	}
 
 	/** Stage, begin, execute, and complete one command through the ledger's protocol. */
-	private async stageAndExecute(turn: TurnState, name: string, command: Parameters<AppHarnessLedger["stageOperatorAction"]>[0]["command"]): Promise<Record<string, unknown>> {
+	private async stageAndExecute(turn: TurnState, command: Parameters<AppHarnessLedger["stageOperatorAction"]>[0]["command"]): Promise<Record<string, unknown>> {
 		// 1. Durable log first. Idempotency keys and the single-active lock are
 		//    the ledger's, unchanged; a duplicate returns the existing action.
 		const staged = await this.env.LEDGER.stageOperatorAction({ workItemId: turn.workItemId, expectedVersion: turn.version, command });
@@ -268,8 +272,8 @@ export class OperatorTurn extends DurableObject<Env> {
 			await this.absorbAppliedAction(turn, command, staged);
 			return summarizeAction(staged);
 		}
-		if (staged.status === "rejected") return this.noteLeaseLoss(turn, summarizeAction(staged));
-		// 2. Claim execution under the same token and lease protocol.
+		if (staged.status === "rejected") return summarizeAction(staged);
+		// 2. Claim execution under the ledger's bounded per-action lease.
 		const begun = await this.env.LEDGER.beginOperatorAction({ actionId: staged.id });
 		if (begun.disposition !== "execute" || !begun.executionToken) {
 			if (begun.action.status === "applied") await this.absorbAppliedAction(turn, command, begun.action);
@@ -287,18 +291,12 @@ export class OperatorTurn extends DurableObject<Env> {
 			// model in the same turn.
 			const message = error instanceof Error ? error.message : String(error);
 			const rejected = await this.env.LEDGER.rejectOperatorAction({ actionId: staged.id, executionToken: begun.executionToken, error: message });
-			return this.noteLeaseLoss(turn, summarizeAction(rejected));
+			return summarizeAction(rejected);
 		}
 	}
 
-	/** A lease rejection clears the loop's lease so the next command auto-claims. */
-	private noteLeaseLoss(turn: TurnState, summary: Record<string, unknown>): Record<string, unknown> {
-		if (/lease is invalid|live operator lease/iu.test(String(summary.error ?? ""))) turn.leaseId = null;
-		return summary;
-	}
-
 	/** A replayed or reconciled applied action carries its receipt as a JSON string. */
-	private async absorbAppliedAction(turn: TurnState, command: { kind: string; leaseId?: string; runId?: string }, action: { result?: unknown }): Promise<void> {
+	private async absorbAppliedAction(turn: TurnState, command: { kind: string; runId?: string }, action: { result?: unknown }): Promise<void> {
 		if (action.result === undefined || action.result === null) return;
 		try {
 			this.absorbReceipt(turn, command, typeof action.result === "string" ? JSON.parse(action.result) : action.result);
@@ -307,12 +305,10 @@ export class OperatorTurn extends DurableObject<Env> {
 	}
 
 	/** Keep the loop-owned staging facts current as receipts arrive. */
-	private absorbReceipt(turn: TurnState, command: { kind: string; leaseId?: string; runId?: string }, result: unknown): void {
+	private absorbReceipt(turn: TurnState, command: { kind: string; runId?: string }, result: unknown): void {
 		const receipt = result as { version?: unknown; ledger?: { version?: unknown } };
 		const version = Number.isSafeInteger(receipt?.version) ? receipt.version as number : Number.isSafeInteger(receipt?.ledger?.version) ? receipt.ledger!.version as number : undefined;
 		if (version !== undefined) turn.version = version;
-		if (command.kind === "claim" && typeof command.leaseId === "string") turn.leaseId = command.leaseId;
-		if (command.kind === "release" || command.kind === "defer") turn.leaseId = null;
 		if (command.kind === "implement" && typeof command.runId === "string") turn.activeRunId = command.runId;
 		const runner = (result as { runner?: { runId?: unknown } })?.runner;
 		if (runner && typeof runner.runId === "string") turn.runnerRunId = runner.runId;
@@ -322,60 +318,36 @@ export class OperatorTurn extends DurableObject<Env> {
 		const endedAt = Date.now();
 		turn.status = "done";
 		turn.outcome = outcome;
-		turn.noteDue = true;
-		turn.noteAttempts = 0;
-		const record: TurnOutcome = { outcome, toolCalls: turn.toolCalls, tokens: turn.tokens, endedAt };
 		const day = new Date().toISOString().slice(0, 10);
 		const spend = (await this.ctx.storage.get<{ turns: number; toolCalls: number; tokens: number }>(`spend:${day}`)) ?? { turns: 0, toolCalls: 0, tokens: 0 };
 		const recent = (await this.ctx.storage.get<Array<Record<string, unknown>>>("recent-turns")) ?? [];
-		recent.push({ turnNumber: turn.turnNumber, wakeKey: turn.wakeKey, outcome, toolCalls: turn.toolCalls, tokens: turn.tokens, endedAt, calls: turn.calls });
+		recent.push({ outcome, toolCalls: turn.toolCalls, tokens: turn.tokens, endedAt, calls: turn.calls });
 		await Promise.all([
 			this.ctx.storage.put("turn", turn),
-			this.ctx.storage.put(`outcome:${turn.wakeKey}`, record),
 			this.ctx.storage.put(`spend:${day}`, { turns: spend.turns + 1, toolCalls: spend.toolCalls + turn.toolCalls, tokens: spend.tokens + turn.tokens }),
 			this.ctx.storage.put("recent-turns", recent.slice(-RECENT_TURNS_KEPT)),
 		]);
-		await this.deliverNote(turn);
-	}
-
-	/**
-	 * Settle the demo's durable wake record. This replaces the RpcStub
-	 * onGadgetResponse hop with one plain LedgerService RPC; a failed delivery
-	 * retries briefly, then the wake's bounded response lease recovers it.
-	 */
-	private async deliverNote(turn: TurnState): Promise<void> {
-		let delivered = false;
-		try {
-			await this.env.LEDGER.recordOperatorNote({
-				workItemId: turn.workItemId,
-				expectedVersion: turn.wakeVersion,
-				turn: turn.turnNumber,
-				response: { text: turn.outcome ?? "PARKED:no-outcome", idempotencyKey: noteKey(turn.wakeKey) },
-			});
-			delivered = true;
-		} catch { /* handled below against current storage */ }
-		// The RPC await can interleave with a freshly accepted wake; only the
-		// still-current turn may touch stored state or the alarm.
-		const current = await this.ctx.storage.get<TurnState>("turn");
-		if (!current || current.wakeKey !== turn.wakeKey || current.status !== "done") return;
-		if (delivered) {
-			await this.ctx.storage.put("turn", { ...current, noteDue: false });
-			await this.ctx.storage.deleteAlarm();
+		if (await this.ctx.storage.get("poked")) {
+			// Events arrived while this turn ran; start the next one immediately.
+			await this.ctx.storage.setAlarm(Date.now());
 			return;
 		}
-		const noteAttempts = (current.noteAttempts ?? 0) + 1;
-		await this.ctx.storage.put("turn", { ...current, noteAttempts });
-		// Past the retry budget the demo's bounded wake redelivery recovers.
-		if (noteAttempts <= NOTE_ATTEMPT_BUDGET) await this.ctx.storage.setAlarm(Date.now() + NOTE_RETRY_MS);
-		else await this.ctx.storage.deleteAlarm();
+		if (outcome === "WAITING") {
+			// The turn wants a time-based re-poke: the DO sets its own alarm and
+			// re-drives itself with a fresh snapshot. No ledger involvement.
+			await this.ctx.storage.put("poked", turn.workItemId);
+			await this.ctx.storage.setAlarm(Date.now() + WAITING_REPOKE_MS);
+			return;
+		}
+		await this.ctx.storage.deleteAlarm();
 	}
 }
 
-function noteKey(wakeKey: string): string {
-	// The wake key is already unique per (work item, revision, turn); it only
-	// needs the ledger's bounded note-key alphabet.
-	const safe = wakeKey.replace(/[^A-Za-z0-9._:-]/gu, "-").slice(0, 192);
-	return /^[A-Za-z0-9]/u.test(safe) ? safe : `k${safe.slice(0, 191)}`;
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+	return Promise.race([
+		promise,
+		new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`${label} exceeded its ${ms}ms budget.`)), ms)),
+	]);
 }
 
 function parseSnapshot(state: string): Snapshot {
@@ -412,7 +384,7 @@ function summarizeAction(action: StagedOperatorAction): Record<string, unknown> 
 
 function outcomeFromReply(content: string | null, turn: TurnState): string {
 	const text = typeof content === "string" ? content.trim().replace(/\s+/gu, " ").slice(0, 200) : "";
-	if (/^(?:PROGRESSED|PARKED:[A-Za-z0-9._-]+|COMPLETE)$/u.test(text)) return text;
+	if (/^(?:PROGRESSED|WAITING|PARKED:[A-Za-z0-9._-]+|COMPLETE)$/u.test(text)) return text;
 	if (text) return text;
 	return turn.calls.some((call) => call.ok) ? "PROGRESSED" : "PARKED:no-reply";
 }
