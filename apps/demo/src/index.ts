@@ -1227,8 +1227,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 			if (!workflow || !job || !ledger || !deploymentUrl) continue;
 			const runId = ledger.promotion.runId ?? `generation-${ledger.generation}`;
 			const effectId = this.effectId(job.id, "github-close", `completion-${runId}`);
-			const message = [...workflow.activity].reverse().find((entry) => entry.phase === "completed")?.message
-				?? "Cloudflare OS completed the verified deployment.";
+			const message = `Cloudflare OS candidate ${ledger.id} generation ${ledger.generation} validated, merged at its exact tested tree, and deployed.`;
 			const now = Date.now();
 			const effect = createCoordinatorEffect({
 				id: effectId,
