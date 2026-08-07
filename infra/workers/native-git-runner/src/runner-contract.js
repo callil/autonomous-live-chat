@@ -3,7 +3,9 @@ const RESPONSE_ID = /^[A-Za-z0-9_-]{1,120}$/u;
 const TOOL_NAME = /^[A-Za-z0-9_.:-]{1,80}$/u;
 
 export const NANOCODEX_VERSION = "0.3.0";
-export const NANOCODEX_DEFAULT_MODEL = "gpt-5.6-luna";
+// NanoCodex v0.3.0 has a single compiled Responses model contract. Keep this
+// value coupled to the pinned binary instead of pretending it is configurable.
+export const NANOCODEX_DEFAULT_MODEL = "gpt-5.6-sol";
 
 function boundedUnique(values, pattern, limit) {
 	if (!Array.isArray(values)) return [];

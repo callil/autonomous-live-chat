@@ -30,7 +30,10 @@ assert.match(worker, /putWakeInTransaction/u, "state and durable wake outbox are
 assert.match(worker, /this\.ctx\.restore\(\{ type: "operator-note", workItemId: inFlight\.workItemId, expectedVersion: inFlight\.version, turn: inFlight\.turn \}\)/u, "the OS can durably store and later invoke its response target");
 assert.match(worker, /messageKey: `ledger-event:\$\{inFlight\.id\}:v\$\{inFlight\.version\}:t\$\{inFlight\.turn\}`/u, "each no-progress operator turn gets an independently idempotent message");
 assert.match(worker, /const OPERATOR_CHAT_KEY = "operator-v2"/u, "the persistent operator chat was migrated after APP_HARNESS became ambient");
+assert.match(worker, /const OPERATOR_GADGET_KEY = "callil-autonomous-live-chat-v2"/u, "the persistent operator gadget cannot retain the legacy APP_HARNESS binding");
+assert.match(worker, /gadgetKey: OPERATOR_GADGET_KEY/u, "every ledger wake reaches the clean persistent operator workspace");
 assert.match(worker, /chatKey: OPERATOR_CHAT_KEY/u, "every ledger wake reaches the one persistent operator chat");
+assert.doesNotMatch(worker, /gadgetKey: "callil-autonomous-live-chat"/u, "the legacy gadget binding cannot shadow the ambient operator capability");
 assert.doesNotMatch(worker, /chatKey: "operator-main"/u, "the capability-frozen legacy operator chat is never reused");
 assert.doesNotMatch(worker, /chatGatewayRpcTarget: new OperatorNoteTarget/u, "ephemeral RPC targets never cross the persistent OS gateway");
 assert.match(worker, /state: "in_flight"/u, "an accepted operator turn retains a durable response lease");

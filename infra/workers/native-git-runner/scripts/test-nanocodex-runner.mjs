@@ -31,7 +31,7 @@ assert.match(instructions, /read-only subagents proactively and in parallel/u);
 assert.match(instructions, /parent agent alone owns edits, Git, branches, and the stack/u);
 assert.match(instructions, /execution harness will submit this branch through the installed official gh stack CLI/u);
 assert.match(instructions, /Multi-node stacks are not enabled yet/u);
-assert.equal(NANOCODEX_DEFAULT_MODEL, "gpt-5.6-luna");
+assert.equal(NANOCODEX_DEFAULT_MODEL, "gpt-5.6-sol");
 
 const bounded = normalizeAgentSummary({
 	model: NANOCODEX_DEFAULT_MODEL,
@@ -63,6 +63,7 @@ assert.doesNotMatch(source, /APP_HARNESS_RUNNER_SECRET|GITHUB_APP_PRIVATE_KEY|GI
 assert.match(source, /GITHUB_APP\.createRunnerToken/u, "the sole GitHub App broker mints the short-lived repository capability");
 assert.match(config, /"binding": "GITHUB_APP"/u);
 assert.match(config, /"entrypoint": "GitHubAppCapability"/u);
+assert.doesNotMatch(config, /"MODEL_ID"/u, "the pinned NanoCodex binary model must not be presented as configurable");
 assert.match(config, /"deleted_classes": \["RunnerJob"\]/u);
 assert.doesNotMatch(config, /"name": "RUNNER_JOB"/u);
 assert.doesNotMatch(source, /runJob\(/u, "the Worker cannot synchronously own a full implementation run");
