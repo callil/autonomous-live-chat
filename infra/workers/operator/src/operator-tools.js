@@ -16,9 +16,9 @@ export const SYSTEM_PROMPT =
 	+ "One tool per step; advance while the ledger accepts; on rejected, correct once or stop. "
 	+ "Results arrive by push: never poll getCandidate or re-stage implementation while implementing. stageCandidate from a pull-request-opened State.facts.runnerResult; on failure or implementationProblem, stageImplementation again or replan. "
 	+ "When State.facts.validation or State.facts.promotion is present, stage from it. On validation success stageState validating with its artifacts, then stagePromotion with a fresh dispatchKey; promotion success: stageState deployed, then completed. "
-	+ "On validation or promotion failure, restack: stagePlan with the next generation and a fresh getMainSha baseSha. "
+	+ "On validation or promotion failure, or phase retryable (the failed run was already cleared), restack: stagePlan with the next generation and a fresh getMainSha baseSha; never wait for a cleared run. "
 	+ "Observe only when the phase needs an answer and no fact is present. "
-	+ "When nothing can advance until an external result arrives, stop and reply WAITING; you will be woken when it lands. Reply exactly PROGRESSED, WAITING, PARKED:<code>, or COMPLETE.";
+	+ "When nothing can advance until an external result arrives, reply WAITING. Reply exactly PROGRESSED, WAITING, PARKED:<code>, or COMPLETE.";
 
 function tool(name, description, properties) {
 	return {

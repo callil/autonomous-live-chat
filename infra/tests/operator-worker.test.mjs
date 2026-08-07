@@ -107,6 +107,14 @@ assert.match(demoConfig, /"binding": "OPERATOR"/u);
 assert.match(demoConfig, /"service": "app-harness-operator"/u);
 assert.match(demoConfig, /"entrypoint": "OperatorGateway"/u);
 
+// ---- failed-run restack: no stale evidence, restack is the next step ----
+assert.match(demoWorker, /input\.phase === "retryable"/u, "the retryable transition triggers durable cleanup");
+assert.match(demoWorker, /delete facts\.runnerResult;\n\t\t\t\tdelete facts\.runnerProgress;/u, "the dead generation's runner evidence is cleared with the retryable transition");
+assert.match(demoWorker, /const nextStep = item\.phase === "retryable"/u, "a retryable snapshot names the restack as the single next step");
+assert.match(demoWorker, /Stage a revised plan \(revision \$\{item\.plan \? item\.plan\.revision \+ 1 : 1\}, next generation, fresh getMainSha baseSha\) to restack\./u, "the guidance carries the exact next revision");
+assert.match(SYSTEM_PROMPT, /phase retryable \(the failed run was already cleared\), restack/u, "the prompt teaches the retryable restack");
+assert.match(SYSTEM_PROMPT, /never wait for a cleared run/u, "the wedge — waiting on a dead generation — is named and forbidden");
+
 // ---- user-visible source label: never "cloudflare os" ----
 assert.match(demoWorker, /source === "cloudflare-os" \? "operator" : source/u, "the stored enum stays for old records and maps to operator at projection time");
 

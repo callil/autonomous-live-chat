@@ -106,9 +106,10 @@ export function recordLedgerClassification(item, { classification, now }) {
 export function recordLedgerPlan(item, { plan, now }) {
 	const at = timestamp(now, "Plan time");
 	// A plan may be revised until a candidate has merged: classified work,
-	// delegated work with no live run, and a candidate whose validation failed
-	// (a restack) are all legal replan points.
-	if (!(item.phase === "classified" || (item.phase === "delegated" && !item.activeImplementation) || item.phase === "candidate" || item.phase === "validating")) throw new Error("Only classified work can receive a plan.");
+	// delegated work with no live run, a candidate whose validation failed,
+	// and retryable work whose failed run was cleared are all legal replan
+	// points — the restack path must never wedge behind a dead generation.
+	if (!(item.phase === "classified" || (item.phase === "delegated" && !item.activeImplementation) || item.phase === "candidate" || item.phase === "validating" || item.phase === "retryable")) throw new Error("Only classified work can receive a plan.");
 	if (!plan || typeof plan !== "object") throw new Error("Plan is required.");
 	const issue = item.artifacts?.issue;
 	if (!issue || !Number.isSafeInteger(issue.number) || issue.number < 1) throw new Error("A plan requires the existing GitHub issue artifact.");

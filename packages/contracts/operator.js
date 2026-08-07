@@ -46,7 +46,15 @@ export function assertOperatorCommandAllowed(workItem, command) {
 		return;
 	}
 	if (command.kind === "plan") {
-		if (workItem.phase !== "classified" || workItem.classification?.decision !== "eligible" || workItem.plan !== null || workItem.artifacts.issue === undefined) throw new Error("A plan requires eligible classified work and its existing GitHub issue.");
+		if (workItem.classification?.decision !== "eligible" || workItem.artifacts.issue === undefined) throw new Error("A plan requires eligible classified work and its existing GitHub issue.");
+		// The same replan points the ledger mutation accepts: a failed or stale
+		// generation must be restackable, never wedged behind a dead run.
+		const plannable = (workItem.phase === "classified" && workItem.plan === null)
+			|| (workItem.phase === "delegated" && !workItem.activeImplementation)
+			|| workItem.phase === "candidate"
+			|| workItem.phase === "validating"
+			|| workItem.phase === "retryable";
+		if (!plannable) throw new Error("A plan is only the next action for classified work or a failed candidate to restack.");
 		return;
 	}
 	if (command.kind === "implement") {

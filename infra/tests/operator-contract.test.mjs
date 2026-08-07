@@ -36,6 +36,14 @@ assert.throws(() => assertOperatorCommandAllowed(withIssue, { kind: "create-issu
 assert.doesNotThrow(() => assertOperatorCommandAllowed(withIssue, { kind: "plan", plan: { revision: 1 } }));
 assert.doesNotThrow(() => assertOperatorCommandAllowed({ ...submitted, artifacts: withIssue.artifacts }, { kind: "classify" }), "a previously created issue can be reconciled by the still-missing classification");
 
+// The failed-run restack path: a retryable item (failed run already cleared)
+// accepts a revised plan as its single next step and can never wedge waiting
+// for a run that no longer exists.
+const retryable = { ...withIssue, phase: "retryable", plan: { revision: 1 }, activeImplementation: null };
+assert.doesNotThrow(() => assertOperatorCommandAllowed(retryable, { kind: "plan", plan: { revision: 2 } }), "a retryable item restacks by plan, no ceremony");
+assert.throws(() => assertOperatorCommandAllowed(retryable, { kind: "implement", runId: "run-x" }), /accepted durable stack plan/u, "retryable cannot re-implement the dead generation directly");
+assert.throws(() => assertOperatorCommandAllowed({ ...retryable, phase: "implementing", activeImplementation: { runId: "run-live" } }, { kind: "plan", plan: { revision: 2 } }), /failed candidate to restack/u, "a live implementation is never replanned out from under its run");
+
 assert.equal(operatorActionEffectKey("work-1", { kind: "create-issue" }), "work-1:issue");
 assert.equal(operatorActionEffectKey("work-1", { kind: "create-issue" }), operatorActionEffectKey("work-1", { kind: "create-issue" }), "issue identity is revision-independent");
 assert.notEqual(operatorActionEffectKey("work-1", { kind: "plan", plan: { revision: 1 } }), operatorActionEffectKey("work-1", { kind: "plan", plan: { revision: 2 } }), "deliberate plan revisions remain distinct effects");

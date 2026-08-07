@@ -335,7 +335,20 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		const artifacts = normalizeArtifacts(input.artifacts ?? {});
 		const source = normalizeLedgerEventSource(input.source);
 		const updated = applyExternalState(current, { phase: input.phase, artifacts, now: Date.now() }) as StoredWorkItem;
-		return this.persistTransition(current.version, updated, normalizeOperatorMessage(input.message), source);
+		const persisted = await this.persistTransition(current.version, updated, normalizeOperatorMessage(input.message), source);
+		if (input.phase === "retryable") {
+			// The dead generation's runner evidence must not survive into the
+			// next snapshot: a stale result once wedged the model into waiting
+			// for a run that no longer exists instead of planning the restack.
+			const factKey = `${EXTERNAL_FACT_PREFIX}${persisted.id}`;
+			const facts = await this.ctx.storage.get<ExternalFacts>(factKey);
+			if (facts && (facts.runnerResult || facts.runnerProgress)) {
+				delete facts.runnerResult;
+				delete facts.runnerProgress;
+				await this.ctx.storage.put(factKey, facts);
+			}
+		}
+		return persisted;
 	}
 
 	async recordArtifacts(input: { workItemId: string; artifacts: Record<string, unknown>; message: string; source: LedgerEvent["source"] }): Promise<StoredWorkItem> {
@@ -1045,6 +1058,13 @@ function operatorSnapshot(item: StoredWorkItem | undefined, actions: StoredOpera
 	if (item.phase === "implementing" && item.activeImplementation && Date.now() - item.activeImplementation.startedAt > STALLED_IMPLEMENTATION_MS) {
 		implementationProblem = "The active implementation run exceeded its execution budget and cannot resume. Stage stageImplementation again to restart the isolated run.";
 	}
+	// A retryable item has no live run by construction: its failed generation
+	// and stale runner evidence were cleared with the transition. Make the
+	// restack the obvious single next step so the model never waits on a run
+	// that no longer exists.
+	const nextStep = item.phase === "retryable"
+		? `The failed implementation run was cleared. Stage a revised plan (revision ${item.plan ? item.plan.revision + 1 : 1}, next generation, fresh getMainSha baseSha) to restack.`
+		: undefined;
 	// Surface a recorded plan the runner would refuse as a fact, so the
 	// bounded model stages a revised plan instead of retrying implement.
 	let planProblem: string | undefined;
@@ -1061,6 +1081,7 @@ function operatorSnapshot(item: StoredWorkItem | undefined, actions: StoredOpera
 		request: String(item.request ?? "").slice(0, 600),
 		classification: item.classification,
 		plan: item.plan,
+		...(nextStep ? { nextStep } : {}),
 		...(planProblem ? { planProblem } : {}),
 		...(implementationProblem ? { implementationProblem } : {}),
 		...(runnerResult || runnerProgress || validation || promotion || candidate

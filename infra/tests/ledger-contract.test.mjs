@@ -86,4 +86,19 @@ const restacked = recordLedgerPlan(validating, {
 assert.equal(restacked.phase, "delegated");
 assert.equal(restacked.artifacts.candidate, undefined, "a restack clears the stale candidate lineage");
 
+// The failed-run path must never wedge: a failed runner result acknowledged as
+// retryable clears the dead generation's activeImplementation outright, and
+// the very next legal step is a revised plan for the next generation.
+const failedRun = startLedgerImplementation(planned, { runId: "run-9", now: 11 });
+assert.equal(failedRun.item.activeImplementation?.runId, "run-9");
+const retryable = recordLedgerExternalState(failedRun.item, { phase: "retryable", now: 12 });
+assert.equal(retryable.phase, "retryable");
+assert.equal(retryable.activeImplementation, null, "retryable clears the failed generation's active implementation");
+const replanned = recordLedgerPlan(retryable, {
+	plan: { ...planned.plan, revision: 2, generation: 2, branch: "app-harness-os/1/g2" },
+	now: 13,
+});
+assert.equal(replanned.phase, "delegated", "a retryable item restacks directly into a new delegated plan");
+assert.equal(replanned.plan.generation, 2);
+
 console.log("ledger contract: ok");
