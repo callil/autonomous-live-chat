@@ -254,7 +254,9 @@ export function recordLedgerExternalState(item, { operatorId, leaseId, phase, ar
 	if (!['validating', 'promoting', 'deployed', 'completed', 'retryable', 'needs_review', 'rejected'].includes(phase)) {
 		throw new Error("External ledger phase is invalid.");
 	}
-	if (phase === "validating" && item.phase !== "candidate") throw new Error("Only a candidate can enter validation.");
+	// Re-recording the validating phase is legal: it merges late-arriving
+	// validation artifacts (for example the CI run reference) idempotently.
+	if (phase === "validating" && item.phase !== "candidate" && item.phase !== "validating") throw new Error("Only a candidate can enter validation.");
 	if (phase === "promoting" && item.phase !== "validating") throw new Error("Only a validated candidate can enter promotion.");
 	if (phase === "deployed" && item.phase !== "promoting") throw new Error("Only a promoted candidate can be deployed.");
 	if (phase === "completed" && item.phase !== "deployed") throw new Error("Only a deployed candidate can complete.");
