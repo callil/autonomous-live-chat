@@ -99,6 +99,7 @@ export type StagedActionResult = {
 	actionId: number;
 	workItemId: string;
 	state: "queued" | "already-queued" | "completed" | "rejected";
+	error?: string;
 };
 
 /** Agent-facing model-selected methods, kept deliberately typed and flat. */
