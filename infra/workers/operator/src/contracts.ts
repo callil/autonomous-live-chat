@@ -96,7 +96,7 @@ export interface AppHarnessLedger {
 	recordOperatorNote(input: { workItemId: string; expectedVersion: number; turn: number; response: { text: string; idempotencyKey: string } }): Promise<void>;
 }
 
-/** Disposable Cloudflare Sandbox/NanoCodex implementation surface. */
+/** Disposable Cloudflare Sandbox direct-agent implementation surface. */
 export interface NativeGitRunnerBinding {
 	startRun(input: unknown): Promise<unknown>;
 	inspectRun(input: { jobId: string; generation: number; runId: string }): Promise<unknown>;

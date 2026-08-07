@@ -65,7 +65,7 @@ export async function executeCommand(env: ExecuteEnv, workItem: LedgerWorkItem, 
 					},
 				},
 			});
-			await postIssueStatus(env, workItem, "implementation", "### Building\n\nNanoCodex is editing the repository in an isolated Cloudflare Sandbox run.");
+			await postIssueStatus(env, workItem, "implementation", "### Building\n\nThe App Harness coding agent is editing the repository in an isolated Cloudflare Sandbox run.");
 			const started = await env.LEDGER.startImplementation({ workItemId: workItem.id, leaseId: command.leaseId, runId: command.runId });
 			return { disposition: started.disposition, implementationRunId: command.runId, ledger: workItemReceipt(started.item), runner };
 		}
