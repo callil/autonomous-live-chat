@@ -185,7 +185,7 @@ const OPERATOR_EMAIL = "callil.capuozzo@gmail.com";
 // live; experimental workspaces are never reused.
 const OPERATOR_GADGET_KEY = "app-harness-operator-v2";
 const OPERATOR_CHAT_KEY = "ledger-operator-v2";
-const OPERATOR_INSTRUCTION = "Operate APP_HARNESS. State below is the authoritative JSON snapshot of this work item, its lease, artifacts, and staged actions; trust it and act without re-reading. Progress one step only: claim -> classification -> issue -> plan -> implementation -> candidate -> validating -> promotion -> deployed -> completed. Stage exactly one declared write via env.APP_HARNESS with workItemId, expectedVersion = State.version, leaseId = State.leaseId: stageClaim, stageClassification, stageIssue, stagePlan, stageImplementation, stageCandidate, stagePromotion, stageState, stageRelease, stageDefer. When State.leaseId is null, stageClaim first with a fresh unique leaseId string and leaseMs 600000. Observations getWorkItem, listActions, getMainSha, inspectImplementation, getCandidate, observeCandidateValidation, findPromotionRun, inspectPromotionRun exist only for facts State lacks. Use declared argument types only; never invent methods. stageRelease and stageDefer are parking exits: after either, stop. If blocked or unchanged, stop. Reply exactly PROGRESSED, PARKED:<code>, or COMPLETE.";
+const OPERATOR_INSTRUCTION = "Operate APP_HARNESS. State below is the authoritative JSON snapshot of this work item, its lease, artifacts, and staged actions; trust it and act without re-reading. Progress one step only: claim -> classification -> issue -> plan -> implementation -> candidate -> validating -> promotion -> deployed -> completed. Stage exactly one declared write via env.APP_HARNESS with workItemId, expectedVersion = State.version, leaseId = State.leaseId: stageClaim, stageClassification, stageIssue, stagePlan, stageImplementation, stageCandidate, stagePromotion, stageState, stageRelease, stageDefer. When State.leaseId is null, stageClaim first with a fresh unique leaseId string and leaseMs 600000. Observations getWorkItem, listActions, getMainSha, inspectImplementation, getCandidate, observeCandidateValidation, findPromotionRun, inspectPromotionRun exist only for facts State lacks. Use declared argument types only; never invent methods. A rejected action's result.error says why it failed: stage a corrected command instead of repeating it. stageRelease and stageDefer are parking exits: after either, stop. If blocked or unchanged, stop. Reply exactly PROGRESSED, PARKED:<code>, or COMPLETE.";
 const GITHUB_REPOSITORY = "callil/autonomous-live-chat";
 const PRODUCTION_DEPLOYMENT_HOST = "autonomous-live-chat.coda-a.workers.dev";
 
@@ -223,7 +223,7 @@ export class LedgerService extends WorkerEntrypoint<RuntimeEnv> {
 	listOperatorActions(input: { workItemId: string }): Promise<StoredOperatorAction[]> { return this.room().listOperatorActions(input); }
 	beginOperatorAction(input: { actionId: number }): Promise<{ disposition: "execute" | "busy" | "applied" | "rejected" | "stale"; action: StoredOperatorAction; workItem: StoredWorkItem; executionToken?: string }> { return this.room().beginOperatorAction(input); }
 	completeOperatorAction(input: { actionId: number; idempotencyKey: string; executionToken: string; result: unknown }): Promise<StoredOperatorAction> { return this.room().completeOperatorAction(input); }
-	rejectOperatorAction(input: { actionId: number; executionToken: string }): Promise<StoredOperatorAction> { return this.room().rejectOperatorAction(input); }
+	rejectOperatorAction(input: { actionId: number; executionToken: string; error?: string }): Promise<StoredOperatorAction> { return this.room().rejectOperatorAction(input); }
 }
 
 /**
@@ -404,7 +404,9 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		const existingId = await this.ctx.storage.get<number>(`${ACTION_KEY_PREFIX}${key}`);
 		if (existingId !== undefined) {
 			const existing = await this.ctx.storage.get<StoredOperatorAction>(`${ACTION_PREFIX}${existingId}`);
-			if (existing) {
+			// A rejected action produced no external effect, so its semantic key is
+			// free again: the operator may stage a corrected command in its place.
+			if (existing && existing.status !== "rejected") {
 				await this.queueOperatorWake(workItem);
 				return existing;
 			}
@@ -420,7 +422,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 			const duplicateId = await txn.get<number>(`${ACTION_KEY_PREFIX}${key}`);
 			if (duplicateId !== undefined) {
 				const duplicate = await txn.get<StoredOperatorAction>(`${ACTION_PREFIX}${duplicateId}`);
-				if (duplicate) return duplicate;
+				if (duplicate && duplicate.status !== "rejected") return duplicate;
 			}
 			const activeId = await txn.get<number>(`${ACTION_ACTIVE_PREFIX}${current.id}`);
 			if (activeId !== undefined) {
@@ -512,20 +514,21 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		return completed;
 	}
 
-	async rejectOperatorAction(input: { actionId: number; executionToken: string }): Promise<StoredOperatorAction> {
+	async rejectOperatorAction(input: { actionId: number; executionToken: string; error?: string }): Promise<StoredOperatorAction> {
+		const failure = typeof input.error === "string" && input.error.trim() ? input.error.trim().replace(/\s+/gu, " ").slice(0, 500) : undefined;
 		const rejected = await this.ctx.storage.transaction(async (txn) => {
 			const action = await txn.get<StoredOperatorAction>(`${ACTION_PREFIX}${input.actionId}`);
 			if (!action) throw new Error("Unknown operator action.");
 			if (action.status === "applied") throw new Error("Applied operator actions cannot be rejected.");
 			if (action.status !== "applying" || action.executionToken !== input.executionToken || (action.leaseExpiresAt ?? 0) <= Date.now()) throw new Error("Operator action rejection lost its execution lease.");
-			const rejected: StoredOperatorAction = { ...action, status: "rejected", executionToken: undefined, leaseExpiresAt: undefined, updatedAt: Date.now() };
+			const rejected: StoredOperatorAction = { ...action, status: "rejected", ...(failure ? { result: { error: failure } } : {}), executionToken: undefined, leaseExpiresAt: undefined, updatedAt: Date.now() };
 			const workItem = await txn.get<StoredWorkItem>(this.workItemKey(action.workItemId));
 			await Promise.all([txn.put(`${ACTION_PREFIX}${action.id}`, rejected), txn.delete(this.actionWakeKey(action.id)), txn.delete(`${ACTION_ACTIVE_PREFIX}${action.workItemId}`), ...(workItem && !TERMINAL_PHASES.has(workItem.phase) ? [this.putWakeInTransaction(txn, workItem)] : [])]);
 			return rejected;
 		});
 		const workItem = await this.loadWorkItem(rejected.workItemId);
 		if (workItem) {
-			await this.appendActionEvent(workItem.id, workItem.phase, `Cloudflare OS could not apply ${rejected.command.kind.replaceAll("-", " ")}.`);
+			await this.appendActionEvent(workItem.id, workItem.phase, `Cloudflare OS could not apply ${rejected.command.kind.replaceAll("-", " ")}${failure ? `: ${failure}` : "."}`);
 			await this.scheduleWakeAlarm();
 		}
 		return rejected;

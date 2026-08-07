@@ -243,8 +243,13 @@ export class AppHarnessOperatorGatekeeper extends DurableObject<Cloudflare.Env> 
 			const result = await this.execute(begun.workItem, begun.action.command);
 			await this.ledger().completeOperatorAction({ actionId, idempotencyKey: begun.action.idempotencyKey, executionToken: begun.executionToken, result });
 		} catch (error) {
-			// The ledger retains the action as applying until a later OS turn can
-			// inspect/retry it. We do not invent a local retry policy here.
+			// Reject with the failure recorded so the durable ledger frees the
+			// work item and the next operator turn sees exactly what to correct.
+			// The Gatekeeper still invents no retry policy of its own.
+			const message = error instanceof Error ? error.message : String(error);
+			try {
+				await this.ledger().rejectOperatorAction({ actionId, executionToken: begun.executionToken, error: message });
+			} catch { /* the apply lease recovers through ledger reconciliation */ }
 			throw error;
 		}
 	}
