@@ -13,6 +13,8 @@ assert.doesNotThrow(() => new Function(clientScript), "the browser client script
 assert.match(clientScript, /function renderMessageSnapshot\(messages\) \{ messagesEl\.replaceChildren\(\); rendered\.clear\(\);/u, "a reconnect snapshot replaces retired chat state instead of merging it");
 assert.match(clientScript, /event\.type === 'chat:snapshot'\) \{ renderMessageSnapshot\(event\.messages\)/u, "every authoritative chat snapshot uses replacement semantics");
 assert.match(avatarColors, /const color = avatarColor\(name\);\s+avatar\.style\.color = color;\s+author\.style\.color = color;/u, "each message author uses the same generated color as their avatar");
+assert.match(entry, /const AVATAR_SCRIPT = '<script src="\/avatar-colors\.js" defer><\/script>';/u, "the avatar color enhancement is defined for the delivered page");
+assert.match(entry, /\.replace\("<\/head>", `\$\{AVATAR_SCRIPT\}\$\{HARNESS_TOOLBAR_STYLES\}<\/head>`\)/u, "the matching avatar and author colors are loaded by the delivered page");
 
 assert.doesNotMatch(html, /maxlength=/u);
 assert.doesNotMatch(html, /message-count/u);
