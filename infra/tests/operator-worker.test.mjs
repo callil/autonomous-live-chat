@@ -99,7 +99,7 @@ assert.doesNotMatch(operatorConfig, /"MODEL_API_KEY"/u, "the model credential is
 assert.match(demoWorker, /submitWake\(\{ workItemId: item\.id \}\)/u, "a poke carries no state; the DO reads its own fresh snapshot");
 assert.match(demoWorker, /pokeOperator/u, "every relevant ledger event pokes the operator");
 assert.match(demoWorker, /this\.ctx\.waitUntil/u, "pokes are fire-and-forget, never awaited on the write path");
-assert.match(demoWorker, /SWEEP_INTERVAL_MS = 5 \* 60_000/u, "one slow ledger-side sweep is the final safety net");
+assert.match(demoWorker, /SWEEP_INTERVAL_MS = 2 \* 60_000/u, "one slow ledger-side sweep is the final safety net");
 assert.match(demoWorker, /OPERATOR_POKE_CAP = 200/u, "the lifetime poke budget is the runaway brake");
 assert.match(demoWorker, /needs_review/u, "the poke cap parks to needs_review instead of spinning");
 assert.doesNotMatch(demoWorker, /WakeRecord|queueOperatorWakeRecord|beginOperatorWakeDelivery|settleOperatorWakeRecord|operatorWakeDeliveryExhausted|ledger-wake|recordOperatorNote|requireLease|leaseId|resumeAt/u, "no wake-record or lease machinery survives in the ledger");

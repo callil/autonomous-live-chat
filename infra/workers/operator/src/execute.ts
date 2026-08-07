@@ -50,7 +50,7 @@ export async function executeCommand(env: ExecuteEnv, workItem: LedgerWorkItem, 
 				// the runner's completion callback into the ledger.
 				ledgerRunId: command.runId,
 				candidate: {
-					change: { kind: "repository-task", request: workItem.request },
+					change: { kind: "repository-task", request: workItem.request, ciProfile: workItem.plan.ciProfile },
 					stack: {
 						stackId: workItem.plan.stackId,
 						nodeId: workItem.plan.nodeId,
