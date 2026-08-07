@@ -40,19 +40,19 @@ assert.doesNotMatch(SYSTEM_PROMPT, /claim|lease|defer|stageRelease/iu, "no lease
 assert.match(SYSTEM_PROMPT, /never poll getCandidate/u, "candidate results arrive by push");
 assert.match(SYSTEM_PROMPT, /State\.facts\.runnerResult/u, "the prompt teaches the pushed runner fact");
 assert.match(SYSTEM_PROMPT, /Stage from pushed State\.facts/u, "pushed GitHub facts are staged directly, never re-observed");
-// ---- auto-merge fast lane: wait for merge facts; promotion is the fallback ----
-assert.match(SYSTEM_PROMPT, /then WAIT: candidates auto-merge and deploy on their own/u, "after validating, the default is to wait for the fast lane, not dispatch promotion");
-assert.match(SYSTEM_PROMPT, /facts\.merged and a success facts\.mainDeploy arrive, stageState deployed with both as artifacts, then completed/u, "the merge and main-deploy facts together are the fast-lane deployed evidence");
-assert.match(SYSTEM_PROMPT, /stagePromotion is the fallback if no merged fact arrives after a long wait/u, "promotion dispatch is described as the fallback merge path");
-// ---- merge-watch conflict recovery: observe the PR, restack when dirty ----
-assert.match(SYSTEM_PROMPT, /On a mergeTimeoutProblem, observeCandidatePullRequest/u, "the merge-timeout problem fact routes to the bounded PR observation");
-assert.match(SYSTEM_PROMPT, /mergeableState is dirty the candidate is conflicted — restack immediately \(stagePlan next generation, fresh baseSha\)/u, "a conflicted candidate restacks immediately instead of waiting out the fast lane");
+// ---- single merge path: promotion dispatch after validation, never auto-merge ----
+assert.match(SYSTEM_PROMPT, /then stagePromotion: the trusted promotion dispatch is the single merge path/u, "after validating, the operator stages the promotion — candidates are stack members and never merge on their own");
+assert.doesNotMatch(SYSTEM_PROMPT, /auto-merge/u, "the prompt must not teach the dead auto-merge fast lane");
+assert.match(SYSTEM_PROMPT, /facts\.merged and a success facts\.mainDeploy arrive, stageState deployed with both as artifacts, then completed/u, "the merge and main-deploy facts together are the deployed evidence");
+// ---- merge-watch recovery: dispatch the promotion, restack when dirty ----
+assert.match(SYSTEM_PROMPT, /On a mergeTimeoutProblem, stagePromotion if no promotion is recorded; otherwise observeCandidatePullRequest/u, "the merge-timeout problem fact routes to the promotion dispatch first, the bounded PR observation second");
+assert.match(SYSTEM_PROMPT, /mergeableState is dirty the candidate is conflicted — restack immediately \(stagePlan next generation, fresh baseSha\)/u, "a conflicted candidate restacks immediately");
 assert.match(SYSTEM_PROMPT, /if merged, keep waiting for facts/u, "an already-merged candidate keeps waiting for the pushed merge facts, never double-restacks");
 const stageStateArtifacts = TOOLS.find((entry) => entry.function.name === "stageState").function.parameters.properties.artifacts;
 assert.deepEqual(Object.keys(stageStateArtifacts.properties).toSorted(), ["mainDeploy", "merged", "promotion", "validation"], "stageState can carry every evidence artifact the deployed guard accepts");
 assert.deepEqual(stageStateArtifacts.properties.merged.required.toSorted(), ["branch", "headSha", "mergeCommitSha", "number", "url"]);
 assert.deepEqual(stageStateArtifacts.properties.mainDeploy.required.toSorted(), ["conclusion", "runId", "url"]);
-assert.match(TOOLS.find((entry) => entry.function.name === "stagePromotion").function.description, /^Fallback merge path/u, "the tool description itself teaches promotion as fallback");
+assert.match(TOOLS.find((entry) => entry.function.name === "stagePromotion").function.description, /^The single merge path/u, "the tool description itself teaches promotion as the only merge path");
 assert.match(SYSTEM_PROMPT, /only when the phase needs an answer and no fact is present/u, "observation tools are the fallback poll, not the data path");
 assert.match(SYSTEM_PROMPT, /PROGRESSED, WAITING, PARKED:<code>, or COMPLETE/u, "a waiting turn simply ends; the DO re-drives itself");
 
@@ -73,8 +73,8 @@ const fastLaneArtifacts = {
 	merged: { number: 12, url: "https://github.com/callil/autonomous-live-chat/pull/12", headSha: "a".repeat(40), mergeCommitSha: "c".repeat(40), branch: "app-harness-os/7/g1" },
 	mainDeploy: { url: "https://github.com/callil/autonomous-live-chat/actions/runs/77", runId: 77, conclusion: "success" },
 };
-const fastLaneDeployed = commandFor("stageState", { phase: "deployed", artifacts: fastLaneArtifacts, message: "Deployed by auto-merge.", source: "github" }, ctx);
-assert.deepEqual(fastLaneDeployed.artifacts, { merged: fastLaneArtifacts.merged, mainDeploy: fastLaneArtifacts.mainDeploy }, "the fast-lane evidence artifacts pass through stageState unmodified");
+const fastLaneDeployed = commandFor("stageState", { phase: "deployed", artifacts: fastLaneArtifacts, message: "Deployed by merge and main-deploy facts.", source: "github" }, ctx);
+assert.deepEqual(fastLaneDeployed.artifacts, { merged: fastLaneArtifacts.merged, mainDeploy: fastLaneArtifacts.mainDeploy }, "the merge evidence artifacts pass through stageState unmodified");
 // Loop-injected promotion evidence: whatever facts the snapshot (or the loop's
 // own promoting-phase observation) carries overrides anything the model typed,
 // so stageState deployed needs no retyped run reference at all.
@@ -160,7 +160,8 @@ assert.match(SYSTEM_PROMPT, /never wait for a cleared run/u, "the wedge — wait
 assert.match(demoWorker, /MERGE_WATCH_TIMEOUT_MS = 4 \* 60_000/u, "the merge watch window is a named four-minute constant");
 assert.match(demoWorker, /let mergeTimeoutProblem/u, "the snapshot carries the merge-timeout problem fact");
 assert.match(demoWorker, /validation\.conclusion === "success" && !merged && !facts\?\.promotion && Date\.now\(\) - validation\.at > MERGE_WATCH_TIMEOUT_MS/u, "the problem fires only for a successful validation with no merged or promotion fact past the watch window");
-assert.match(demoWorker, /Observe the candidate pull request state with observeCandidatePullRequest/u, "the problem text instructs the bounded observation, not a ledger-side GitHub query");
+assert.match(demoWorker, /Dispatch the merge now with stagePromotion — the operator-staged promotion dispatch is the single merge path/u, "the problem text names the promotion dispatch as the primary recovery");
+assert.match(demoWorker, /observe the candidate pull request state with observeCandidatePullRequest/u, "the problem text instructs the bounded observation, not a ledger-side GitHub query");
 assert.match(operatorWorker, /observeCandidatePullRequest\(\{ number: turn\.candidatePr \}\)/u, "the loop injects the recorded candidate PR number into the observation");
 
 // ---- promoting-phase self-rescue: the loop observes, the model records ----

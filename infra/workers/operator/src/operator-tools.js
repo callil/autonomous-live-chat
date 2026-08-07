@@ -15,9 +15,8 @@ export const SYSTEM_PROMPT =
 	+ "Order: classification -> issue -> plan -> implementation -> candidate -> validating -> promotion -> deployed -> completed. "
 	+ "One tool per step; advance while the ledger accepts; on rejected, correct once or stop. "
 	+ "Results arrive by push: never poll getCandidate. stageCandidate from a pull-request-opened State.facts.runnerResult; on failure or implementationProblem, stageImplementation again or replan. "
-	+ "Stage from pushed State.facts. On validation success stageState validating, then WAIT: candidates auto-merge and deploy on their own. When facts.merged and a success facts.mainDeploy arrive, stageState deployed with both as artifacts, then completed. "
-	+ "stagePromotion is the fallback if no merged fact arrives after a long wait. "
-	+ "On a mergeTimeoutProblem, observeCandidatePullRequest: if mergeableState is dirty the candidate is conflicted — restack immediately (stagePlan next generation, fresh baseSha); if merged, keep waiting for facts. "
+	+ "Stage from pushed State.facts. On validation success stageState validating, then stagePromotion: the trusted promotion dispatch is the single merge path — candidates never merge on their own. When facts.merged and a success facts.mainDeploy arrive, stageState deployed with both as artifacts, then completed. "
+	+ "On a mergeTimeoutProblem, stagePromotion if no promotion is recorded; otherwise observeCandidatePullRequest: if mergeableState is dirty the candidate is conflicted — restack immediately (stagePlan next generation, fresh baseSha); if merged, keep waiting for facts. "
 	+ "On validation or promotion failure, or phase retryable (the failed run was already cleared), restack: stagePlan with the next generation and a fresh getMainSha baseSha; never wait for a cleared run. "
 	+ "Observe only when the phase needs an answer and no fact is present. "
 	+ "When only an external result can advance, reply WAITING. Reply exactly PROGRESSED, WAITING, PARKED:<code>, or COMPLETE.";
@@ -85,7 +84,7 @@ export const TOOLS = [
 		pullRequestUrl: { type: "string" },
 		message: { type: "string" },
 	}),
-	tool("stagePromotion", "Fallback merge path: dispatch the trusted promotion workflow for a validated candidate that auto-merge did not land. The candidate identity and dispatch key are supplied by the loop.", {}),
+	tool("stagePromotion", "The single merge path: dispatch the trusted promotion workflow for a validated candidate. The stack-merge dispatcher merges the exact verified head; candidates never merge on their own. The candidate identity and dispatch key are supplied by the loop.", {}),
 	tool("stageState", "Record an externally observed phase transition with its evidence.", {
 		phase: { type: "string", enum: EXTERNAL_PHASES },
 		artifacts: {
