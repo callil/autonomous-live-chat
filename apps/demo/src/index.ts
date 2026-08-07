@@ -179,14 +179,12 @@ const READY_PHASES = new Set<LedgerPhase>(["submitted", "retryable"]);
 const TERMINAL_PHASES = new Set<LedgerPhase>(["completed", "needs_review", "rejected"]);
 const OPERATOR_ID = "cloudflare-os";
 const OPERATOR_EMAIL = "callil.capuozzo@gmail.com";
-// Cloudflare OS freezes ambient capabilities when a chat is first created.
-// The legacy gadget also retained a user binding named APP_HARNESS, so both
-// permanent identities move once to a clean workspace owned by the new ambient
-// operator Gatekeeper.
-const OPERATOR_GADGET_KEY = "callil-autonomous-live-chat-v2";
-// Earlier version-numbered chats froze incomplete capability seeds during setup.
-// This semantic key is permanent for the first complete App Harness operator schema.
-const OPERATOR_CHAT_KEY = "operator-app-harness-v1";
+// Cloudflare OS freezes workspace resources and chat capability types. Create
+// one clean permanent operator identity after the exact Gatekeeper schema is
+// live; experimental workspaces are never reused.
+const OPERATOR_GADGET_KEY = "app-harness-operator";
+const OPERATOR_CHAT_KEY = "ledger-operator";
+const OPERATOR_INSTRUCTION = "Operate the APP_HARNESS ledger. Read before acting. Reconcile existing effects. Stage only the next legal missing action. Never guess schemas or artifacts. If blocked or unchanged, park. Reply exactly PROGRESSED, PARKED:<code>, or COMPLETE.";
 const GITHUB_REPOSITORY = "callil/autonomous-live-chat";
 const PRODUCTION_DEPLOYMENT_HOST = "autonomous-live-chat.coda-a.workers.dev";
 
@@ -790,7 +788,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 					gadgetKey: OPERATOR_GADGET_KEY,
 					chatKey: OPERATOR_CHAT_KEY,
 					messageKey: `ledger-event:${inFlight.id}:v${inFlight.version}:t${inFlight.turn}`,
-					prompt: `App Harness ledger work item ${inFlight.workItemId} changed to revision ${inFlight.version}. Read the authoritative APP_HARNESS ledger and its staged/applied actions, reconcile any existing artifact before retrying, and produce only the next missing artifact. The production origin is https://${PRODUCTION_DEPLOYMENT_HOST}. Continue until blocked or complete.`,
+					prompt: `${OPERATOR_INSTRUCTION} Work item: ${inFlight.workItemId}. Revision hint: ${inFlight.version}.`,
 					gadgetTitle: "App Harness operator",
 					chatGatewayRpcTarget: responseTarget,
 				});
