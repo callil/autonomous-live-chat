@@ -4,7 +4,7 @@ const TOOL_NAME = /^[A-Za-z0-9_.:-]{1,80}$/u;
 
 // The coding model the direct-API agent entrypoint drives through the OpenAI
 // Responses API. Kept in lockstep with AGENT_MODEL in agent-entrypoint.mjs.
-export const AGENT_DEFAULT_MODEL = "gpt-5.4-nano";
+export const AGENT_DEFAULT_MODEL = "gpt-5.3-codex";
 
 function boundedUnique(values, pattern, limit) {
 	if (!Array.isArray(values)) return [];

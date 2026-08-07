@@ -34,7 +34,7 @@ assert.match(instructions, /official gh stack CLI/u, "the harness, not the model
 assert.match(instructions, /CI is the merge and production deployment authority/u);
 assert.match(instructions, /Multi-node stacks are not enabled yet/u);
 assert.doesNotMatch(instructions, /subagents|terminal|package managers|Wrangler/u, "capabilities the direct agent does not have must not be promised");
-assert.equal(AGENT_DEFAULT_MODEL, "gpt-5.4-nano");
+assert.equal(AGENT_DEFAULT_MODEL, "gpt-5.3-codex");
 
 const bounded = normalizeAgentSummary({
 	model: AGENT_DEFAULT_MODEL,
@@ -76,8 +76,8 @@ assert.match(source, /hex\.slice\(0, 32\)/u, "sandbox identifiers stay DNS-safe 
 assert.match(source, /const TERMINAL_PROCESS_STATUSES/u);
 assert.match(source, /parseTerminalArtifact/u);
 assert.match(source, /sandbox\.getSession\(ids\.sessionId\)/u);
-assert.match(source, /RUNNER_IMAGE_REVISION = "da052-async012"/u, "the image revision changes with the agent replacement so no run resumes a stale NanoCodex sandbox");
-assert.ok(`ah-da052-async012-${"x".repeat(32)}`.length <= 63, "derived Cloudflare Sandbox identities stay within the platform limit");
+assert.match(source, /RUNNER_IMAGE_REVISION = "da052-async013"/u, "the image revision changes with the agent replacement so no run resumes a stale NanoCodex sandbox");
+assert.ok(`ah-da052-async013-${"x".repeat(32)}`.length <= 63, "derived Cloudflare Sandbox identities stay within the platform limit");
 
 // The budget layering that silently killed four consecutive production runs:
 // the SDK-side process timeout must sit strictly ABOVE the in-container run
@@ -193,8 +193,9 @@ assert.match(jobEntrypointSource, /function parseAgentSummary/u, "the agent summ
 // --- Agent entrypoint contract ----------------------------------------------
 
 assert.doesNotMatch(entrypointSource, /child_process|spawn\(/u, "the agent is a direct API loop, not a binary supervisor");
-assert.match(entrypointSource, /AGENT_MODEL = "gpt-5\.4-nano"/u);
-assert.match(entrypointSource, /\/chat\/completions`/u, "the agent drives the chat-completions endpoint this key provably serves");
+assert.match(entrypointSource, /AGENT_MODEL = "gpt-5\.3-codex"/u);
+assert.match(entrypointSource, /\/responses`/u, "the agent drives the Responses API per the current platform docs");
+assert.match(entrypointSource, /include: \["reasoning\.encrypted_content"\]/u, "reasoning items are requested and replayed between tool calls per the docs");
 assert.match(entrypointSource, /AbortSignal\.timeout/u, "every model request is bounded");
 assert.match(entrypointSource, /AGENT_WALL_CLOCK_MS = 240_000/u, "the agent wall clock stays at 240s");
 assert.match(entrypointSource, /AGENT_REQUEST_TIMEOUT_MS_OVERRIDE\) \|\| 120_000/u, "a model request that produces nothing for 120s is stalled");
@@ -230,11 +231,11 @@ function startMockModel(responders) {
 }
 
 function functionCall(id, name, args) {
-	return { id, choices: [{ message: { role: "assistant", content: null, tool_calls: [{ id: `call-${id}`, type: "function", function: { name, arguments: JSON.stringify(args) } }] } }] };
+	return { id, output: [{ type: "reasoning", encrypted_content: `enc-${id}` }, { type: "function_call", call_id: `call-${id}`, name, arguments: JSON.stringify(args) }] };
 }
 
 function finalText(id, text) {
-	return { id, choices: [{ message: { role: "assistant", content: text } }] };
+	return { id, output: [{ type: "message", content: [{ type: "output_text", text }] }] };
 }
 
 async function runAgent({ port, checkout, env = {} }) {
@@ -271,11 +272,13 @@ async function runAgent({ port, checkout, env = {} }) {
 		(body) => {
 			assert.equal(body.model, AGENT_DEFAULT_MODEL);
 			assert.equal(body.parallel_tool_calls, false);
+			assert.equal(body.store, false);
+			assert.deepEqual(body.include, ["reasoning.encrypted_content"]);
 			assert.equal(body.tools.length, 3);
-			assert.deepEqual(body.tools.map((tool) => tool.function.name).sort(), ["list_dir", "read_file", "write_file"]);
-			assert.equal(body.messages[0].role, "system");
-			assert.match(body.messages[0].content, /exactly three tools/u);
-			assert.match(body.messages[1].content, /Repository tree/u);
+			assert.ok(body.tools.every((tool) => tool.strict === true), "every tool schema is strict per the docs contract");
+			assert.deepEqual(body.tools.map((tool) => tool.name).sort(), ["list_dir", "read_file", "write_file"]);
+			assert.match(body.instructions, /exactly three tools/u);
+			assert.match(body.input[0].content, /Repository tree/u);
 			return functionCall("resp_1", "list_dir", { path: "." });
 		},
 		() => functionCall("resp_2", "read_file", { path: "notes.txt" }),
@@ -297,7 +300,10 @@ async function runAgent({ port, checkout, env = {} }) {
 	assert.equal(await readFile(join(checkout, "notes.txt"), "utf8"), "hello world\n", "staged writes are applied to the checkout");
 	// The traversal and denied-path attempts surfaced as tool errors to the
 	// model, and the run still terminated cleanly.
-	const toolOutputs = requests.flatMap((body) => (body.messages ?? []).filter((item) => item?.role === "tool").map((item) => item.content));
+	const toolOutputs = requests.flatMap((body) => (body.input ?? []).filter((item) => item?.type === "function_call_output").map((item) => item.output));
+	// Reasoning items must be replayed on later requests, or the model loses
+	// its chain of thought under store:false.
+	assert.ok(requests.some((body) => (body.input ?? []).some((item) => item?.type === "reasoning")), "reasoning items ride the transcript between tool calls");
 	assert.ok(toolOutputs.some((output) => /Error: path escapes the checkout/u.test(output)));
 	assert.ok(toolOutputs.some((output) => /Error: path is not permitted/u.test(output)));
 	assert.doesNotMatch(result.stdout, /hello world/u, "file contents never ride the transcript");

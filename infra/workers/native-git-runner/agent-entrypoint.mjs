@@ -5,7 +5,7 @@ const MODEL = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}$/u;
 const RESPONSE_ID = /^[A-Za-z0-9_-]{1,120}$/u;
 // The one coding model this runner drives through the OpenAI Responses API.
 // Kept in lockstep with AGENT_DEFAULT_MODEL in src/runner-contract.js.
-const AGENT_MODEL = "gpt-5.4-nano";
+const AGENT_MODEL = "gpt-5.3-codex";
 
 // Budgets. The agent wall clock matches the previous runner generation: 240s,
 // inside the job entrypoint's 260s step budget, inside the 300s run deadline.
@@ -119,8 +119,8 @@ async function boundedTree() {
 const TOOL_SCHEMA = [
 	{
 		type: "function",
-		function: {
 		name: "read_file",
+		strict: true,
 		description: "Read a UTF-8 text file inside the repository checkout. Paths are relative to the repository root. Staged writes from earlier write_file calls are visible.",
 		parameters: {
 			type: "object",
@@ -128,12 +128,11 @@ const TOOL_SCHEMA = [
 			required: ["path"],
 			additionalProperties: false,
 		},
-		},
 	},
 	{
 		type: "function",
-		function: {
 		name: "write_file",
+		strict: true,
 		description: "Stage the complete new contents of one file inside the repository checkout, creating it if needed. Supply the entire file, not a diff. Read the current file first unless you are creating it. Staged writes are applied together when you finish.",
 		parameters: {
 			type: "object",
@@ -144,19 +143,17 @@ const TOOL_SCHEMA = [
 			required: ["path", "content"],
 			additionalProperties: false,
 		},
-		},
 	},
 	{
 		type: "function",
-		function: {
 		name: "list_dir",
+		strict: true,
 		description: "List the entries of a directory inside the repository checkout. Use \".\" for the repository root. Directories end with \"/\".",
 		parameters: {
 			type: "object",
 			properties: { path: { type: "string", description: "Repository-relative directory path." } },
 			required: ["path"],
 			additionalProperties: false,
-		},
 		},
 	},
 ];
@@ -202,7 +199,7 @@ async function callModel(body) {
 	try {
 		// Two independent stops: the per-request timeout and the wall clock. A
 		// request can never outlive the run budget.
-		response = await fetch(`${API_BASE}/chat/completions`, {
+		response = await fetch(`${API_BASE}/responses`, {
 			method: "POST",
 			headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
 			body: JSON.stringify(body),
@@ -244,7 +241,6 @@ const system = [
 
 const tree = await boundedTree();
 const transcript = [
-	{ role: "system", content: system },
 	{ role: "user", content: `${request.prompt}\n\nRepository tree (bounded to ${MAX_TREE_ENTRIES} entries, depth ${MAX_TREE_DEPTH}):\n${tree}` },
 ];
 let toolCalls = 0;
@@ -261,47 +257,59 @@ try {
 
 		const result = await callModelWithRetry({
 			model: request.model,
-			messages: transcript,
+			instructions: system,
+			input: transcript,
 			tools: TOOL_SCHEMA,
 			tool_choice: "auto",
 			parallel_tool_calls: false,
+			store: false,
+			// Per the API docs: with store:false, reasoning items ride the
+			// transcript as encrypted content and MUST be replayed between tool
+			// calls, or the model loses its chain of thought.
+			include: ["reasoning.encrypted_content"],
+			reasoning: { effort: "medium" },
+			max_output_tokens: 25_000,
 		});
 
 		if (typeof result?.id === "string" && responseIds.size < 12) responseIds.add(result.id.slice(0, 120));
 		await emit({ type: "model.call.completed", payload: { response_id: typeof result?.id === "string" ? result.id.slice(0, 120) : "unknown" } });
 
-		const message = result?.choices?.[0]?.message;
-		if (!message) throw classified("decode", "agent-model-rejected");
-		// The assistant message goes back verbatim so tool call ids stay paired
-		// with their tool results.
-		transcript.push(message);
-		const calledTools = Array.isArray(message.tool_calls) ? message.tool_calls : [];
+		const output = Array.isArray(result?.output) ? result.output : [];
+		if (!output.length) throw classified("decode", "agent-model-rejected");
+		// Replay every output item verbatim - reasoning items included - so call
+		// ids stay paired with their outputs and the chain of thought survives.
+		for (const item of output) transcript.push(item);
+		const calledTools = output.filter((item) => item?.type === "function_call");
 
 		if (!calledTools.length) {
-			finalSummary = String(message.content ?? "").trim().slice(0, 400);
+			finalSummary = output
+				.filter((item) => item?.type === "message" && Array.isArray(item.content))
+				.flatMap((item) => item.content.filter((part) => part?.type === "output_text").map((part) => String(part.text ?? "")))
+				.join(" ")
+				.trim()
+				.slice(0, 400);
 			finished = true;
 			break;
 		}
 
 		for (const call of calledTools) {
-			const name = call?.function?.name;
 			if (toolCalls >= MAX_TOOL_CALLS) {
-				transcript.push({ role: "tool", tool_call_id: call.id, content: "Error: the tool budget is exhausted. Answer in plain text now." });
+				transcript.push({ type: "function_call_output", call_id: call.call_id, output: "Error: the tool budget is exhausted. Answer in plain text now." });
 				continue;
 			}
 			toolCalls += 1;
-			if (typeof name === "string" && tools.size < 32) tools.add(name);
+			if (typeof call.name === "string" && tools.size < 32) tools.add(call.name);
 			let payload;
 			let ok = true;
 			try {
-				const args = call?.function?.arguments ? JSON.parse(call.function.arguments) : {};
-				payload = await callTool(name, args);
+				const args = call.arguments ? JSON.parse(call.arguments) : {};
+				payload = await callTool(call.name, args);
 			} catch (error) {
 				ok = false;
 				payload = `Error: ${error instanceof Error ? error.message : "tool failed"}`;
 			}
-			await emit({ type: "tool.call", payload: { tool: String(name).slice(0, 80), ok, bytes: payload.length } });
-			transcript.push({ role: "tool", tool_call_id: call.id, content: clip(payload) });
+			await emit({ type: "tool.call", payload: { tool: String(call.name).slice(0, 80), ok, bytes: payload.length } });
+			transcript.push({ type: "function_call_output", call_id: call.call_id, output: clip(payload) });
 		}
 	}
 } catch (error) {
