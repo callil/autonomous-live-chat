@@ -178,6 +178,7 @@ const OPERATOR_TURN_DELIVERY_ATTEMPTS = 3;
 const ACTION_APPLY_LEASE_MS = 60_000;
 const STAGED_ACTION_RECOVERY_MS = 90_000;
 const REJECTED_ACTION_PARK_THRESHOLD = 6;
+const STALLED_IMPLEMENTATION_MS = 20 * 60_000;
 const READY_PHASES = new Set<LedgerPhase>(["submitted", "retryable"]);
 const TERMINAL_PHASES = new Set<LedgerPhase>(["completed", "needs_review", "rejected"]);
 const OPERATOR_ID = "cloudflare-os";
@@ -1128,6 +1129,13 @@ const OPERATOR_STATE_MAX_CHARS = 6_000;
  */
 function operatorWakeState(item: StoredWorkItem | undefined, actions: StoredOperatorAction[]): string {
 	if (!item) return "null";
+	// Surface a stalled implementation run as a fact: the disposable runner
+	// derives its own process identity, so a re-staged implement command with
+	// a fresh runId starts a clean isolated run instead of resuming a corpse.
+	let implementationProblem: string | undefined;
+	if (item.phase === "implementing" && item.activeImplementation && Date.now() - item.activeImplementation.startedAt > STALLED_IMPLEMENTATION_MS) {
+		implementationProblem = "The active implementation run exceeded its execution budget and cannot resume. Stage stageImplementation again with a fresh unique runId to restart the isolated run.";
+	}
 	// Surface a recorded plan the runner would refuse as a fact, so the
 	// bounded model stages a revised plan instead of retrying implement.
 	let planProblem: string | undefined;
@@ -1146,6 +1154,7 @@ function operatorWakeState(item: StoredWorkItem | undefined, actions: StoredOper
 		classification: item.classification,
 		plan: item.plan,
 		...(planProblem ? { planProblem } : {}),
+		...(implementationProblem ? { implementationProblem } : {}),
 		activeImplementation: item.activeImplementation,
 		artifacts: item.artifacts,
 		actions: actions.slice(-OPERATOR_STATE_ACTION_LIMIT).map((action) => ({
