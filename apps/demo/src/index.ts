@@ -176,6 +176,7 @@ const OPERATOR_LEASE_MAX_MS = 15 * 60_000;
 const OPERATOR_TURN_RESPONSE_LEASE_MS = OPERATOR_LEASE_MAX_MS;
 const OPERATOR_TURN_DELIVERY_ATTEMPTS = 3;
 const ACTION_APPLY_LEASE_MS = 60_000;
+const STAGED_ACTION_RECOVERY_MS = 90_000;
 const READY_PHASES = new Set<LedgerPhase>(["submitted", "retryable"]);
 const TERMINAL_PHASES = new Set<LedgerPhase>(["completed", "needs_review", "rejected"]);
 const OPERATOR_ID = "cloudflare-os";
@@ -183,8 +184,8 @@ const OPERATOR_EMAIL = "callil.capuozzo@gmail.com";
 // Cloudflare OS freezes workspace resources and chat capability types. Create
 // one clean permanent operator identity after the exact Gatekeeper schema is
 // live; experimental workspaces are never reused.
-const OPERATOR_GADGET_KEY = "app-harness-operator-v2";
-const OPERATOR_CHAT_KEY = "ledger-operator-v2";
+const OPERATOR_GADGET_KEY = "app-harness-operator-v3";
+const OPERATOR_CHAT_KEY = "ledger-operator-v3";
 const OPERATOR_INSTRUCTION = "Operate APP_HARNESS. State below is the authoritative JSON snapshot of this work item, its lease, artifacts, and staged actions; trust it and act without re-reading. Progress one step only: claim -> classification -> issue -> plan -> implementation -> candidate -> validating -> promotion -> deployed -> completed. Stage exactly one declared write via env.APP_HARNESS with workItemId, expectedVersion = State.version, leaseId = State.leaseId: stageClaim, stageClassification, stageIssue, stagePlan, stageImplementation, stageCandidate, stagePromotion, stageState, stageRelease, stageDefer. When State.leaseId is null, stageClaim first with a fresh unique leaseId string and leaseMs 600000. Observations getWorkItem, listActions, getMainSha, inspectImplementation, getCandidate, observeCandidateValidation, findPromotionRun, inspectPromotionRun exist only for facts State lacks. Use declared argument types only; never invent methods. A rejected action's result.error says why it failed: stage a corrected command instead of repeating it. stageRelease and stageDefer are parking exits: after either, stop. If blocked or unchanged, stop. Reply exactly PROGRESSED, PARKED:<code>, or COMPLETE.";
 const GITHUB_REPOSITORY = "callil/autonomous-live-chat";
 const PRODUCTION_DEPLOYMENT_HOST = "autonomous-live-chat.coda-a.workers.dev";
@@ -828,7 +829,10 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 			for (const item of page.values()) if (!TERMINAL_PHASES.has(item.phase) && item.lease && item.lease.expiresAt > Date.now()) availableAt = availableAt === undefined ? item.lease.expiresAt : Math.min(availableAt, item.lease.expiresAt);
 		}
 		for await (const page of this.storagePages<StoredOperatorAction>(ACTION_PREFIX)) {
-			for (const action of page.values()) if (action.status === "applying" && action.leaseExpiresAt && action.leaseExpiresAt > Date.now()) availableAt = availableAt === undefined ? action.leaseExpiresAt : Math.min(availableAt, action.leaseExpiresAt);
+			for (const action of page.values()) {
+				if (action.status === "applying" && action.leaseExpiresAt && action.leaseExpiresAt > Date.now()) availableAt = availableAt === undefined ? action.leaseExpiresAt : Math.min(availableAt, action.leaseExpiresAt);
+				if (action.status === "staged") availableAt = availableAt === undefined ? action.updatedAt + STAGED_ACTION_RECOVERY_MS : Math.min(availableAt, action.updatedAt + STAGED_ACTION_RECOVERY_MS);
+			}
 		}
 		if (availableAt !== undefined) await this.ctx.storage.setAlarm(Math.max(Date.now() + 25, availableAt));
 	}
@@ -842,6 +846,23 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		}
 		for await (const page of this.storagePages<StoredOperatorAction>(ACTION_PREFIX)) {
 			for (const action of page.values()) {
+				// A staged approval whose execution never arrived (for example after
+				// the capability worker was replaced) would otherwise strand its work
+				// item with no wake. One recovery wake per staging lets the operator
+				// re-stage the same command, which resubmits the approval.
+				if (action.status === "staged" && action.updatedAt + STAGED_ACTION_RECOVERY_MS <= now) {
+					const item = await this.loadWorkItem(action.workItemId);
+					if (item && !TERMINAL_PHASES.has(item.phase)) {
+						await this.ctx.storage.transaction(async (txn) => {
+							const current = await txn.get<StoredOperatorAction>(`${ACTION_PREFIX}${action.id}`);
+							if (!current || current.status !== "staged" || current.updatedAt !== action.updatedAt) return;
+							await txn.put(`${ACTION_PREFIX}${action.id}`, { ...current, updatedAt: Date.now() });
+							await this.putWakeInTransaction(txn, item);
+						});
+						await this.scheduleWakeAlarm();
+					}
+					continue;
+				}
 				if (action.status !== "applying" || !action.leaseExpiresAt || action.leaseExpiresAt > now) continue;
 				const expired = await this.ctx.storage.transaction(async (txn) => {
 					const current = await txn.get<StoredOperatorAction>(`${ACTION_PREFIX}${action.id}`);
