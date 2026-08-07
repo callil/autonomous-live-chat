@@ -820,7 +820,27 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 			}
 		}
 		for await (const page of this.storagePages<StoredWorkItem>(WORK_ITEM_PREFIX)) {
-			for (const item of page.values()) if (!TERMINAL_PHASES.has(item.phase)) this.pokeOperator(item);
+			for (const item of page.values()) {
+				if (TERMINAL_PHASES.has(item.phase)) continue;
+				// Mechanical run-deadline enforcement: a silent run past its
+				// budget is declared dead BY THE LEDGER, not by model judgment.
+				// A platform-killed container reports nothing, and a model told
+				// to wait for the callback would otherwise wait forever.
+				if (item.phase === "implementing" && item.activeImplementation && now - item.activeImplementation.startedAt > STALLED_IMPLEMENTATION_MS) {
+					try {
+						await this.recordExternalState({
+							workItemId: item.id,
+							phase: "retryable",
+							message: "The implementation run went silent past its execution deadline. The ledger cleared it; stage a fresh implementation.",
+							source: "system",
+						});
+					} catch (error) {
+						console.error("Failed to clear a silent implementation run.", { workItemId: item.id, error });
+					}
+					continue;
+				}
+				this.pokeOperator(item);
+			}
 		}
 	}
 
