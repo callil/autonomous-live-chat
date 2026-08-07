@@ -142,7 +142,22 @@ function run(command, args, options = {}) {
 		// Bounded TAILS, not heads: for a chatty child (the agent transcript)
 		// the last lines carry the summary and the failure, so the tail is the
 		// only part worth keeping.
-		child.stdout.on("data", (chunk) => { stdout = `${stdout}${chunk}`.slice(-MAX_TAIL_CHARS); });
+		let lineBuffer = "";
+		child.stdout.on("data", (chunk) => {
+			stdout = `${stdout}${chunk}`.slice(-MAX_TAIL_CHARS);
+			if (!options.onStdoutLine) return;
+			// Live observability: complete lines stream to the caller as they
+			// arrive. Best effort only — a throwing observer must not fail the run.
+			lineBuffer = `${lineBuffer}${chunk}`;
+			let boundary = lineBuffer.indexOf("\n");
+			while (boundary !== -1) {
+				const line = lineBuffer.slice(0, boundary).trim();
+				lineBuffer = lineBuffer.slice(boundary + 1);
+				if (line) { try { options.onStdoutLine(line); } catch { /* observability never breaks the run */ } }
+				boundary = lineBuffer.indexOf("\n");
+			}
+			if (lineBuffer.length > 8_192) lineBuffer = lineBuffer.slice(-8_192);
+		});
 		child.stderr.on("data", (chunk) => { stderr = `${stderr}${chunk}`.slice(-MAX_TAIL_CHARS); });
 		child.stdout.on("error", () => {});
 		child.stderr.on("error", () => {});
@@ -306,6 +321,46 @@ function postHeartbeat(step) {
 	}).catch(() => { /* best effort by design */ });
 }
 
+// Live agent observability: the coding agent's JSONL events stream to the
+// ledger in small bounded batches — every ~5 seconds or 10 events, whichever
+// comes first — over the same callback transport. Non-fatal by design; the
+// ledger keeps a rolling tail under its runnerProgress fact for /status and
+// the operator snapshot.
+const PROGRESS_BATCH_EVENTS = 10;
+const PROGRESS_BATCH_MS = 5_000;
+const PROGRESS_EVENT_MAX_CHARS = 300;
+let progressEvents = [];
+let progressTimer = null;
+
+function flushProgressEvents() {
+	if (progressTimer) { clearTimeout(progressTimer); progressTimer = null; }
+	if (!terminalCallback || progressEvents.length === 0) return;
+	const events = progressEvents;
+	progressEvents = [];
+	fetch(terminalCallback.url, {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({
+			workItemId: terminalCallback.workItemId,
+			runId: terminalCallback.runId,
+			artifact: { progress: true, events },
+		}),
+		signal: AbortSignal.timeout(HEARTBEAT_TIMEOUT_MS),
+	}).catch(() => { /* best effort by design */ });
+}
+
+function queueProgressEvent(line) {
+	if (!terminalCallback) return;
+	progressEvents.push(line.slice(0, PROGRESS_EVENT_MAX_CHARS));
+	if (progressEvents.length >= PROGRESS_BATCH_EVENTS) {
+		flushProgressEvents();
+	} else if (!progressTimer) {
+		// A ref'd 5s timer is harmless: it is cleared on flush, and the agent
+		// child holds the event loop open for far longer anyway.
+		progressTimer = setTimeout(flushProgressEvents, PROGRESS_BATCH_MS);
+	}
+}
+
 async function main() {
 	appendProgress("booted");
 	const request = safeRequest(await readRequest());
@@ -333,7 +388,8 @@ async function main() {
 
 	postHeartbeat("agent-started");
 	const agentInput = JSON.stringify({ prompt: `Implement the linked repository task exactly as requested: ${request.candidate.change.request}`, instructions: request.instructions, cwd: request.checkoutDirectory, model: request.model });
-	const agentExecution = await run("node", ["/opt/app-harness/agent-entrypoint.mjs"], { cwd: request.checkoutDirectory, input: agentInput, timeoutMs: AGENT_TIMEOUT_MS });
+	const agentExecution = await run("node", ["/opt/app-harness/agent-entrypoint.mjs"], { cwd: request.checkoutDirectory, input: agentInput, timeoutMs: AGENT_TIMEOUT_MS, onStdoutLine: queueProgressEvent });
+	flushProgressEvents();
 	agentTranscriptTail = agentExecution.stdout;
 	agentStderrTail = agentExecution.stderr;
 	const agent = parseAgentSummary(agentExecution.stdout);
