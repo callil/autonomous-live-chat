@@ -1,9 +1,6 @@
 import type { LedgerWorkItem } from "./ledger.js";
 
 export type OperatorCommandLike =
-	| { kind: "claim"; leaseId: string }
-	| { kind: "release"; leaseId: string }
-	| { kind: "defer"; leaseId: string; delayMs: number }
 	| { kind: "classify" }
 	| { kind: "create-issue" }
 	| { kind: "plan"; plan: { revision: number } }
@@ -13,5 +10,5 @@ export type OperatorCommandLike =
 	| { kind: "record-state"; phase: string };
 
 export function operatorActionEffectKey(workItemId: string, command: OperatorCommandLike): string;
-export function assertOperatorCommandAllowed(workItem: LedgerWorkItem, command: OperatorCommandLike, now: number): void;
+export function assertOperatorCommandAllowed(workItem: LedgerWorkItem, command: OperatorCommandLike): void;
 export function operatorCommandEffectSatisfied(workItem: LedgerWorkItem, command: OperatorCommandLike): boolean;

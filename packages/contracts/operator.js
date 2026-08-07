@@ -26,24 +26,19 @@ export function operatorActionEffectKey(workItemId, command) {
 	if (command.kind === "record-candidate") return `${workItemId}:candidate:${command.runId}`;
 	if (command.kind === "promote") return `${workItemId}:promotion:${command.dispatchKey}`;
 	if (command.kind === "record-state") return `${workItemId}:state:${command.phase}${artifactsTag(command.artifacts)}`;
-	if (command.kind === "claim") return `${workItemId}:claim:${command.leaseId}`;
-	if (command.kind === "release") return `${workItemId}:release:${command.leaseId}`;
-	return `${workItemId}:defer:${command.leaseId}:${command.delayMs}`;
+	throw new Error("Unknown operator command.");
 }
 
 /**
  * Safety/state invariant, not orchestration: the model still chooses what to
  * do, while the sole ledger refuses an impossible or out-of-order side effect.
+ * These phase guards plus the semantic effect keys above are the correctness
+ * guarantee; the per-item OperatorTurn Durable Object is the concurrency one.
  */
-export function assertOperatorCommandAllowed(workItem, command, now) {
+export function assertOperatorCommandAllowed(workItem, command) {
 	if (TERMINAL.has(workItem.phase)) throw new Error("Terminal work cannot accept another operator action.");
-	if (command.kind === "claim") {
-		if (workItem.lease && workItem.lease.expiresAt > now) throw new Error("This work item already has a live operator lease.");
-		return;
-	}
-	if (command.kind === "release" || command.kind === "defer") return;
 	if (command.kind === "classify") {
-		if (workItem.phase !== "claimed" || workItem.classification !== null) throw new Error("Classification is only the next action for claimed work without a classification.");
+		if (workItem.phase !== "submitted" || workItem.classification !== null) throw new Error("Classification is only the next action for submitted work without a classification.");
 		return;
 	}
 	if (command.kind === "create-issue") {
@@ -71,12 +66,9 @@ export function assertOperatorCommandAllowed(workItem, command, now) {
 	throw new Error("Unknown operator command.");
 }
 
-const PHASE_ORDER = ["submitted", "claimed", "classified", "delegated", "implementing", "candidate", "validating", "promoting", "deployed", "completed"];
+const PHASE_ORDER = ["submitted", "classified", "delegated", "implementing", "candidate", "validating", "promoting", "deployed", "completed"];
 
 export function operatorCommandEffectSatisfied(workItem, command) {
-	if (command.kind === "claim") return workItem.lease?.id === command.leaseId;
-	if (command.kind === "release") return workItem.lease === null;
-	if (command.kind === "defer") return workItem.resumeAt !== null && workItem.resumeAt !== undefined;
 	if (command.kind === "classify") return workItem.classification !== null;
 	if (command.kind === "create-issue") return workItem.artifacts.issue !== undefined;
 	if (command.kind === "plan") return workItem.plan?.revision === command.plan.revision;
