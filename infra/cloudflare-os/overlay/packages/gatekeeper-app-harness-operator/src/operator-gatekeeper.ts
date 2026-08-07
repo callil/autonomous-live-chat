@@ -57,7 +57,7 @@ interface AppHarnessOperator {
 type LedgerWorkItem = { id: string; version: number; phase: string; request: unknown; lease: { operatorId: string; id: string; expiresAt: number } | null; classification: Record<string, unknown> | null; plan: LedgerPlan | null; activeImplementation?: { key: string; runId: string; attempt: number; startedAt: number } | null; artifacts: Record<string, unknown> };
 type LedgerPlan = { revision: number; baseSha: string; stackId: string; generation: number; nodeId: "root"; branch: string; parentBranch: "main"; parentBaseSha: string; pullRequestBase: "main"; issueNumber: number; summary: unknown; ciProfile: "visual" | "content" | "behavior" | "data" | "infrastructure" };
 type StagedOperatorAction = { id: number; workItemId: string; expectedVersion: number; idempotencyKey: string; command: unknown; status: string; executionToken?: string; result?: unknown };
-type StagedActionResult = { actionId: number; workItemId: string; state: "queued" | "already-queued" | "completed" | "rejected" };
+type StagedActionResult = { actionId: number; workItemId: string; state: "queued" | "already-queued" | "completed" | "rejected"; error?: string };
 type Common = { workItemId: string; expectedVersion: number; leaseId: string };
 type ClaimInput = { workItemId: string; expectedVersion: number; leaseId: string; leaseMs: number };
 type ReleaseInput = Common;
@@ -180,7 +180,7 @@ export class AppHarnessOperatorSession extends RpcTarget implements OperatorSess
 	private async stage(workItemId: string, expectedVersion: number, command: OperatorCommand): Promise<StagedActionResult> {
 		const staged = await this.ledger.stageOperatorAction({ workItemId, expectedVersion, command });
 		if (staged.status === "applied" || staged.status === "rejected") {
-			return { actionId: staged.id, workItemId, state: stageState(staged.status) };
+			return this.stagedResult(staged, workItemId);
 		}
 		try {
 			await this.approvals.submitAction(staged.id, {
@@ -189,13 +189,29 @@ export class AppHarnessOperatorSession extends RpcTarget implements OperatorSess
 				implementsRevert: false,
 				actionKind: APPLY_OPERATOR_COMMAND_ACTION,
 				autoApprovable: true,
-				awaitDecision: false,
+				awaitDecision: true,
 			});
 		} catch {
 			await this.rejectStagedAction(staged.id);
 			throw new Error("Cloudflare OS could not submit the durable App Harness command for approval.");
 		}
-		return { actionId: staged.id, workItemId, state: stageState(staged.status) };
+		// Wait briefly for the auto-approved apply so one operator turn can
+		// advance several consecutive steps against real outcomes. The durable
+		// ledger remains the authority; on timeout the caller sees "queued".
+		for (let attempt = 0; attempt < 20; attempt += 1) {
+			const settled = await this.ledger.getOperatorAction({ actionId: staged.id });
+			if (settled && (settled.status === "applied" || settled.status === "rejected")) return this.stagedResult(settled, workItemId);
+			await scheduler.wait(250);
+		}
+		const current = await this.ledger.getOperatorAction({ actionId: staged.id });
+		return this.stagedResult(current ?? staged, workItemId);
+	}
+
+	private stagedResult(action: { id: number; status: "staged" | "applying" | "applied" | "rejected" | "needs_reconciliation"; result?: unknown }, workItemId: string): StagedActionResult {
+		const failure = action.status === "rejected" && action.result && typeof action.result === "object" && typeof (action.result as { error?: unknown }).error === "string"
+			? String((action.result as { error: string }).error).slice(0, 300)
+			: undefined;
+		return { actionId: action.id, workItemId, state: stageState(action.status), ...(failure ? { error: failure } : {}) };
 	}
 
 	[Symbol.dispose](): void { this.approvals[Symbol.dispose]?.(); }
