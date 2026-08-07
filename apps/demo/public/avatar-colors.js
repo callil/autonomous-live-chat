@@ -8,8 +8,13 @@ function avatarColor(name) {
 }
 
 function colorAvatar(avatar) {
-  const name = avatar.closest('.message')?.querySelector('.author')?.textContent;
-  if (name) avatar.style.color = avatarColor(name);
+  const author = avatar.closest('.message')?.querySelector('.author');
+  const name = author?.textContent;
+  if (name) {
+    const color = avatarColor(name);
+    avatar.style.color = color;
+    author.style.color = color;
+  }
 }
 
 function colorAvatars(root) {

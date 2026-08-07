@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { AUTHORING_ENVELOPE_POLICY } from "../../../packages/contracts/index.js";
 
 const html = await readFile(new URL("../public/index.html", import.meta.url), "utf8");
+const avatarColors = await readFile(new URL("../public/avatar-colors.js", import.meta.url), "utf8");
 const entry = await readFile(new URL("../src/entry.ts", import.meta.url), "utf8");
 const worker = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
 const clientScript = html.match(/<script>([\s\S]*?)<\/script>/u)?.[1];
@@ -11,6 +12,7 @@ assert.ok(clientScript, "the browser client script is present");
 assert.doesNotThrow(() => new Function(clientScript), "the browser client script parses");
 assert.match(clientScript, /function renderMessageSnapshot\(messages\) \{ messagesEl\.replaceChildren\(\); rendered\.clear\(\);/u, "a reconnect snapshot replaces retired chat state instead of merging it");
 assert.match(clientScript, /event\.type === 'chat:snapshot'\) \{ renderMessageSnapshot\(event\.messages\)/u, "every authoritative chat snapshot uses replacement semantics");
+assert.match(avatarColors, /const color = avatarColor\(name\);\s+avatar\.style\.color = color;\s+author\.style\.color = color;/u, "each message author uses the same generated color as their avatar");
 
 assert.doesNotMatch(html, /maxlength=/u);
 assert.doesNotMatch(html, /message-count/u);
