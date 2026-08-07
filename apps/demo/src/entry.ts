@@ -50,19 +50,14 @@ const HARNESS_TOOLBAR_SCRIPT = `<script>
   const icons = {
     target: '<svg data-icon-library="lucide" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg>',
     comment: '<svg data-icon-library="lucide" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 15a4 4 0 0 1-4 4H7l-4 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"/><path d="M8 9h8M8 13h5"/></svg>',
-    draw: '<svg data-icon-library="lucide" viewBox="0 0 24 24" aria-hidden="true"><path d="m12 19 7-7 3 3-7 7-4 1 1-4zM18 13l-7-7 3-3 7 7M2 22l5-1-4-4-1 5z"/></svg>',
-    activity: '<svg data-icon-library="lucide" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3v18h18M7 16l4-5 4 3 5-7"/></svg>'
+    draw: '<svg data-icon-library="lucide" viewBox="0 0 24 24" aria-hidden="true"><path d="m12 19 7-7 3 3-7 7-4 1 1-4zM18 13l-7-7 3-3 7 7M2 22l5-1-4-4-1 5z"/></svg>'
   };
   [['#target-mode', 'target'], ['#comment-mode', 'comment'], ['#draw-mode', 'draw']].forEach(([selector, icon]) => {
     const button = document.querySelector(selector);
     const label = button?.querySelector('span')?.textContent || '';
     if (button) button.innerHTML = icons[icon] + '<span>' + label + '</span>';
   });
-  activity.prepend(document.createRange().createContextualFragment(icons.activity));
-  const statusLabel = document.createElement('span');
-  statusLabel.className = 'active-status-label';
-  statusLabel.textContent = 'Active';
-  activity.firstChild.after(statusLabel);
+  activity.replaceChildren(count);
   const pulse = document.createElement('i');
   pulse.className = 'active-status-dot';
   pulse.setAttribute('aria-hidden', 'true');
@@ -83,7 +78,7 @@ const HARNESS_TOOLBAR_SCRIPT = `<script>
       row.dataset.terminal = terminal ? 'true' : 'false';
       if (phase && !terminal) active.push(row);
     });
-    count.textContent = '#' + active.length;
+    count.textContent = String(active.length);
     activity.setAttribute('aria-label', 'Open ' + active.length + ' active issue' + (active.length === 1 ? '' : 's'));
     activity.title = active.length + ' active issue' + (active.length === 1 ? '' : 's');
     pulse.hidden = active.length === 0;
