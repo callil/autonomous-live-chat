@@ -177,7 +177,9 @@ const OPERATOR_EMAIL = "callil.capuozzo@gmail.com";
 // permanent identities move once to a clean workspace owned by the new ambient
 // operator Gatekeeper.
 const OPERATOR_GADGET_KEY = "callil-autonomous-live-chat-v2";
-const OPERATOR_CHAT_KEY = "operator-v2";
+// operator-v2 froze its binding seed before the external-message path began
+// provisioning ambient capabilities. v3 is the permanent post-migration chat.
+const OPERATOR_CHAT_KEY = "operator-v3";
 const GITHUB_REPOSITORY = "callil/autonomous-live-chat";
 const PRODUCTION_DEPLOYMENT_HOST = "autonomous-live-chat.coda-a.workers.dev";
 
