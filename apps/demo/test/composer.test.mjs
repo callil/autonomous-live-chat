@@ -37,7 +37,7 @@ assert.match(worker, /queueOperatorWake/u);
 assert.match(worker, /putWakeInTransaction/u, "state and durable wake outbox are committed together");
 assert.match(worker, /this\.ctx\.restore\(\{ type: "operator-note", workItemId: inFlight\.workItemId, expectedVersion: inFlight\.version, turn: inFlight\.turn \}\)/u, "the OS can durably store and later invoke its response target");
 assert.match(worker, /messageKey: `ledger-event:\$\{inFlight\.id\}:v\$\{inFlight\.version\}:t\$\{inFlight\.turn\}`/u, "each delivered or recovery turn gets an independently idempotent message");
-assert.match(worker, /const OPERATOR_CHAT_KEY = "ledger-operator-v4"/u, "the persistent operator chat is bound to the exact App Harness capability schema");
+assert.match(worker, /const OPERATOR_CHAT_KEY = "ledger-operator-v5"/u, "the persistent operator chat is bound to the exact App Harness capability schema");
 assert.match(worker, /const OPERATOR_INSTRUCTION = "Operate APP_HARNESS\. State below is the authoritative JSON snapshot/u, "the operator wake carries authoritative embedded state");
 assert.match(worker, /Progress steps in order: claim -> classification -> issue -> plan -> implementation -> candidate -> validating -> promotion -> deployed -> completed/iu, "the operator wake begins with the compact legal progression");
 assert.match(worker, /State: \$\{operatorWakeState\(stateItem, stateActions\)\}/u, "every wake embeds the current ledger snapshot so the bounded model need not re-read");
