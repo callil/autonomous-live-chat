@@ -373,9 +373,10 @@ export class GitHubCapability {
 		const query = new URLSearchParams({ event: "pull_request_target", per_page: "100" });
 		const response = await fetch(`https://api.github.com/repos/${this.env.ALLOWED_REPOSITORY}/actions/workflows/os-stack-ci.yml/runs?${query}`, { headers: githubHeaders(await this.installationToken()) });
 		if (!response.ok) throw new Error(`GitHub candidate validation observation failed (${response.status}).`);
-		const body = await response.json() as { workflow_runs?: Array<{ id?: unknown; status?: unknown; conclusion?: unknown; html_url?: unknown; display_title?: unknown; created_at?: unknown; event?: unknown; path?: unknown }> };
-		const expectedTitle = candidateRunName(input.pullRequest, input.headSha);
-		const run = body.workflow_runs?.find((candidate) => candidate.display_title === expectedTitle && candidate.event === "pull_request_target" && typeof candidate.path === "string" && candidate.path.startsWith(".github/workflows/os-stack-ci.yml"));
+		const body = await response.json() as { workflow_runs?: Array<{ id?: unknown; status?: unknown; conclusion?: unknown; html_url?: unknown; head_sha?: unknown; created_at?: unknown; event?: unknown; path?: unknown }> };
+		// Match by the immutable candidate head revision: GitHub does not
+		// reliably render the workflow run-name interpolation into display_title.
+		const run = body.workflow_runs?.find((candidate) => candidate.head_sha === input.headSha && candidate.event === "pull_request_target" && typeof candidate.path === "string" && candidate.path.startsWith(".github/workflows/os-stack-ci.yml"));
 		if (!run) return null;
 		if (!Number.isSafeInteger(run.id) || (run.id as number) < 1 || typeof run.status !== "string" || (run.conclusion !== null && typeof run.conclusion !== "string") || typeof run.html_url !== "string" || typeof run.created_at !== "string") throw new Error("GitHub candidate validation observation returned an invalid response.");
 		return { runId: run.id as number, status: run.status, conclusion: run.conclusion, url: run.html_url, createdAt: run.created_at };
