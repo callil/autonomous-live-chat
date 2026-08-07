@@ -148,7 +148,8 @@ export function recordLedgerClassification(item, { operatorId, leaseId, classifi
 export function recordLedgerPlan(item, { operatorId, leaseId, plan, now }) {
 	const at = timestamp(now, "Plan time");
 	requireLease(item, { operatorId, leaseId }, at);
-	if (item.phase !== "classified") throw new Error("Only classified work can receive a plan.");
+	// A delegated plan may be revised until an inner implementation run exists.
+	if (item.phase !== "classified" && !(item.phase === "delegated" && !item.activeImplementation)) throw new Error("Only classified work can receive a plan.");
 	if (!plan || typeof plan !== "object") throw new Error("Plan is required.");
 	const issue = item.artifacts?.issue;
 	if (!issue || !Number.isSafeInteger(issue.number) || issue.number < 1) throw new Error("A plan requires the existing GitHub issue artifact.");
@@ -169,6 +170,15 @@ export function recordLedgerPlan(item, { operatorId, leaseId, plan, now }) {
 	if (normalized.pullRequestBase !== normalized.parentBranch) throw new Error("The pull request base must be the stack parent branch.");
 	if (normalized.issueNumber !== issue.number) throw new Error("The plan issue must match the durable GitHub issue artifact.");
 	if (normalized.parentBranch !== "main" && normalized.parentBaseSha === null) throw new Error("A dependent stack node requires its parent's immutable head SHA.");
+	if (normalized.nodeId === "root") {
+		if (normalized.parentBranch !== "main") throw new Error("A root stack node's parentBranch must be main.");
+		if (normalized.parentBaseSha === null) throw new Error("A root stack node requires parentBaseSha equal to the plan baseSha.");
+		const canonical = `app-harness-os/${normalized.issueNumber}/g${normalized.generation}`;
+		if (normalized.branch !== canonical) throw new Error(`A one-node stack branch must be exactly ${canonical}.`);
+	} else {
+		throw new Error("Only a one-node root stack plan is currently supported: nodeId must be root.");
+	}
+	if (item.plan && normalized.revision <= item.plan.revision) throw new Error(`A revised plan must use revision ${item.plan.revision + 1} or later.`);
 	return next(item, "delegated", at, {
 		plan: normalized,
 		activeImplementation: null,
