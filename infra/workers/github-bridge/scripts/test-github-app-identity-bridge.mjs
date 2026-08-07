@@ -81,6 +81,8 @@ try {
 	assert.equal((await request("/v1/issues/42/classification", { eventId: "event-2", classification: "triage", modelClassification: { changeType: "arbitrary", scope: "localized", risk: "low", affectedSurface: "ui", reversible: true, executionEligibility: "eligible", ciProfile: "visual" } })).status, 404, "model classification cannot inject arbitrary label values");
 	const closed = await request("/v1/issues/42/close-after-deployment", { eventId: "event-close", body: "Completed and deployed.", deploymentUrl: env.PRODUCTION_ORIGIN });
 	assert.deepEqual(await closed.json(), { issueNumber: 42, state: "closed", deploymentUrl: `${env.PRODUCTION_ORIGIN}/` }, "the GitHub App projects verified completion and closes the issue");
+	const completionPatches = calls.filter((call) => call.url.endsWith("/issues/42") && call.method === "PATCH").slice(-2).map((call) => JSON.parse(call.body));
+	assert.deepEqual(completionPatches, [{ labels: ["human-label", "app-harness", "deployed"] }, { state: "closed" }], "completion converges labels before closing the issue");
 	assert.match(JSON.parse(calls.find((call) => call.url.endsWith("/issues/comments/900") && call.method === "PATCH").body).body, /Verified reachable deployment/u);
 } finally {
 	globalThis.fetch = originalFetch;

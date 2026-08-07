@@ -356,6 +356,8 @@ async function handleIssueBridge(request: Request, env: Env, url: URL): Promise<
 		if (!live.ok) return upstreamFailure("deployment-verification", live);
 		await live.body?.cancel();
 		const token = await installationToken(env);
+		const labels = await reconcileClassification(env, token, issueNumber, "deployed", null);
+		if (!labels.ok) return upstreamFailure("completion-labels", labels);
 		const comment = await withDurableReferenceFallback(eventId, `${body}\n\nVerified reachable deployment: ${deploymentUrl}`, (representation) => upsertStatusComment(env, token, issueNumber, eventId, representation));
 		if (!comment.ok) return upstreamFailure("completion-comment", comment);
 		const close = await fetch(`https://api.github.com/repos/${env.ALLOWED_REPOSITORY}/issues/${issueNumber}`, { method: "PATCH", headers: githubHeaders(token), body: JSON.stringify({ state: "closed" }) });
