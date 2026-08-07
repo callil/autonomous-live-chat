@@ -834,6 +834,10 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 				if (!result.accepted) throw new Error(`Cloudflare OS rejected the durable wake: ${result.message}`);
 			} catch (error) {
 				console.error("Failed to deliver the durable ledger wake to Cloudflare OS.", { workItemId: inFlight.workItemId, version: inFlight.version, turn: inFlight.turn, error });
+				// A delivery failure must be public: silent retries looked exactly
+				// like a healthy idle system for hours.
+				const failedItem = await this.loadWorkItem(inFlight.workItemId);
+				if (failedItem) await this.appendActionEvent(failedItem.id, failedItem.phase, `Cloudflare OS wake delivery failed (turn ${inFlight.turn}): ${String(error instanceof Error ? error.message : error).slice(0, 200)}. Retrying.`).catch(() => undefined);
 				await this.ctx.storage.transaction(async (txn) => {
 					const current = await txn.get<WakeRecord>(key);
 					if (current?.version === inFlight.version && (current.turn ?? 1) === inFlight.turn) await txn.put(key, { ...inFlight, state: "pending", availableAt: now + Math.min(WAKE_RETRY_BASE_MS * 2 ** Math.min(inFlight.attempts, 8), 5 * 60_000) });
