@@ -35,6 +35,8 @@ type TurnState = {
 	issueNumber: number;
 	candidatePr: number;
 	candidateHeadSha: string;
+	/** Snapshot facts, injected into evidence-bearing commands. */
+	snapshotFacts?: Record<string, Record<string, unknown> | undefined>;
 	messages: ModelMessage[];
 	toolCalls: number;
 	tokens: number;
@@ -153,6 +155,7 @@ export class OperatorTurn extends DurableObject<Env> {
 			issueNumber: Number.isSafeInteger(snapshot.artifacts?.issue?.number) ? snapshot.artifacts!.issue!.number! : 0,
 			candidatePr: Number.isSafeInteger((snapshot.artifacts as { candidate?: { pullRequestNumber?: unknown } } | undefined)?.candidate?.pullRequestNumber) ? (snapshot.artifacts as { candidate: { pullRequestNumber: number } }).candidate.pullRequestNumber : 0,
 			candidateHeadSha: typeof (snapshot.artifacts as { candidate?: { headSha?: unknown } } | undefined)?.candidate?.headSha === "string" ? (snapshot.artifacts as { candidate: { headSha: string } }).candidate.headSha : "",
+			snapshotFacts: (snapshot as { facts?: Record<string, Record<string, unknown> | undefined> }).facts ?? undefined,
 			messages: [
 				{ role: "system", content: SYSTEM_PROMPT },
 				{ role: "user", content: `State: ${ledgerSnapshot.state}` },
@@ -258,6 +261,7 @@ export class OperatorTurn extends DurableObject<Env> {
 				issueNumber: turn.issueNumber,
 				candidatePr: turn.candidatePr,
 				candidateHeadSha: turn.candidateHeadSha,
+				facts: turn.snapshotFacts,
 			});
 			return this.stageAndExecute(turn, command);
 		} catch (error) {
