@@ -179,7 +179,8 @@ const ACTION_APPLY_LEASE_MS = 60_000;
 const STAGED_ACTION_RECOVERY_MS = 90_000;
 const REJECTED_ACTION_PARK_THRESHOLD = 6;
 const STALLED_IMPLEMENTATION_MS = 20 * 60_000;
-const UNLEASED_REVIVAL_DELAY_MS = 45_000;
+const UNLEASED_REVIVAL_DELAY_MS = 5_000;
+const LEASED_REVIVAL_DELAY_MS = 8_000;
 const OPERATOR_TURN_HARD_BUDGET = 60;
 const READY_PHASES = new Set<LedgerPhase>(["submitted", "retryable"]);
 const TERMINAL_PHASES = new Set<LedgerPhase>(["completed", "needs_review", "rejected"]);
@@ -863,12 +864,12 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 			for (const wake of page.values()) availableAt = availableAt === undefined ? wake.availableAt : Math.min(availableAt, wake.availableAt);
 		}
 		for await (const page of this.storagePages<StoredWorkItem>(WORK_ITEM_PREFIX)) {
-			// An already-expired lease still needs an immediate alarm, and a live
-			// unleased item needs one too: recovery is what re-queues the wake,
-			// and nothing else re-arms a dormant room.
+			// Every live item needs a future alarm even with no pending wake:
+			// recovery is what re-queues wakes, and nothing else re-arms a
+			// dormant room. Paced revival covers parked turns in both lease states.
 			for (const item of page.values()) {
 				if (TERMINAL_PHASES.has(item.phase)) continue;
-				const at = item.lease ? Math.max(item.lease.expiresAt, Date.now()) : Date.now() + UNLEASED_REVIVAL_DELAY_MS;
+				const at = Date.now() + (item.lease ? LEASED_REVIVAL_DELAY_MS : UNLEASED_REVIVAL_DELAY_MS);
 				availableAt = availableAt === undefined ? at : Math.min(availableAt, at);
 			}
 		}
@@ -887,9 +888,10 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 			for (const item of page.values()) {
 				if (TERMINAL_PHASES.has(item.phase)) continue;
 				if (item.lease && item.lease.expiresAt <= now) { await this.queueOperatorWake(item); continue; }
-				// A live, unleased item whose wake was consumed by a no-progress
-				// turn has no other revival path; pace its re-prompt gently.
-				if (!item.lease && !(await this.ctx.storage.get<WakeRecord>(`${WAKE_PREFIX}${item.id}`))) await this.queueOperatorWake(item, UNLEASED_REVIVAL_DELAY_MS);
+				// A live item whose wake was consumed by a no-progress turn has no
+				// other revival path; pace its re-prompt instead of waiting out the
+				// full lease. The lifetime turn budget keeps this bounded.
+				if (!(await this.ctx.storage.get<WakeRecord>(`${WAKE_PREFIX}${item.id}`))) await this.queueOperatorWake(item, item.lease ? LEASED_REVIVAL_DELAY_MS : UNLEASED_REVIVAL_DELAY_MS);
 			}
 		}
 		for await (const page of this.storagePages<StoredOperatorAction>(ACTION_PREFIX)) {
