@@ -51,9 +51,8 @@ export const TOOLS = [
 	tool("inspectPromotionRun", "Read the status of a GitHub Actions promotion run.", {
 		runId: { type: "integer" },
 	}),
-	tool("inspectImplementation", "Read the current result of the isolated implementation run.", {
+	tool("inspectImplementation", "Read the current result of the isolated implementation run. The run identifier is supplied by the loop.", {
 		generation: { type: "integer" },
-		runId: { type: "string", description: "The process runId from the implementation action receipt, not the ledger run identifier." },
 	}),
 	tool("stageClaim", "Claim this work item. The loop mints the lease; there is nothing to supply.", {}),
 	tool("stageRelease", "Release the work-item lease and end this turn.", {}),

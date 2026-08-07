@@ -34,6 +34,8 @@ type TurnState = {
 	version: number;
 	leaseId: string | null;
 	activeRunId: string;
+	/** The runner's own process identifier, absorbed from the implement receipt. */
+	runnerRunId?: string;
 	planBranch: string;
 	issueNumber: number;
 	messages: ModelMessage[];
@@ -222,7 +224,13 @@ export class OperatorTurn extends DurableObject<Env> {
 					case "observeCandidateValidation": return { validation: await this.env.GITHUB.observeCandidateValidation(args as { pullRequest: number; headSha: string }) };
 					case "findPromotionRun": return { run: await this.env.GITHUB.findPromotionRun({ dispatchKey: String(args.dispatchKey), ...(typeof args.createdAfter === "string" ? { createdAfter: args.createdAfter } : {}) }) };
 					case "inspectPromotionRun": return { ...await this.env.GITHUB.observeWorkflowRun(args as { runId: number }) };
-					case "inspectImplementation": return { run: await this.env.RUNNER.inspectRun({ jobId: turn.workItemId, generation: Number(args.generation), runId: String(args.runId) }) };
+					case "inspectImplementation": {
+						// The process id is a loop-owned fact from the implement receipt,
+						// never a model argument: the ledger and runner identifiers are
+						// distinct and the runner refuses a mismatched inspection.
+						if (!turn.runnerRunId) return { error: "The runner process id is not known in this turn. The completion callback will wake this item; stage a defer if there is nothing else to do." };
+						return { run: await this.env.RUNNER.inspectRun({ jobId: turn.workItemId, generation: Number(args.generation), runId: turn.runnerRunId }) };
+					}
 				}
 			}
 			const command = commandFor(name, args, {
@@ -286,6 +294,8 @@ export class OperatorTurn extends DurableObject<Env> {
 		if (command.kind === "claim" && typeof command.leaseId === "string") turn.leaseId = command.leaseId;
 		if (command.kind === "release" || command.kind === "defer") turn.leaseId = null;
 		if (command.kind === "implement" && typeof command.runId === "string") turn.activeRunId = command.runId;
+		const runner = (result as { runner?: { runId?: unknown } })?.runner;
+		if (runner && typeof runner.runId === "string") turn.runnerRunId = runner.runId;
 	}
 
 	private async finish(turn: TurnState, outcome: string): Promise<void> {
