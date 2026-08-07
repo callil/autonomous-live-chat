@@ -172,4 +172,43 @@ const replanned = recordLedgerPlan(retryable, {
 assert.equal(replanned.phase, "delegated", "a retryable item restacks directly into a new delegated plan");
 assert.equal(replanned.plan.generation, 2);
 
+// ---- multi-node contracts: a dependent node stacks on a pinned sibling ----
+// The one-node-only guard is gone; what replaces it is exact: a sibling
+// canonical parent branch, the parent's immutable head, the pull request
+// based on the parent, and the node's own canonical branch.
+const PARENT_HEAD = "4".repeat(40);
+const siblingPlan = {
+	revision: 1,
+	baseSha: SHA,
+	stackId: "stack-room-epoch",
+	generation: 1,
+	nodeId: "n-work0001",
+	branch: "app-harness-os/1/g1",
+	parentBranch: "app-harness-os/9/g2",
+	parentBaseSha: PARENT_HEAD,
+	pullRequestBase: "app-harness-os/9/g2",
+	issueNumber: 1,
+	summary: "Second node",
+	ciProfile: "content",
+};
+const siblingPlanned = recordLedgerPlan(classifiedWithIssue, { plan: siblingPlan, now: 4 });
+assert.equal(siblingPlanned.phase, "delegated", "a sibling-parent stack node is a legal plan");
+assert.deepEqual(siblingPlanned.plan, siblingPlan, "the dependent node's stack identity persists exactly as staged");
+assert.throws(() => recordLedgerPlan(classifiedWithIssue, {
+	plan: { ...siblingPlan, parentBranch: "feature/x", pullRequestBase: "feature/x" },
+	now: 4,
+}), /sibling app-harness-os stack branch/u, "a dependent node's parent must be a canonical sibling stack branch, never arbitrary");
+assert.throws(() => recordLedgerPlan(classifiedWithIssue, {
+	plan: { ...siblingPlan, parentBaseSha: null },
+	now: 4,
+}), /parent's immutable head SHA/u, "a dependent node without its parent's pinned head is refused");
+assert.throws(() => recordLedgerPlan(classifiedWithIssue, {
+	plan: { ...siblingPlan, pullRequestBase: "main" },
+	now: 4,
+}), /pull request base must be the stack parent branch/u, "a dependent node's pull request targets its parent branch");
+assert.throws(() => recordLedgerPlan(classifiedWithIssue, {
+	plan: { ...siblingPlan, branch: "app-harness-os/1/g9" },
+	now: 4,
+}), /must be exactly app-harness-os\/1\/g1/u, "a dependent node's own branch stays canonical per issue and generation");
+
 console.log("ledger contract: ok");

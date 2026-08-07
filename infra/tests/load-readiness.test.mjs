@@ -103,15 +103,15 @@ assert.equal(clearCreditsExhausted(undefined).changed, false, "clearing a clean 
 // ==== Ledger wiring: admission gate ====
 
 assert.match(demoWorker, /const ADMISSION_STATE_KEY = "ledger-implement-admission"/u, "the admission record is one plain room-storage key");
-assert.match(demoWorker, /if \(input\.command\.kind === "implement"\) \{\n\t\t\t\tconst grant = grantImplementSlot\(await txn\.get\(ADMISSION_STATE_KEY\), current\.id\);/u, "the slot grant is transactional with the staged implement action");
+assert.match(demoWorker, /if \(input\.command\.kind === "implement"\) \{\n\t\t\t\tif \(!stackTipPinned\(normalizeRoomStack\(await txn\.get\(ROOM_STACK_KEY\)\), current\.id\)\) return \{ stackTipUnpinned: true as const \};\n\t\t\t\tconst grant = grantImplementSlot\(await txn\.get\(ADMISSION_STATE_KEY\), current\.id\);/u, "the slot grant is transactional with the staged implement action and carries the room-stack tip-pinned conjunct");
 assert.match(demoWorker, /if \(!grant\.granted\) return \{ implementQueuedAhead: grant\.ahead \};/u, "a refused grant commits the queue registration before the stage is refused");
 assert.match(demoWorker, /All \$\{IMPLEMENT_SLOTS\} implementation slots are busy: \$\{action\.implementQueuedAhead\} item\(s\) are queued ahead/u, "the refusal is a teaching error that names the queue");
 assert.match(demoWorker, /Reply WAITING; the ledger re-pokes this item when a slot frees\./u, "the teaching error tells the model the honest next step");
-assert.match(demoWorker, /operatorSnapshot\(item, actions, facts, implementQueuePosition\(admission, item\.id\)\)/u, "the turn snapshot carries the item's queue position");
+assert.match(demoWorker, /operatorSnapshot\(item, actions, facts, implementQueuePosition\(admission, item\.id\), isStaleStackNode\(roomStack, item\.id\)\)/u, "the turn snapshot carries the item's queue position and its room-stack staleness");
 assert.match(demoWorker, /implementQueue: \{ position: queuePosition/u, "a queued snapshot names position and the WAITING instruction");
-assert.match(demoWorker, /if \(persisted\.phase === "retryable" \|\| TERMINAL_PHASES\.has\(persisted\.phase\)\) await this\.releaseImplementSlotFor\(persisted\.id\);/u, "retryable and terminal transitions release the slot");
+assert.match(demoWorker, /if \(persisted\.phase === "retryable" \|\| TERMINAL_PHASES\.has\(persisted\.phase\)\) \{\n\t\t\tawait this\.releaseImplementSlotFor\(persisted\.id\);\n\t\t\tawait this\.truncateRoomStackFor\(persisted\.id\);\n\t\t\}/u, "retryable and terminal transitions release the slot and truncate the room stack together");
 assert.match(demoWorker, /parsed\.fact\.kind === "merged" \|\| \(parsed\.fact\.kind === "promotion" && parsed\.fact\.conclusion === "success"\)/u, "a merged fact or a successful promotion run releases the slot");
-assert.match(demoWorker, /await this\.releaseImplementSlotFor\(item\.id\);\n\t\t\t\tpurged \+= 1;/u, "a purged item cannot keep holding a slot or queue place");
+assert.match(demoWorker, /await this\.releaseImplementSlotFor\(item\.id\);\n\t\t\t\tawait this\.truncateRoomStackFor\(item\.id\);\n\t\t\t\tpurged \+= 1;/u, "a purged item cannot keep holding a slot, a queue place, or a room-stack node");
 assert.match(demoWorker, /private async releaseImplementSlotFor\(workItemId: string\)/u);
 assert.match(demoWorker, /releaseImplementSlot\(await txn\.get\(ADMISSION_STATE_KEY\), workItemId\)/u, "release is transactional too");
 assert.match(demoWorker, /private async announceImplementQueue\(\)/u, "queue positions are published to the public feed");
