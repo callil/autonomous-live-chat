@@ -4,6 +4,16 @@ on:
   pull_request:
   push:
     branches: [main]
+    # CI diet: a push to main is a squash merge of a PR whose verify run (or
+    # the candidate validator, for agent candidates) already passed on the same
+    # tree. Only platform-surface changes re-run the heavy suite here; pure
+    # apps/demo and docs pushes skip it — the deploy workflow still deploys.
+    paths:
+      - "packages/**"
+      - "infra/**"
+      - ".github/**"
+      - "package.json"
+      - "package-lock.json"
   workflow_dispatch:
 
 permissions:

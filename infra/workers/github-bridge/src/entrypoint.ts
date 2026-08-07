@@ -1,5 +1,5 @@
 import { WorkerEntrypoint } from "cloudflare:workers";
-import { GitHubCapability, type CandidateObservationInput, type CandidateValidationObservationInput, type CloseAfterDeploymentInput, type CreateIssueInput, type DispatchPromotionInput, type GitHubBridgeEnv, type PostStatusInput, type PromotionRunObservationInput, type UpdateClassificationInput } from "./index";
+import { GitHubCapability, type CandidateObservationInput, type CandidatePullRequestObservationInput, type CandidateValidationObservationInput, type CloseAfterDeploymentInput, type CreateIssueInput, type DispatchPromotionInput, type GitHubBridgeEnv, type PostStatusInput, type PromotionRunObservationInput, type UpdateClassificationInput } from "./index";
 import { handleGithubWebhook } from "./webhook";
 
 /**
@@ -19,6 +19,7 @@ export class GitHubAppCapability extends WorkerEntrypoint<GitHubBridgeEnv> {
 	closeAfterDeployment(input: CloseAfterDeploymentInput) { return this.capability().closeAfterDeployment(input); }
 	getMainSha() { return this.capability().getMainSha(); }
 	getCandidate(input: CandidateObservationInput) { return this.capability().getCandidate(input); }
+	observeCandidatePullRequest(input: CandidatePullRequestObservationInput) { return this.capability().observeCandidatePullRequest(input); }
 	observeCandidateValidation(input: CandidateValidationObservationInput) { return this.capability().observeCandidateValidation(input); }
 	dispatchPromotion(input: DispatchPromotionInput) { return this.capability().dispatchPromotion(input); }
 	observeWorkflowRun(input: { runId: number }) { return this.capability().observeWorkflowRun(input); }

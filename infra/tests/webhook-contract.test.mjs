@@ -57,6 +57,17 @@ assert.deepEqual(candidate, { kind: "candidate", number: 55, url: "https://githu
 assert.equal(extractGithubWebhookFact({ event: "pull_request", payload: { action: "closed", pull_request: { number: 55, html_url: "https://github.com/x/y/pull/55", head: { ref: "app-harness-os/42/g1", sha: SHA_A } } } }), null, "a closed-unmerged candidate carries no fact");
 assert.equal(extractGithubWebhookFact({ event: "pull_request", payload: { action: "opened", pull_request: { number: 55, html_url: "https://github.com/x/y/pull/55", head: { ref: "feature/other", sha: SHA_A } } } }), null);
 assert.equal(extractGithubWebhookFact({ event: "check_suite", payload: { action: "completed" } }), null, "unsubscribed events never produce facts");
+// GitHub sends no delivery when a PR becomes conflicted, and synchronize/edited
+// actions carry no merge evidence either: post-submission conflict recovery is
+// the ledger's merge watch (merge-timeout problem fact plus the operator's
+// observeCandidatePullRequest observation), never a webhook fact.
+for (const action of ["synchronize", "edited"]) {
+	assert.equal(
+		extractGithubWebhookFact({ event: "pull_request", payload: { action, pull_request: { number: 55, html_url: "https://github.com/callil/autonomous-live-chat/pull/55", head: { ref: "app-harness-os/42/g1", sha: SHA_A } } } }),
+		null,
+		`a ${action} pull_request delivery is not a conflict signal and produces no fact`,
+	);
+}
 
 // ---- auto-merge fast lane: merged and main-deploy facts ----
 const MERGE_SHA = "c".repeat(40);

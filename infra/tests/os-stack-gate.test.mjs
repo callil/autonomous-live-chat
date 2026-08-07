@@ -27,6 +27,7 @@ const pullRequest = {
 		"- Node: `root`",
 		"- Parent base: `main`",
 		`- Candidate head: \`${headSha}\``,
+		"- CI profile: `content`",
 	].join("\n"),
 };
 const commit = { sha: headSha, parents: [{ sha: "6".repeat(40) }] };
@@ -46,6 +47,23 @@ assert.equal(valid.headSha, headSha);
 assert.equal(valid.issue, 19);
 assert.equal(valid.generation, 1);
 assert.equal(valid.alreadyMerged, false);
+assert.equal(valid.ciProfile, "content", "the ledger-declared CI profile rides the provenance markers into the gate outputs");
+
+// The CI profile marker is optional (older candidates), but never guessable:
+// absent means the full baseline, and an out-of-vocabulary profile fails closed.
+const withoutProfile = validatePullRequest(
+	{ ...pullRequest, body: pullRequest.body.split("\n").filter((line) => !line.startsWith("- CI profile:")).join("\n") },
+	commit,
+	files,
+	options,
+	comparison,
+);
+assert.equal(withoutProfile.ciProfile, "", "an absent CI profile marker yields the empty profile: the workflow runs the full mandatory baseline");
+assert.throws(
+	() => validatePullRequest({ ...pullRequest, body: pullRequest.body.replace("- CI profile: `content`", "- CI profile: `fastpath`") }, commit, files, options, comparison),
+	/CI profile provenance is invalid/u,
+	"an invented CI profile cannot buy the scoped fast path",
+);
 
 const merged = validatePullRequest(
 	{ ...pullRequest, state: "closed", merged_at: "2026-08-06T15:00:00Z", merge_commit_sha: mergeSha },

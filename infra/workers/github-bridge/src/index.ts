@@ -76,6 +76,11 @@ export type CandidateValidationObservationInput = {
 	headSha: string;
 };
 
+/** Merge-watch recovery: read a candidate PR's live merge state by number. */
+export type CandidatePullRequestObservationInput = {
+	number: number;
+};
+
 export type PromotionRunObservationInput = {
 	/** Durable idempotency key used for exactly one workflow dispatch and observation. */
 	dispatchKey: string;
@@ -370,6 +375,18 @@ export class GitHubCapability {
 		});
 		if (!response.ok) throw new Error(`GitHub promotion dispatch failed (${response.status}).`);
 		return { dispatchKey: input.dispatchKey, dispatched: true };
+	}
+
+	async observeCandidatePullRequest(input: CandidatePullRequestObservationInput): Promise<{ number: number; state: string; merged: boolean; mergeableState: string }> {
+		if (!validIssueNumber(input.number)) throw new Error("Invalid candidate pull request observation input.");
+		const response = await fetch(`https://api.github.com/repos/${this.env.ALLOWED_REPOSITORY}/pulls/${input.number}`, { headers: githubHeaders(await this.installationToken()) });
+		if (!response.ok) throw new Error(`GitHub candidate pull request observation failed (${response.status}).`);
+		const body = await response.json() as { state?: unknown; merged?: unknown; mergeable_state?: unknown };
+		if (typeof body.state !== "string" || typeof body.merged !== "boolean") throw new Error("GitHub candidate pull request observation returned an invalid response.");
+		// GitHub computes mergeability lazily; while the background job runs the
+		// field is null. "unknown" is the honest projection: the operator keeps
+		// waiting and re-observes rather than treating it as evidence.
+		return { number: input.number, state: body.state, merged: body.merged, mergeableState: typeof body.mergeable_state === "string" ? body.mergeable_state : "unknown" };
 	}
 
 	async observeCandidateValidation(input: CandidateValidationObservationInput): Promise<{ runId: number; status: string; conclusion: string | null; url: string; createdAt: string } | null> {
