@@ -85,6 +85,11 @@ assert.equal(competing.disposition, "busy");
 
 const deferred = deferLedgerWorkItem(planned, { operatorId: "cloudflare-os", leaseId: "lease-1", now: 5, delayMs: 100 });
 assert.equal(claimLedgerWorkItem(deferred, { operatorId: "cloudflare-os", leaseId: "lease-2", now: 50, leaseMs: 1_000 }).disposition, "deferred");
-assert.equal(claimLedgerWorkItem(deferred, { operatorId: "cloudflare-os", leaseId: "lease-2", now: 105, leaseMs: 1_000 }).disposition, "claimed");
+// Defer keeps the lease: a competing claim after the backoff is still busy
+// until the original lease itself expires, and the surviving lease means the
+// resumed turn acts immediately instead of re-claiming first.
+assert.equal(deferred.lease?.id, "lease-1", "the deferring operator keeps ownership through the backoff");
+assert.equal(claimLedgerWorkItem(deferred, { operatorId: "cloudflare-os", leaseId: "lease-2", now: 105, leaseMs: 1_000 }).disposition, "busy");
+assert.equal(claimLedgerWorkItem(deferred, { operatorId: "cloudflare-os", leaseId: "lease-2", now: 5 + 1_001, leaseMs: 1_000 }).disposition, "claimed");
 
 console.log("ledger contract: ok");

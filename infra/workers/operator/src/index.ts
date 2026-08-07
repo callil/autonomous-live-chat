@@ -60,7 +60,10 @@ type Snapshot = {
 	artifacts?: { issue?: { number?: number } };
 };
 
-const TURN_WALL_CLOCK_MS = 60_000;
+// Wide enough for a slow model round plus real actions in one turn; the
+// demo's 180s wake response lease must always exceed this plus one bounded
+// (45s) model call still in flight.
+const TURN_WALL_CLOCK_MS = 120_000;
 const TURN_ALARM_BACKSTOP_MS = TURN_WALL_CLOCK_MS + 10_000;
 const NOTE_RETRY_MS = 5_000;
 const NOTE_ATTEMPT_BUDGET = 3;
