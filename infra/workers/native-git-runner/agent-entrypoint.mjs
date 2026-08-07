@@ -1,157 +1,336 @@
-import { spawn } from "node:child_process";
+import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
+import { dirname, join, relative, resolve, sep } from "node:path";
 
-const RESPONSE_ID = /^[A-Za-z0-9_-]{1,120}$/u;
-const TOOL_NAME = /^[A-Za-z0-9_.:-]{1,80}$/u;
 const MODEL = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}$/u;
-// NanoCodex v0.3.0 is compiled against this one Responses model.
-const NANOCODEX_MODEL = "gpt-5.6-sol";
-const MAX_LINE_BYTES = 1_048_576;
-// Overall budget for the NanoCodex process, kept below the job entrypoint's
-// own agent budget so this process reports its own failure rather than being
-// killed from outside.
-const NANOCODEX_TIMEOUT_MS = 240_000;
-// A run that emits no JSONL line for this long is stalled, not slow. The
-// override exists so the contract test can exercise the real kill path in
-// milliseconds instead of only grepping for it.
-const NANOCODEX_INACTIVITY_MS = Number(process.env.NANOCODEX_INACTIVITY_MS_OVERRIDE) || 120_000;
-const WATCHDOG_INTERVAL_MS = Number(process.env.NANOCODEX_WATCHDOG_INTERVAL_MS_OVERRIDE) || 5_000;
-const KILL_GRACE_MS = 2_000;
-// Bounded stderr tail. stderr was previously discarded outright, which threw
-// away the primary diagnostic whenever a run failed.
-const MAX_STDERR_BYTES = 8_192;
+const RESPONSE_ID = /^[A-Za-z0-9_-]{1,120}$/u;
+// The one coding model this runner drives through the OpenAI Responses API.
+// Kept in lockstep with AGENT_DEFAULT_MODEL in src/runner-contract.js.
+const AGENT_MODEL = "gpt-5.2-codex";
 
+// Budgets. The agent wall clock matches the previous runner generation: 240s,
+// inside the job entrypoint's 260s step budget, inside the 300s run deadline.
+// A single model request that produces nothing for 120s is stalled, not slow —
+// the direct-API analogue of the old JSONL inactivity watchdog.
+const AGENT_WALL_CLOCK_MS = 240_000;
+const MODEL_REQUEST_TIMEOUT_MS = Number(process.env.AGENT_REQUEST_TIMEOUT_MS_OVERRIDE) || 120_000;
+// The bounded loop: at most 12 tool executions, and a few extra model turns so
+// the final no-tool answer after the twelfth call is still reachable.
+const MAX_TOOL_CALLS = Number(process.env.AGENT_MAX_TOOL_CALLS_OVERRIDE) || 12;
+const MAX_MODEL_CALLS = MAX_TOOL_CALLS + 4;
+const MODEL_RETRY_BACKOFF_MS = Number(process.env.AGENT_RETRY_BACKOFF_MS_OVERRIDE) || 4_000;
+const MAX_FILE_BYTES = 256_000;
+const MAX_TOOL_RESULT_BYTES = 24_000;
+const MAX_DIR_ENTRIES = 400;
+const MAX_TREE_ENTRIES = 500;
+const MAX_TREE_DEPTH = 4;
+const API_BASE = process.env.OPENAI_BASE_URL || "https://api.openai.com/v1";
+const ROOT_PREFIX = process.env.AGENT_ROOT_PREFIX_OVERRIDE || "/workspace/";
+
+// Paths that are never listed, read, or written. The security rule is enforced
+// in code here, not merely stated in the prompt.
+const DENIED_PATHS = [
+	/(^|\/)\.git(\/|$)/u,
+	/(^|\/)node_modules(\/|$)/u,
+	/(^|\/)\.env(\.|$|\/)/u,
+	/(^|\/)\.(npmrc|netrc|ssh|aws|gnupg|wrangler)(\/|$)/u,
+	/(^|\/)[^/]*(secret|credential|token)[^/]*$/iu,
+	/\.(pem|key|p12|pfx|keystore)$/iu,
+];
+
+// Writes to a pipe are asynchronous: resolving on the write callback is what
+// makes each transcript line real before any exit.
 function emit(value) {
 	return new Promise((resolve) => process.stdout.write(`${JSON.stringify(value)}\n`, resolve));
+}
+
+async function fail(classification) {
+	await emit({ ok: false, model: AGENT_MODEL, responseIds: [], tools: [], toolCalls: 0, writes: [], classification });
+	process.exit(1);
 }
 
 let input = "";
 for await (const chunk of process.stdin) {
 	input += chunk;
-	if (input.length > 24_000) {
-		await emit({ ok: false, classification: "nanocodex-input-too-large" });
-		process.exit(2);
-	}
+	if (input.length > 24_000) await fail("agent-input-too-large");
 }
 
 let request;
 try { request = JSON.parse(input); } catch { request = null; }
-if (!request || typeof request.prompt !== "string" || !request.prompt.trim() || typeof request.instructions !== "string" || !request.instructions.trim() || typeof request.cwd !== "string" || !request.cwd.startsWith("/workspace/") || typeof request.model !== "string" || !MODEL.test(request.model) || request.model !== NANOCODEX_MODEL) {
-	await emit({ ok: false, classification: "nanocodex-input-invalid" });
-	process.exit(2);
-}
+if (
+	!request
+	|| typeof request.prompt !== "string" || !request.prompt.trim()
+	|| typeof request.instructions !== "string" || !request.instructions.trim()
+	|| typeof request.cwd !== "string" || !request.cwd.startsWith(ROOT_PREFIX)
+	|| typeof request.model !== "string" || !MODEL.test(request.model) || request.model !== AGENT_MODEL
+) await fail("agent-input-invalid");
 
-const binary = process.env.NANOCODEX_BINARY || "/usr/local/bin/nanocodex";
-const child = spawn(binary, [
-	"run",
-	"--cwd", request.cwd,
-	"--thinking", "low",
-	"--instructions", request.instructions,
-	"--rollouts", "false",
-	"--store-responses", "false",
-	"--web-search", "false",
-	"--image-generation", "false",
-	"--subagents", "true",
-	"--",
-	request.prompt,
-], {
-	env: process.env,
-	// stderr is piped, not discarded: it is the primary diagnostic when a run
-	// fails. Node's own timeout/killSignal is the innermost backstop, so the
-	// child dies even if this process's own loops are wedged.
-	stdio: ["ignore", "pipe", "pipe"],
-	timeout: NANOCODEX_TIMEOUT_MS,
-	killSignal: "SIGKILL",
-});
+const apiKey = process.env.OPENAI_API_KEY;
+if (typeof apiKey !== "string" || !apiKey) await fail("agent-credential-missing");
 
+const root = resolve(request.cwd);
+const startedAt = Date.now();
+const deadline = startedAt + AGENT_WALL_CLOCK_MS;
 const responseIds = new Set();
 const tools = new Set();
-let terminal = null;
-let pending = Buffer.alloc(0);
-let stderrTail = "";
-let lastLineAt = Date.now();
-let killClassification = null;
-let killTimer;
+// Writes accumulate here and are applied to the checkout only after the loop
+// ends, so a half-finished exploration never dirties the working tree.
+const stagedWrites = new Map();
 
-function killChild(classification) {
-	if (killClassification) return;
-	killClassification = classification;
-	child.kill("SIGTERM");
-	killTimer = setTimeout(() => child.kill("SIGKILL"), KILL_GRACE_MS);
+// --- Path safety -----------------------------------------------------------
+
+/** Resolve a model-supplied path strictly inside the checkout, or throw. */
+function safePath(value) {
+	if (typeof value !== "string" || !value.trim() || value.includes("\0")) throw new Error("path is invalid");
+	const absolute = resolve(root, value);
+	const rel = relative(root, absolute);
+	if (rel.startsWith("..") || (rel !== "" && resolve(root, rel) !== absolute)) throw new Error("path escapes the checkout");
+	const probe = rel.split(sep).join("/");
+	for (const pattern of DENIED_PATHS) if (pattern.test(probe)) throw new Error("path is not permitted");
+	return { absolute, relative: probe };
 }
 
-const startedAt = Date.now();
-// A ref'd interval, not an unref'd timer: it must keep the event loop alive and
-// re-check wall-clock time so neither budget can be silently skipped.
-const watchdog = setInterval(() => {
-	if (Date.now() - startedAt >= NANOCODEX_TIMEOUT_MS) killChild("nanocodex-timeout");
-	else if (Date.now() - lastLineAt >= NANOCODEX_INACTIVITY_MS) killChild("nanocodex-stalled");
-}, WATCHDOG_INTERVAL_MS);
-
-// Never let a failed write to a closed stdout throw and abort the run.
-process.stdout.on("error", () => {});
-child.stdin?.on("error", () => {});
-child.stderr.on("error", () => {});
-// stderr is drained continuously so it can never fill its pipe, but only a
-// bounded tail is retained for the failure artifact.
-child.stderr.on("data", (chunk) => {
-	stderrTail = `${stderrTail}${chunk}`.slice(-MAX_STDERR_BYTES);
-});
-
-// Nothing below is awaited without a deadline: neither the stdout iterator nor
-// the close event is trusted to settle on its own.
-function withDeadline(promise, ms, fallback) {
-	return new Promise((resolve) => {
-		const timer = setTimeout(() => resolve(fallback), ms);
-		promise.then(
-			(value) => { clearTimeout(timer); resolve(value); },
-			() => { clearTimeout(timer); resolve(fallback); },
-		);
-	});
+function clip(text) {
+	const value = String(text);
+	return value.length > MAX_TOOL_RESULT_BYTES ? `${value.slice(0, MAX_TOOL_RESULT_BYTES)}\n[truncated]` : value;
 }
 
-function acceptLine(bytes) {
-	if (bytes.length > MAX_LINE_BYTES) return;
-	let event;
-	try { event = JSON.parse(bytes.toString("utf8")); } catch { return; }
-	if (event?.type === "model.call.completed" && typeof event.payload?.response_id === "string" && RESPONSE_ID.test(event.payload.response_id) && responseIds.size < 12) responseIds.add(event.payload.response_id);
-	if (event?.type === "tool.call" && typeof event.payload?.tool === "string" && TOOL_NAME.test(event.payload.tool) && tools.size < 32) tools.add(event.payload.tool);
-	if (event?.type === "run.completed") terminal = "completed";
-	if (event?.type === "run.failed") terminal = "failed";
-}
+// --- Bounded repository tree ----------------------------------------------
 
-async function consumeStdout() {
-	for await (const chunk of child.stdout) {
-		pending = Buffer.concat([pending, chunk]);
-		let newline;
-		while ((newline = pending.indexOf(10)) >= 0) {
-			acceptLine(pending.subarray(0, newline));
-			lastLineAt = Date.now();
-			pending = pending.subarray(newline + 1);
+async function boundedTree() {
+	const lines = [];
+	async function walk(rel, depth) {
+		if (lines.length >= MAX_TREE_ENTRIES || depth > MAX_TREE_DEPTH) return;
+		let entries;
+		try { entries = await readdir(rel === "" ? root : join(root, rel), { withFileTypes: true }); } catch { return; }
+		for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
+			if (lines.length >= MAX_TREE_ENTRIES) return;
+			const childRel = rel === "" ? entry.name : `${rel}/${entry.name}`;
+			try { safePath(childRel); } catch { continue; }
+			lines.push(entry.isDirectory() ? `${childRel}/` : childRel);
+			if (entry.isDirectory()) await walk(childRel, depth + 1);
 		}
-		if (pending.length > MAX_LINE_BYTES) pending = Buffer.alloc(0);
 	}
-	if (pending.length) acceptLine(pending);
+	await walk("", 1);
+	return lines.join("\n");
 }
 
-// The iterator is bounded: if it never ends, the run still reports rather than
-// hanging here forever.
-await withDeadline(consumeStdout(), NANOCODEX_TIMEOUT_MS + KILL_GRACE_MS, null);
-const code = await withDeadline(
-	new Promise((resolve) => child.once("close", resolve)),
-	KILL_GRACE_MS * 2,
-	null,
-);
-clearInterval(watchdog);
-if (killTimer) clearTimeout(killTimer);
-if (code === null && !killClassification) killClassification = "nanocodex-process-unterminated";
-try { child.kill("SIGKILL"); } catch { /* already gone */ }
-const ok = code === 0 && terminal === "completed" && !killClassification;
+// --- Tools -----------------------------------------------------------------
+
+const TOOL_SCHEMA = [
+	{
+		type: "function",
+		name: "read_file",
+		description: "Read a UTF-8 text file inside the repository checkout. Paths are relative to the repository root. Staged writes from earlier write_file calls are visible.",
+		parameters: {
+			type: "object",
+			properties: { path: { type: "string", description: "Repository-relative file path." } },
+			required: ["path"],
+			additionalProperties: false,
+		},
+	},
+	{
+		type: "function",
+		name: "write_file",
+		description: "Stage the complete new contents of one file inside the repository checkout, creating it if needed. Supply the entire file, not a diff. Read the current file first unless you are creating it. Staged writes are applied together when you finish.",
+		parameters: {
+			type: "object",
+			properties: {
+				path: { type: "string", description: "Repository-relative file path." },
+				content: { type: "string", description: "The complete new file contents." },
+			},
+			required: ["path", "content"],
+			additionalProperties: false,
+		},
+	},
+	{
+		type: "function",
+		name: "list_dir",
+		description: "List the entries of a directory inside the repository checkout. Use \".\" for the repository root. Directories end with \"/\".",
+		parameters: {
+			type: "object",
+			properties: { path: { type: "string", description: "Repository-relative directory path." } },
+			required: ["path"],
+			additionalProperties: false,
+		},
+	},
+];
+
+async function callTool(name, args) {
+	if (name === "read_file") {
+		const { absolute, relative: rel } = safePath(args?.path);
+		if (stagedWrites.has(rel)) return clip(stagedWrites.get(rel));
+		const info = await stat(absolute);
+		if (!info.isFile()) throw new Error("path is not a file");
+		if (info.size > MAX_FILE_BYTES) throw new Error(`file is too large (${info.size} bytes)`);
+		return clip(await readFile(absolute, "utf8"));
+	}
+	if (name === "write_file") {
+		const { relative: rel } = safePath(args?.path);
+		if (typeof args?.content !== "string") throw new Error("content must be a string");
+		if (args.content.length > MAX_FILE_BYTES) throw new Error("content is too large");
+		stagedWrites.set(rel, args.content);
+		return `Staged ${rel} (${args.content.length} bytes).`;
+	}
+	if (name === "list_dir") {
+		const { absolute, relative: rel } = safePath(args?.path ?? ".");
+		const entries = await readdir(absolute, { withFileTypes: true });
+		const visible = entries
+			.filter((entry) => { try { safePath(rel === "" ? entry.name : `${rel}/${entry.name}`); return true; } catch { return false; } })
+			.slice(0, MAX_DIR_ENTRIES)
+			.map((entry) => (entry.isDirectory() ? `${entry.name}/` : entry.name));
+		return visible.length ? visible.join("\n") : "(empty)";
+	}
+	throw new Error("unknown tool");
+}
+
+// --- Model transport -------------------------------------------------------
+
+function classified(message, classification, retryable = false) {
+	return Object.assign(new Error(message), { classification, retryable });
+}
+
+async function callModel(body) {
+	const remaining = deadline - Date.now();
+	if (remaining <= 5_000) throw classified("budget", "agent-budget-exhausted");
+	let response;
+	try {
+		// Two independent stops: the per-request timeout and the wall clock. A
+		// request can never outlive the run budget.
+		response = await fetch(`${API_BASE}/responses`, {
+			method: "POST",
+			headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+			body: JSON.stringify(body),
+			signal: AbortSignal.timeout(Math.min(MODEL_REQUEST_TIMEOUT_MS, remaining - 1_000)),
+		});
+	} catch {
+		throw classified("transport", "agent-model-unreachable", true);
+	}
+	if (response.status === 429 || response.status >= 500) throw classified("upstream", "agent-model-unavailable", true);
+	if (!response.ok) throw classified("rejected", "agent-model-rejected");
+	try { return await response.json(); } catch { throw classified("decode", "agent-model-rejected"); }
+}
+
+async function callModelWithRetry(body) {
+	let lastError;
+	for (let attempt = 0; attempt < 3; attempt += 1) {
+		try { return await callModel(body); } catch (error) {
+			lastError = error;
+			if (!error.retryable || attempt === 2) throw error;
+			const backoff = Math.min(MODEL_RETRY_BACKOFF_MS * 2 ** attempt, Math.max(0, deadline - Date.now() - 5_000));
+			if (backoff <= 0) throw error;
+			await new Promise((resolve) => setTimeout(resolve, backoff));
+		}
+	}
+	throw lastError;
+}
+
+// --- Loop ------------------------------------------------------------------
+
+const system = [
+	request.instructions,
+	"",
+	"You operate through exactly three tools: read_file, write_file, and list_dir.",
+	"You have no shell, no network, no package manager, and no Git. Do not claim to have run tests, builds, or commands; the execution harness commits your staged writes and CI validates them.",
+	"Explore with list_dir and read_file before editing. write_file stages a whole replacement file, so read a file before rewriting it.",
+	"Never read, print, copy, or reproduce credentials, tokens, or private keys. Paths containing them are blocked and you must not attempt to reach them.",
+	`You have a hard budget of ${MAX_TOOL_CALLS} tool calls. Make the smallest coherent change that satisfies the request, then answer in plain text (no tool call) with one or two sentences describing what changed.`,
+].join("\n");
+
+const tree = await boundedTree();
+const transcript = [{ role: "user", content: `${request.prompt}\n\nRepository tree (bounded to ${MAX_TREE_ENTRIES} entries, depth ${MAX_TREE_DEPTH}):\n${tree}` }];
+let toolCalls = 0;
+let modelCalls = 0;
+let classification = null;
+let finalSummary = "";
+let finished = false;
+
+try {
+	while (!finished) {
+		if (modelCalls >= MAX_MODEL_CALLS) { classification = "agent-model-budget-exhausted"; break; }
+		if (Date.now() >= deadline - 5_000) { classification = "agent-budget-exhausted"; break; }
+		modelCalls += 1;
+
+		const result = await callModelWithRetry({
+			model: request.model,
+			instructions: system,
+			input: transcript,
+			tools: TOOL_SCHEMA,
+			tool_choice: "auto",
+			parallel_tool_calls: false,
+			store: false,
+		});
+
+		if (typeof result?.id === "string" && RESPONSE_ID.test(result.id) && responseIds.size < 12) responseIds.add(result.id);
+		await emit({ type: "model.call.completed", payload: { response_id: typeof result?.id === "string" ? result.id.slice(0, 120) : "unknown" } });
+
+		const output = Array.isArray(result?.output) ? result.output : [];
+		const calledTools = output.filter((item) => item?.type === "function_call");
+		// Carry the model's own output forward verbatim so reasoning items and
+		// call ids stay paired with their outputs.
+		for (const item of output) transcript.push(item);
+
+		if (!calledTools.length) {
+			finalSummary = output
+				.filter((item) => item?.type === "message" && Array.isArray(item.content))
+				.flatMap((item) => item.content.filter((part) => part?.type === "output_text").map((part) => String(part.text ?? "")))
+				.join(" ")
+				.trim()
+				.slice(0, 400);
+			finished = true;
+			break;
+		}
+
+		for (const call of calledTools) {
+			if (toolCalls >= MAX_TOOL_CALLS) {
+				transcript.push({ type: "function_call_output", call_id: call.call_id, output: "Error: the tool budget is exhausted. Answer in plain text now." });
+				continue;
+			}
+			toolCalls += 1;
+			if (typeof call.name === "string" && tools.size < 32) tools.add(call.name);
+			let payload;
+			let ok = true;
+			try {
+				const args = call.arguments ? JSON.parse(call.arguments) : {};
+				payload = await callTool(call.name, args);
+			} catch (error) {
+				ok = false;
+				payload = `Error: ${error instanceof Error ? error.message : "tool failed"}`;
+			}
+			await emit({ type: "tool.call", payload: { tool: String(call.name).slice(0, 80), ok, bytes: payload.length } });
+			transcript.push({ type: "function_call_output", call_id: call.call_id, output: clip(payload) });
+		}
+	}
+} catch (error) {
+	classification = typeof error?.classification === "string" ? error.classification : "agent-run-failed";
+}
+
+// Apply staged writes even when a budget ended the loop early: a real partial
+// change beats a silent discard, and CI remains the correctness authority.
+const writes = [];
+if (!classification || classification.endsWith("-budget-exhausted")) {
+	try {
+		for (const [rel, content] of stagedWrites) {
+			const { absolute } = safePath(rel);
+			await mkdir(dirname(absolute), { recursive: true });
+			await writeFile(absolute, content, "utf8");
+			writes.push(rel);
+		}
+	} catch {
+		classification = "agent-apply-failed";
+	}
+}
+if (!classification && writes.length === 0) classification = "agent-made-no-change";
+if (classification?.endsWith("-budget-exhausted") && writes.length > 0) classification = null;
+
+const ok = !classification;
 await emit({
 	ok,
 	model: request.model,
 	responseIds: [...responseIds],
 	tools: [...tools],
-	stderr: ok ? undefined : stderrTail.trim().slice(-MAX_STDERR_BYTES) || undefined,
-	classification: ok ? undefined : killClassification ?? (terminal === "failed" ? "nanocodex-run-failed" : "nanocodex-process-failed"),
+	toolCalls,
+	writes,
+	summary: finalSummary || undefined,
+	classification: ok ? undefined : classification,
 });
 process.exitCode = ok ? 0 : 1;
