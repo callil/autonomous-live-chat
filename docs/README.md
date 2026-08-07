@@ -10,5 +10,6 @@ Read these in order:
 6. [Interface system](./design.md) — visual tokens and host/overlay design rules.
 7. [Code review](./code-review.md) — findings fixed in the repository split and remaining debt.
 8. [Platform policy](./platform-policy.md) — documented runtime limits, delivery pages, and the difference between safety guards and product caps.
+9. [Deferred proposals and previews](./future-proposals.md) — the intentionally disabled public discussion, author approval, and in-app build projection design.
 
 The documents describe what exists. Proposed work is labeled as such.

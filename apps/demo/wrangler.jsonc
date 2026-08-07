@@ -32,9 +32,6 @@
 		"directory": "./public",
 		"binding": "ASSETS"
 	},
-	"vars": {
-		"GITHUB_REPOSITORY": "callil/autonomous-live-chat"
-	},
 	"services": [
 		{
 			"binding": "OS_WORKSPACE",
@@ -43,15 +40,6 @@
 			"props": {
 				"source": "app-harness"
 			}
-		},
-		{
-			"binding": "OS_NATIVE_GIT_RUNNER",
-			"service": "app-harness-os-native-git",
-			"entrypoint": "NativeGitRunner"
-		},
-		{
-			"binding": "GITHUB_IDENTITY_BRIDGE",
-			"service": "app-harness-os-git-proxy"
 		}
 	],
 	"durable_objects": {

@@ -100,7 +100,7 @@ function buildSingleCandidate() {
 // one-node policy instead of pretending an atomic request is a multi-node job.
 {
 	const ledger = singleLedger();
-	assert.equal(ledger.mode, "single-fast");
+	assert.equal(ledger.mode, "one-node-stack");
 	assert.equal(ledger.originalBaseSha, A);
 	assert.equal(ledger.currentBaseSha, A);
 	assert.equal(ledger.generationBaseSha, A);
@@ -197,7 +197,7 @@ function buildSingleCandidate() {
 	assert.equal(ledger.status, "needs-restack");
 	assert.equal(ledger.runner.stage, "restack-pending");
 	ledger = apply(ledger, { type: "restack-started", eventId: "single-root-g2", generation: 1 });
-	assert.equal(ledger.mode, "single-fast");
+	assert.equal(ledger.mode, "one-node-stack");
 	assert.equal(ledger.generation, 2);
 	assert.equal(ledger.generationBaseSha, C);
 	assert.equal(ledger.nodes[0].branch, "app-harness-os/19/g2");
@@ -212,7 +212,7 @@ function buildSingleCandidate() {
 	const oldBranch = ledger.nodes[0].branch;
 	const oldGeneration = ledger.generation;
 	ledger = apply(ledger, { type: "main-observed", eventId: "main-b", generation: 1, mainSha: C });
-	assert.equal(ledger.mode, "single-fast");
+	assert.equal(ledger.mode, "one-node-stack");
 	assert.equal(ledger.generation, oldGeneration);
 	assert.equal(ledger.nodes[0].branch, oldBranch);
 	assert.equal(ledger.nodes[0].headSha, B);

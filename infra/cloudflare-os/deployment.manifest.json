@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "package": "@app-harness/operator-gatekeeper",
+  "upstreamPackagePath": "packages/gatekeeper-app-harness-operator",
+  "workerName": "app-harness-operator-gatekeeper",
+  "entrypoint": "GatekeeperVendor",
+  "stateAuthority": "app-harness-ledger",
+  "requiredBindings": [
+    {
+      "name": "LEDGER",
+      "kind": "service",
+      "purpose": "The sole durable owner of work-item leases, actions, attempts, and receipts."
+    },
+    {
+      "name": "RUNNER",
+      "kind": "service",
+      "purpose": "A disposable Cloudflare Sandbox/NanoCodex run capability with no persistent work state."
+    },
+    {
+      "name": "GITHUB",
+      "kind": "service",
+      "purpose": "The repository-scoped GitHub App capability for issues, stack artifacts, and deterministic promotion dispatch."
+    }
+  ],
+  "forbiddenBindings": ["durable_objects", "d1_databases", "kv_namespaces", "r2_buckets"],
+  "deploymentState": "reviewable-overlay",
+  "deploymentGuard": "Deploy only with matching private RPC entrypoints in the ledger, runner, and GitHub identity services. This package intentionally owns no durable action state."
+}

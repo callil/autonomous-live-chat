@@ -1,4 +1,3 @@
-import { createHmac, timingSafeEqual } from "node:crypto";
 import { appendFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 
@@ -6,7 +5,6 @@ const SHA = /^[0-9a-f]{40}$/iu;
 const REPOSITORY = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u;
 const STACK_BRANCH = /^app-harness-os\/(\d+)\/g(\d+)$/u;
 const APP_LOGIN = "app-harness-native-git-callil[bot]";
-const STATUS_PREFIX = "app-harness-os/validate-node/pr-";
 const WORKFLOW_PATH = ".github/workflows/os-stack-ci.yml";
 
 function required(name) {
@@ -43,12 +41,11 @@ export function validatePullRequest(pr, commit, files, options, comparison) {
 	if (!head?.repo || !base?.repo) throw new Error("Pull request repository provenance is missing.");
 	if (head.repo.full_name !== options.repo || base.repo.full_name !== options.repo) throw new Error("Candidate must originate in the trusted repository.");
 	if (pr.user?.login !== (options.appLogin ?? APP_LOGIN)) throw new Error("Candidate pull request was not opened by the native Git app.");
-	if (base.ref !== options.expectedParent || options.expectedParent !== "main") throw new Error("Only root candidates based on main can be promoted.");
 	const branch = typeof head.ref === "string" ? head.ref.match(STACK_BRANCH) : null;
 	if (!branch) throw new Error("Candidate branch is outside the OS stack namespace.");
 	const issue = Number(branch[1]);
 	const generation = Number(branch[2]);
-	if (generation !== 1) throw new Error("Multi-node changes require verified GitHub-native stack membership, order, and target-base metadata; this workflow supports only the one-node normal-PR path.");
+	if (base.ref !== "main" || (options.expectedParent && options.expectedParent !== "main")) throw new Error("Only the durable one-node stack root based on main can be promoted.");
 	if (options.expectedIssue && issue !== options.expectedIssue) throw new Error("Candidate branch does not match the expected issue.");
 	if (options.expectedGeneration && generation !== options.expectedGeneration) throw new Error("Candidate branch does not match the expected generation.");
 	const headSha = exactSha(head.sha, "pull request head");
@@ -68,6 +65,7 @@ export function validatePullRequest(pr, commit, files, options, comparison) {
 	const stackMatch = body.match(/- Stack: `([^`]+)` generation (\d+)/u);
 	if (!stackMatch || Number(stackMatch[2]) !== generation) throw new Error("Pull request stack generation provenance is invalid.");
 	if (options.expectedStack && stackMatch[1] !== options.expectedStack) throw new Error("Pull request stack id does not match orchestration.");
+	if (lineValue(body, /- Node: `([^`]+)`/u, "node") !== "root") throw new Error("One-node stack provenance must identify the root node.");
 	if (lineValue(body, /- Parent base: `([^`]+)`/u, "parent") !== base.ref) throw new Error("Pull request parent provenance is invalid.");
 	if (lineValue(body, /- Candidate head: `([0-9a-f]{40})`/iu, "head").toLowerCase() !== headSha) throw new Error("Pull request head provenance is invalid.");
 	return {
@@ -84,7 +82,7 @@ export function validatePullRequest(pr, commit, files, options, comparison) {
 }
 
 export function validateCandidateFiles(files) {
-	if (!Array.isArray(files) || files.length < 1 || files.length > 100) throw new Error("Candidate file provenance is empty or incomplete.");
+	if (!Array.isArray(files) || files.length < 1) throw new Error("Candidate file provenance is empty or incomplete.");
 	const seen = new Set();
 	for (const file of files) {
 		if (!file || typeof file.filename !== "string" || !file.filename || file.filename.startsWith("/") || file.filename.includes("\0") || file.filename.split("/").includes("..") || file.filename === ".git" || file.filename.startsWith(".git/")) throw new Error("Candidate contains an unsafe repository path.");
@@ -95,40 +93,42 @@ export function validateCandidateFiles(files) {
 	}
 }
 
-function evidenceMessage({ repo, pullRequest, headSha, baseSha, runId, state }) {
-	return [repo, String(pullRequest), headSha, baseSha, String(runId), state].join("\n");
-}
+// GitHub documents a 100-item page maximum and a 3,000-file response ceiling
+// for the pull-request files endpoint. This is provider-derived pagination,
+// not an App Harness repository-scope restriction.
+const GITHUB_PULL_FILES_PAGE_SIZE = 100;
+const GITHUB_PULL_FILES_MAX_PAGES = 30;
 
-export function createEvidence({ repo, pullRequest, headSha, baseSha, runId, state, secret }) {
-	const signature = createHmac("sha256", secret).update(evidenceMessage({ repo, pullRequest, headSha, baseSha, runId, state })).digest("hex");
-	return `b=${baseSha};r=${runId};s=${signature}`;
-}
-
-export function verifyEvidence(status, expected) {
-	if (!status || status.context !== `${STATUS_PREFIX}${expected.pullRequest}`) throw new Error("Validation status context is not bound to the pull request.");
-	const match = typeof status.description === "string" ? status.description.match(/^b=([0-9a-f]{40});r=(\d+);s=([0-9a-f]{64})$/iu) : null;
-	if (!match) throw new Error("Validation status attestation is malformed.");
-	const baseSha = match[1].toLowerCase();
-	const runId = Number(match[2]);
-	if (baseSha !== expected.baseSha || !Number.isSafeInteger(runId)) throw new Error("Validation status is bound to different provenance.");
-	const wanted = createEvidence({ ...expected, runId, state: status.state, secret: expected.secret }).slice(-64);
-	const actual = match[3].toLowerCase();
-	if (!timingSafeEqual(Buffer.from(actual, "hex"), Buffer.from(wanted, "hex"))) throw new Error("Validation status attestation is invalid.");
-	return { runId, state: status.state };
+async function pullRequestFiles(repo, pullRequest) {
+	const files = [];
+	for (let page = 1; page <= GITHUB_PULL_FILES_MAX_PAGES; page += 1) {
+		const batch = await api(`repos/${repo}/pulls/${pullRequest}/files?per_page=${GITHUB_PULL_FILES_PAGE_SIZE}&page=${page}`);
+		if (!Array.isArray(batch)) throw new Error("GitHub returned invalid candidate file provenance.");
+		files.push(...batch);
+		if (batch.length < GITHUB_PULL_FILES_PAGE_SIZE) return files;
+	}
+	throw new Error("GitHub's pull-request file response reached its documented 3,000-file ceiling; complete provenance is unavailable.");
 }
 
 export function validateWorkflowRun(run, expected) {
-	if (!run || run.id !== expected.runId || run.path !== WORKFLOW_PATH || run.repository?.full_name !== expected.repo) throw new Error("Validation status points to an unrelated workflow run.");
+	if (!run || run.path !== WORKFLOW_PATH || run.repository?.full_name !== expected.repo) throw new Error("Validation run is not from the trusted candidate workflow.");
+	if (run.event !== "pull_request_target" || run.head_sha?.toLowerCase() !== expected.headSha || run.head_branch !== expected.headRef) {
+		throw new Error("Validation run is bound to different candidate provenance.");
+	}
 	if (run.status !== "completed") return { pending: true };
 	if (run.conclusion !== "success") throw new Error("Bound validation workflow did not succeed.");
-	if (run.event === "pull_request") {
-		if (run.head_sha?.toLowerCase() !== expected.headSha || !run.pull_requests?.some((pr) => pr.number === expected.pullRequest)) {
-			throw new Error("Pull request validation run is bound to different candidate provenance.");
-		}
-	} else if (run.event !== "workflow_dispatch") {
-		throw new Error("Validation status points to an unsupported workflow event.");
-	}
-	return { pending: false };
+	return { pending: false, runId: run.id };
+}
+
+export function selectValidationRun(runs, expected) {
+	if (!Array.isArray(runs)) throw new Error("GitHub Actions validation response is invalid.");
+	const bound = runs.filter((run) => run?.path === WORKFLOW_PATH && run.repository?.full_name === expected.repo && run.event === "pull_request_target" && run.head_sha?.toLowerCase() === expected.headSha && run.head_branch === expected.headRef);
+	if (!bound.length) return { pending: true };
+	const newest = bound.sort((left, right) => {
+		const time = Date.parse(right.created_at ?? "") - Date.parse(left.created_at ?? "");
+		return time || (right.run_attempt ?? 0) - (left.run_attempt ?? 0) || (right.id ?? 0) - (left.id ?? 0);
+	})[0];
+	return validateWorkflowRun(newest, expected);
 }
 
 async function api(path, options = {}) {
@@ -160,19 +160,15 @@ async function verifyPullRequestCommand() {
 	const repo = repository(required("GH_REPO"));
 	const pullRequest = integer(required("PR"), "PR");
 	const expectedHead = process.env.EXPECTED_HEAD ? exactSha(process.env.EXPECTED_HEAD, "EXPECTED_HEAD") : undefined;
-	const [pr, files, extraFiles] = await Promise.all([
-		api(`repos/${repo}/pulls/${pullRequest}`),
-		api(`repos/${repo}/pulls/${pullRequest}/files?per_page=100&page=1`),
-		api(`repos/${repo}/pulls/${pullRequest}/files?per_page=100&page=2`),
-	]);
-	if (extraFiles.length) throw new Error("Candidate exceeds the bounded file-provenance audit.");
-	const [commit, comparison] = await Promise.all([
+	const pr = await api(`repos/${repo}/pulls/${pullRequest}`);
+	const [files, commit, comparison] = await Promise.all([
+		pullRequestFiles(repo, pullRequest),
 		api(`repos/${repo}/git/commits/${pr.head.sha}`),
 		api(`repos/${repo}/compare/${pr.base.sha}...${pr.head.sha}`),
 	]);
 	const result = validatePullRequest(pr, commit, files, {
 		repo,
-		expectedParent: process.env.EXPECTED_PARENT ?? "main",
+		expectedParent: process.env.EXPECTED_PARENT,
 		expectedHead,
 		expectedIssue: process.env.EXPECTED_ISSUE ? integer(process.env.EXPECTED_ISSUE, "EXPECTED_ISSUE") : undefined,
 		expectedGeneration: process.env.EXPECTED_GENERATION ? integer(process.env.EXPECTED_GENERATION, "EXPECTED_GENERATION") : undefined,
@@ -188,51 +184,24 @@ async function verifyPullRequestCommand() {
 		issue: result.issue,
 		generation: result.generation,
 		stack_id: result.stackId,
+		node_id: "root",
 		already_merged: result.alreadyMerged,
 		merge_sha: result.mergeSha,
 	});
 }
 
-async function publishStatusCommand() {
+async function waitValidationCommand() {
 	const repo = repository(required("GH_REPO"));
 	const pullRequest = integer(required("PR"), "PR");
 	const headSha = exactSha(required("EXPECTED_HEAD"), "EXPECTED_HEAD");
-	const baseSha = exactSha(required("EXPECTED_BASE"), "EXPECTED_BASE");
-	const runId = integer(required("GITHUB_RUN_ID"), "GITHUB_RUN_ID");
-	const state = required("VALIDATION_STATE");
-	if (!new Set(["pending", "success", "failure", "error"]).has(state)) throw new Error("VALIDATION_STATE is invalid.");
-	const description = createEvidence({ repo, pullRequest, headSha, baseSha, runId, state, secret: required("ATTESTATION_SECRET") });
-	await api(`repos/${repo}/statuses/${headSha}`, {
-		method: "POST",
-		body: JSON.stringify({
-			state,
-			context: `${STATUS_PREFIX}${pullRequest}`,
-			description,
-			target_url: `${process.env.GITHUB_SERVER_URL ?? "https://github.com"}/${repo}/actions/runs/${runId}`,
-		}),
-	});
-}
-
-async function waitStatusCommand() {
-	const repo = repository(required("GH_REPO"));
-	const pullRequest = integer(required("PR"), "PR");
-	const headSha = exactSha(required("EXPECTED_HEAD"), "EXPECTED_HEAD");
-	const baseSha = exactSha(required("EXPECTED_BASE"), "EXPECTED_BASE");
-	const expected = { repo, pullRequest, headSha, baseSha, secret: required("ATTESTATION_SECRET") };
+	const headRef = required("EXPECTED_HEAD_REF");
+	const expected = { repo, pullRequest, headSha, headRef };
 	for (let attempt = 1; attempt <= 36; attempt += 1) {
-		const combined = await api(`repos/${repo}/commits/${headSha}/status`);
-		const status = combined.statuses?.find((candidate) => candidate.context === `${STATUS_PREFIX}${pullRequest}`);
-		if (status) {
-			const evidence = verifyEvidence(status, expected);
-			if (evidence.state === "failure" || evidence.state === "error") throw new Error(`Immutable validation concluded ${evidence.state}.`);
-			if (evidence.state === "success") {
-				const run = await api(`repos/${repo}/actions/runs/${evidence.runId}`);
-				const result = validateWorkflowRun(run, { ...expected, runId: evidence.runId });
-				if (!result.pending) {
-					await output({ validation_run_id: evidence.runId });
-					return;
-				}
-			}
+		const response = await api(`repos/${repo}/actions/workflows/os-stack-ci.yml/runs?event=pull_request_target&head_sha=${headSha}&per_page=100`);
+		const result = selectValidationRun(response.workflow_runs, expected);
+		if (!result.pending) {
+			await output({ validation_run_id: result.runId });
+			return;
 		}
 		await new Promise((resolve) => setTimeout(resolve, 5_000));
 	}
@@ -242,7 +211,6 @@ async function waitStatusCommand() {
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
 	const command = process.argv[2];
 	if (command === "verify-pr") await verifyPullRequestCommand();
-	else if (command === "publish-status") await publishStatusCommand();
-	else if (command === "wait-status") await waitStatusCommand();
-	else throw new Error("Usage: os-stack-gate.mjs <verify-pr|publish-status|wait-status>");
+	else if (command === "wait-validation") await waitValidationCommand();
+	else throw new Error("Usage: os-stack-gate.mjs <verify-pr|wait-validation>");
 }

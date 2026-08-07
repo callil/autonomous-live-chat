@@ -37,8 +37,8 @@ export function buildNanocodexInstructions({ repository, issueNumber, branch, st
 		"Run relevant tests, builds, type generation, and static checks. Do not claim success when checks or required external operations fail.",
 		"CI is the merge and production deployment authority. You may use Wrangler for local validation and configuration work, but do not mutate production, merge a pull request, or deploy directly from this workspace.",
 		`The repository is ${repository}; the linked issue is #${issueNumber}; the durable stack is ${stackId} generation ${generation}.`,
-		`For one coherent change, use the required root branch ${branch}, commit, push, and open or update a ready pull request targeting main with \"Refs #${issueNumber}\".`,
-		`If genuinely dependent slices are needed, keep ${branch} as the bottom branch and use the installed official non-interactive gh stack commands after checking their local help. Do not simulate a stack with unrelated PRs or invent unsupported flags.`,
+		`For this one-node stack, use the required root branch ${branch} and commit the complete change. Do not open an ordinary pull request or emulate a stack: the execution harness will submit this branch through the installed official gh stack CLI and attach the linked issue #${issueNumber}.`,
+		"Do not create dependent branches in this run. Multi-node stacks are not enabled yet; if the request genuinely requires them, explain that in your final answer rather than improvising a custom rebase or PR chain.",
 		"Finish with a clean working tree and pushed commits. Keep sensitive command output inside the Sandbox; the coordinator will persist only model ID, bounded Responses IDs, tool names, commit SHAs, and GitHub URLs.",
 	].join(" ");
 }

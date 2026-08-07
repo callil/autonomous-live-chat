@@ -14,6 +14,7 @@ const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8
 const dockerfile = await readFile(new URL("../Dockerfile", import.meta.url), "utf8");
 const config = await readFile(new URL("../wrangler.jsonc", import.meta.url), "utf8");
 const entrypoint = new URL("../agent-entrypoint.mjs", import.meta.url);
+const jobEntrypoint = new URL("../job-entrypoint.mjs", import.meta.url);
 
 const instructions = buildNanocodexInstructions({
 	repository: "callil/autonomous-live-chat",
@@ -28,6 +29,8 @@ assert.match(instructions, /default product surface is apps\/demo/u);
 assert.match(instructions, /Never read, print, copy, commit, or expose credentials/u);
 assert.match(instructions, /read-only subagents proactively and in parallel/u);
 assert.match(instructions, /parent agent alone owns edits, Git, branches, and the stack/u);
+assert.match(instructions, /execution harness will submit this branch through the installed official gh stack CLI/u);
+assert.match(instructions, /Multi-node stacks are not enabled yet/u);
 assert.equal(NANOCODEX_DEFAULT_MODEL, "gpt-5.6-luna");
 
 const bounded = normalizeAgentSummary({
@@ -43,32 +46,32 @@ assert.deepEqual(Object.keys(bounded).sort(), ["model", "responseIds", "tools"])
 assert.doesNotMatch(JSON.stringify(bounded), /must not survive/u);
 
 assert.match(source, /kind: "repository-task"/u);
-assert.match(source, /node \/opt\/app-harness\/agent-entrypoint\.mjs/u);
-assert.match(source, /writeFile\(requestPath, JSON\.stringify/u);
-assert.match(source, /agent-entrypoint\.mjs < \$\{requestPath\}/u);
-assert.match(source, /runNanocodexInBackground/u);
+assert.match(source, /node \/opt\/app-harness\/job-entrypoint\.mjs/u);
+assert.match(source, /session\.writeFile\(ids\.requestPath, JSON\.stringify/u);
 assert.match(source, /session\.startProcess/u);
-assert.match(source, /session\.getProcess/u);
+assert.match(source, /processId: ids\.runId/u);
 assert.match(source, /autoCleanup: false/u);
 assert.match(source, /timeout: NANOCODEX_EXECUTION_TIMEOUT_MS/u);
-assert.match(source, /classification: "sandbox-runtime-interrupted"/u);
 assert.match(source, /state: "runner-unavailable"/u);
-assert.match(source, /new version rollout/u);
 assert.match(source, /class NativeGitRunner extends WorkerEntrypoint/u);
-assert.match(source, /async enqueueJob\(job: NativeGitJob\)/u);
-assert.match(source, /async getJob\(jobId: string\)/u);
-assert.match(source, /class RunnerJob extends DurableObject/u);
-assert.match(source, /async alarm\(\): Promise<void>/u);
-assert.match(config, /"class_name": "RunnerJob"/u);
-assert.match(config, /"tag": "v2"/u);
-assert.doesNotMatch(source, /session\.exec\(`node \/opt\/app-harness\/agent-entrypoint\.mjs/u);
-assert.match(source, /GH_TOKEN: installation\.token/u);
-assert.match(source, /candidate-working-tree-dirty/u);
-assert.match(source, /candidate-head-not-pushed/u);
-assert.match(source, /findAndAnnotatePullRequest/u);
-assert.match(source, /async function sandboxIdentity/u);
+assert.match(source, /async startRun\(input: NativeGitJob\)/u);
+assert.match(source, /async inspectRun\(input: \{ jobId: string; generation: number; runId: string \}\)/u);
+assert.match(source, /async cancelRun\(/u);
+assert.match(source, /async probe\(\)/u);
+assert.doesNotMatch(source, /class RunnerJob extends DurableObject/u, "the disposable runner must not own a second durable job machine");
+assert.doesNotMatch(source, /APP_HARNESS_RUNNER_SECRET|GITHUB_APP_PRIVATE_KEY|GITHUB_APP_INSTALLATION_ID|GITHUB_APP_ID/u, "the runner receives neither a static bearer nor the GitHub App private key");
+assert.match(source, /GITHUB_APP\.createRunnerToken/u, "the sole GitHub App broker mints the short-lived repository capability");
+assert.match(config, /"binding": "GITHUB_APP"/u);
+assert.match(config, /"entrypoint": "GitHubAppCapability"/u);
+assert.match(config, /"deleted_classes": \["RunnerJob"\]/u);
+assert.doesNotMatch(config, /"name": "RUNNER_JOB"/u);
+assert.doesNotMatch(source, /runJob\(/u, "the Worker cannot synchronously own a full implementation run");
+assert.match(source, /async function deterministicId/u);
 assert.match(source, /base64Url\(digest\)\.slice\(0, 32\)/u);
-assert.ok(`ah-nc030-gs010-${"x".repeat(32)}`.length <= 63, "derived Cloudflare Sandbox identities stay within the platform limit");
+assert.match(source, /const TERMINAL_PROCESS_STATUSES/u);
+assert.match(source, /parseTerminalArtifact/u);
+assert.match(source, /sandbox\.getSession\(ids\.sessionId\)/u);
+assert.ok(`ah-nc031-async010-${"x".repeat(32)}`.length <= 63, "derived Cloudflare Sandbox identities stay within the platform limit");
 assert.match(source, /NANOCODEX_EXECUTION_TIMEOUT_MS = 720_000/u, "agent execution stays below Cloudflare's 15-minute alarm limit");
 for (const obsolete of ["DOC_AGENT_TOOLS", "safeDocumentationPatch", "runDocumentationAgent", "add -- README.md docs"]) assert.doesNotMatch(source, new RegExp(obsolete.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"));
 assert.match(dockerfile, new RegExp(`NANOCODEX_VERSION=${NANOCODEX_VERSION}`, "u"));
@@ -76,11 +79,23 @@ assert.match(dockerfile, /GH_VERSION=2\.97\.0/u);
 assert.match(dockerfile, /GH_STACK_VERSION=0\.1\.0/u);
 assert.match(dockerfile, /sha256sum --check/gu);
 assert.match(dockerfile, /COPY agent-entrypoint\.mjs/u);
+assert.match(dockerfile, /job-entrypoint\.mjs/u);
 const entrypointSource = await readFile(entrypoint, "utf8");
+const jobEntrypointSource = await readFile(jobEntrypoint, "utf8");
 assert.doesNotMatch(entrypointSource, /"--model"/u);
 assert.match(entrypointSource, /request\.model !== NANOCODEX_MODEL/u);
 assert.match(entrypointSource, /await emit/u);
 assert.match(entrypointSource, /process\.exitCode =/u);
+assert.match(jobEntrypointSource, /git", \["clone"/u);
+assert.match(jobEntrypointSource, /node", \["\/opt\/app-harness\/agent-entrypoint\.mjs"\]/u);
+assert.match(jobEntrypointSource, /findAndAnnotatePullRequest/u);
+assert.match(jobEntrypointSource, /gh", \["stack", "init", "--base", "main", branch\]/u);
+assert.match(jobEntrypointSource, /gh", \["stack", "submit", "--auto", "--open"\]/u);
+assert.match(jobEntrypointSource, /gh", \["stack", "view", "--json"\]/u);
+assert.match(jobEntrypointSource, /oneNodeStackView/u);
+assert.match(jobEntrypointSource, /candidate-working-tree-dirty/u);
+assert.match(jobEntrypointSource, /stack-head-not-pushed/u);
+assert.doesNotMatch(jobEntrypointSource, /console\.log/u, "the background process emits only its bounded terminal artifact");
 
 const directory = await mkdtemp(join(tmpdir(), "nanocodex-contract-"));
 const mock = join(directory, "nanocodex");

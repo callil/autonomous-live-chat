@@ -113,8 +113,11 @@ export function createStackLedger(input) {
 			pullRequest: null,
 		};
 	});
-	const mode = nodes.length === 1 ? "single-fast" : "multi-restack";
-	if (mode === "single-fast" && input.nativeStackId !== undefined) throw new Error("A one-node fast-path PR is not a native GitHub stack.");
+	const mode = nodes.length === 1 ? "one-node-stack" : "multi-restack";
+	// `gh stack init` tracks a one-node stack locally. GitHub only creates a
+	// remote Stack object when it has a chain to link, so a remote ID is neither
+	// available nor required for the one-node path.
+	if (mode === "one-node-stack" && input.nativeStackId !== undefined) throw new Error("A one-node stack has no remote GitHub Stack identity.");
 	const nativeStack = mode === "multi-restack"
 		? { id: safeId(input.nativeStackId, "Native GitHub stack ID"), generation: 1, order: nodes.map((node) => node.id), stage: "pending", attempt: 0, attemptToken: null }
 		: null;
@@ -160,8 +163,8 @@ export function validateStackLedger(ledger) {
 	sha(ledger.currentBaseSha, "Current base");
 	sha(ledger.generationBaseSha, "Generation base");
 	if (!Array.isArray(ledger.nodes) || !ledger.nodes.length) throw new Error("Ledger nodes are required.");
-	if (ledger.mode !== (ledger.nodes.length === 1 ? "single-fast" : "multi-restack")) throw new Error("Stack mode must match its node count.");
-	if (ledger.mode === "single-fast" && ledger.nativeStack !== null) throw new Error("A one-node fast-path PR cannot claim native GitHub stack ownership.");
+	if (ledger.mode !== (ledger.nodes.length === 1 ? "one-node-stack" : "multi-restack")) throw new Error("Stack mode must match its node count.");
+	if (ledger.mode === "one-node-stack" && ledger.nativeStack !== null) throw new Error("A one-node stack cannot claim a remote GitHub Stack identity.");
 	if (ledger.mode === "multi-restack") {
 		if (!ledger.nativeStack || typeof ledger.nativeStack !== "object") throw new Error("Dependent nodes require a native GitHub stack identity.");
 		safeId(ledger.nativeStack.id, "Native GitHub stack ID");
@@ -297,7 +300,7 @@ export function applyStackEvent(ledger, event) {
 			// invalidates its integration proof; CI will validate the same head
 			// against the new main. Before a candidate exists, however, the root
 			// must advance once just like the root of a larger stack.
-			if (ledger.mode === "single-fast" && ledger.nodes[0].headSha) {
+			if (ledger.mode === "one-node-stack" && ledger.nodes[0].headSha) {
 				return apply(ledger, event, (current) => ({
 					...current,
 					currentBaseSha: observed,
@@ -450,20 +453,20 @@ export function applyStackEvent(ledger, event) {
 		}
 
 		case "native-stack-sync-started": {
-			if (ledger.mode !== "multi-restack" || !ledger.nativeStack) throw new Error("A one-node fast-path PR is not reconciled through gh stack.");
+			if (ledger.mode !== "multi-restack" || !ledger.nativeStack) throw new Error("Only a dependent stack needs gh stack synchronization.");
 			if (!["pending", "retry-pending"].includes(ledger.nativeStack.stage)) throw new Error("A native GitHub stack sync is already active or complete.");
 			const attemptToken = safeId(event.attemptToken, "Native stack attempt token");
 			return apply(ledger, event, (current) => ({ ...current, nativeStack: { ...current.nativeStack, stage: "syncing", attempt: current.nativeStack.attempt + 1, attemptToken } }));
 		}
 
 		case "native-stack-sync-retryable": {
-			if (ledger.mode !== "multi-restack" || !ledger.nativeStack) throw new Error("A one-node fast-path PR is not reconciled through gh stack.");
+			if (ledger.mode !== "multi-restack" || !ledger.nativeStack) throw new Error("Only a dependent stack needs gh stack synchronization.");
 			if (ledger.nativeStack.stage !== "syncing" || event.attemptToken !== ledger.nativeStack.attemptToken) return result(ledger, "stale", "native-stack-attempt-mismatch");
 			return apply(ledger, event, (current) => ({ ...current, nativeStack: { ...current.nativeStack, stage: "retry-pending", attemptToken: null } }));
 		}
 
 		case "native-stack-reconciled": {
-			if (ledger.mode !== "multi-restack" || !ledger.nativeStack) throw new Error("A one-node fast-path PR is not reconciled through gh stack.");
+			if (ledger.mode !== "multi-restack" || !ledger.nativeStack) throw new Error("Only a dependent stack needs gh stack synchronization.");
 			if (ledger.nativeStack.stage !== "syncing" || event.attemptToken !== ledger.nativeStack.attemptToken) return result(ledger, "stale", "native-stack-attempt-mismatch");
 			if (event.nativeStackId !== ledger.nativeStack.id) return result(ledger, "stale", "native-stack-id-mismatch");
 			if (!Array.isArray(event.order) || event.order.length !== ledger.nativeStack.order.length || event.order.some((nodeId, index) => nodeId !== ledger.nativeStack.order[index])) {

@@ -19,6 +19,15 @@ export type AppHarnessTarget = {
 
 export type TargetSnapshot = Omit<AppHarnessTarget, "rect"> & { rect: AppHarnessRectangle };
 
+export type TargetAttributeOptions = {
+  /**
+   * Opt the element's rendered text into the envelope. This is intentionally
+   * a marker rather than an attribute value so hosts never copy content into
+   * markup just for App Harness.
+   */
+  includeText?: boolean;
+};
+
 const TARGET_ID = new RegExp(`^[a-z0-9_-]{1,${AUTHORING_ENVELOPE_POLICY.targetIdCharacters}}$`, "iu");
 const PAGE = new RegExp(`^/[a-zA-Z0-9/_-]{0,${AUTHORING_ENVELOPE_POLICY.pagePathCharacters - 1}}$`, "u");
 
@@ -45,22 +54,33 @@ export function createTargetEnvelope(snapshot: TargetSnapshot): AppHarnessTarget
   };
 }
 
-export function targetAttributes(targetId: string, label: string): Record<string, string> {
+/**
+ * The only target markup contract understood by the reusable authoring layer:
+ *
+ * - `data-app-harness-id`: stable, host-defined identifier
+ * - `data-app-harness-label`: concise static description
+ * - `data-app-harness-text`: optional marker allowing rendered text in the envelope
+ */
+export function targetAttributes(targetId: string, label: string, options: TargetAttributeOptions = {}): Record<string, string> {
   if (!TARGET_ID.test(targetId)) throw new Error("App Harness target IDs must be stable, readable identifiers.");
   const safeLabel = bounded(label, AUTHORING_ENVELOPE_POLICY.safeTextCharacters);
   if (!safeLabel) throw new Error("App Harness targets need a concise label.");
-  return { "data-app-harness-id": targetId, "data-app-harness-label": safeLabel };
+  return {
+    "data-app-harness-id": targetId,
+    "data-app-harness-label": safeLabel,
+    ...(options.includeText ? { "data-app-harness-text": "true" } : {}),
+  };
 }
 
 export function targetFromElement(element: Element, page = window.location.pathname): AppHarnessTarget {
-  const targetId = element.getAttribute("data-app-harness-id") ?? element.getAttribute("data-target-id") ?? "";
+  const targetId = element.getAttribute("data-app-harness-id") ?? "";
   const rect = element.getBoundingClientRect();
   return createTargetEnvelope({
     targetId,
     tag: element.tagName,
     role: element.getAttribute("role") ?? undefined,
-    label: element.getAttribute("data-app-harness-label") ?? element.getAttribute("data-target-label") ?? element.getAttribute("aria-label") ?? undefined,
-    text: element.hasAttribute("data-app-harness-text") || element.hasAttribute("data-target-text") ? element.textContent ?? undefined : undefined,
+    label: element.getAttribute("data-app-harness-label") ?? undefined,
+    text: element.hasAttribute("data-app-harness-text") ? element.textContent ?? undefined : undefined,
     page,
     rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
   });

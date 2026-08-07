@@ -27,6 +27,6 @@ RUN apt-get update \
     && echo "${GH_STACK_AMD64_SHA256}  /tmp/gh-stack" | sha256sum --check \
     && install -m 0755 /tmp/gh-stack /root/.local/share/gh/extensions/gh-stack/gh-stack
 
-COPY agent-entrypoint.mjs /opt/app-harness/agent-entrypoint.mjs
+COPY agent-entrypoint.mjs job-entrypoint.mjs /opt/app-harness/
 
 EXPOSE 8080

@@ -1,10 +1,9 @@
 import assert from "node:assert/strict";
 import {
-	createEvidence,
+	selectValidationRun,
 	validateCandidateFiles,
 	validatePullRequest,
 	validateWorkflowRun,
-	verifyEvidence,
 } from "../scripts/os-stack-gate.mjs";
 
 const repo = "callil/autonomous-live-chat";
@@ -25,6 +24,7 @@ const pullRequest = {
 	base: { ref: "main", sha: baseSha, repo: { full_name: repo } },
 	body: [
 		"- Stack: `stack-request-19` generation 1",
+		"- Node: `root`",
 		"- Parent base: `main`",
 		`- Candidate head: \`${headSha}\``,
 	].join("\n"),
@@ -68,16 +68,10 @@ for (const mutation of [
 assert.throws(() => validatePullRequest(pullRequest, commit, files, options, { ...comparison, merge_base_commit: { sha: "5".repeat(40) } }));
 
 validateCandidateFiles(files);
+validateCandidateFiles(Array.from({ length: 101 }, (_, index) => ({ ...files[0], filename: `src/file-${index}.ts` })));
 assert.throws(() => validateCandidateFiles([{ ...files[0], filename: "../outside" }]));
 assert.throws(() => validateCandidateFiles([{ ...files[0], filename: ".git/config" }]));
 assert.throws(() => validateCandidateFiles([{ ...files[0], changes: -1 }]));
-
-const evidenceInput = { repo, pullRequest: 20, headSha, baseSha, runId: 123456, state: "success", secret: "test-attestation-secret" };
-const description = createEvidence(evidenceInput);
-const status = { context: "app-harness-os/validate-node/pr-20", state: "success", description };
-assert.deepEqual(verifyEvidence(status, { repo, pullRequest: 20, headSha, baseSha, secret: evidenceInput.secret }), { runId: 123456, state: "success" });
-assert.throws(() => verifyEvidence({ ...status, state: "failure" }, { repo, pullRequest: 20, headSha, baseSha, secret: evidenceInput.secret }));
-assert.throws(() => verifyEvidence(status, { repo, pullRequest: 21, headSha, baseSha, secret: evidenceInput.secret }));
 
 const workflowRun = {
 	id: 123456,
@@ -85,12 +79,36 @@ const workflowRun = {
 	repository: { full_name: repo },
 	status: "completed",
 	conclusion: "success",
-	event: "pull_request",
+	event: "pull_request_target",
 	head_sha: headSha,
-	pull_requests: [{ number: 20 }],
+	head_branch: "app-harness-os/19/g1",
+	created_at: "2026-08-06T20:00:00Z",
 };
-assert.deepEqual(validateWorkflowRun(workflowRun, { repo, pullRequest: 20, headSha, runId: 123456 }), { pending: false });
-assert.throws(() => validateWorkflowRun({ ...workflowRun, head_sha: "6".repeat(40) }, { repo, pullRequest: 20, headSha, runId: 123456 }));
-assert.deepEqual(validateWorkflowRun({ ...workflowRun, event: "workflow_dispatch", head_sha: baseSha, pull_requests: [] }, { repo, pullRequest: 20, headSha, runId: 123456 }), { pending: false });
+const validationExpected = { repo, pullRequest: 20, headSha, headRef: pullRequest.head.ref };
+assert.deepEqual(validateWorkflowRun(workflowRun, validationExpected), { pending: false, runId: 123456 });
+assert.throws(() => validateWorkflowRun({ ...workflowRun, head_sha: "6".repeat(40) }, validationExpected));
+assert.throws(() => validateWorkflowRun({ ...workflowRun, event: "pull_request" }, validationExpected));
+assert.throws(() => validateWorkflowRun({ ...workflowRun, head_branch: "app-harness-os/20/g1" }, validationExpected));
+assert.deepEqual(selectValidationRun([workflowRun, { ...workflowRun, id: 123457, status: "in_progress", conclusion: null, created_at: "2026-08-06T20:01:00Z" }], validationExpected), { pending: true });
+assert.deepEqual(selectValidationRun([workflowRun], validationExpected), { pending: false, runId: 123456 });
+assert.deepEqual(selectValidationRun([], validationExpected), { pending: true });
+
+assert.throws(() => validatePullRequest(
+	{
+		...pullRequest,
+		head: { ...pullRequest.head, ref: "app-harness-os/19/g2" },
+		base: { ...pullRequest.base, ref: "app-harness-os/19/g1" },
+		body: [
+			"- Stack: `stack-request-19` generation 2",
+			"- Node: `root`",
+			"- Parent base: `app-harness-os/19/g1`",
+			`- Candidate head: \`${headSha}\``,
+		].join("\n"),
+	},
+	commit,
+	files,
+	{ ...options, expectedGeneration: 2, expectedParent: undefined },
+	comparison,
+), /one-node stack root/u, "dependent nodes fail closed until multi-node restacking is implemented");
 
 console.log("OS stack trusted gate contracts passed");

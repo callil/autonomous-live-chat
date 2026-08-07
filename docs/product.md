@@ -11,7 +11,7 @@ The first demonstration is deliberately a chat app. It is small enough that the 
 - Normal use remains a quiet chat interface.
 - A small floating launcher summons the authoring layer.
 - Target mode lets a contributor select a stable, opted-in UI element.
-- Submitting creates immediate local acknowledgement, a durable work item, and a public GitHub issue.
+- Submitting creates an immediate acknowledgement backed by a durable work item. The persistent operator then creates and links the public GitHub issue as its first external artifact.
 - Activity is available on demand and links to real issues, pull requests, checks, and deployment state.
 - Valid work proceeds autonomously. The agent explains refusals and failures instead of displaying fictional progress.
 
@@ -22,6 +22,8 @@ The authoring layer should feel placed over the host app, not built into its per
 Cloudflare OS holds the long-lived repository conversation. An ephemeral coding process receives a clean checkout for each implementation job. It can inspect and edit the full repository, use investigation subagents, run normal engineering tools, and produce one pull request or a genuinely dependent stack.
 
 Its default attention is the demo app—both frontend and backend. This is a prompt and ownership convention, not a hard path restriction. Cross-cutting changes may update the React wrapper, tests, workflows, migrations, or infrastructure.
+
+Public proposal discussions and in-app candidate previews are a designed but intentionally disabled extension. They do not add state or UI to the first production proof; see [Deferred proposals and previews](./future-proposals.md).
 
 ## Completion contract
 

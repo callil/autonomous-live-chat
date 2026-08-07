@@ -21,13 +21,22 @@ assert.match(worker, /type: "harness:annotation:added"/u);
 assert.match(worker, /type: "harness:work-item"/u);
 assert.match(worker, /storageDeleteBatches/u);
 assert.match(worker, /fitsDurableRecord/u);
-assert.match(worker, /ORDER_INDEX_MIGRATION_KEY/u);
+assert.match(worker, /LEDGER_MIGRATION_KEY/u);
 assert.match(worker, /DELIVERY_POLICY\.historyPageBytes/u);
-assert.match(worker, /return this\.ctx\.storage\.get<WorkflowRecord>\(WORKFLOW_KEY\)/u);
+assert.match(worker, /class LedgerService extends WorkerEntrypoint/u);
+assert.match(worker, /createLedgerWorkItem/u);
+assert.match(worker, /queueOperatorWake/u);
+assert.match(worker, /putWakeInTransaction/u, "state and durable wake outbox are committed together");
+assert.match(worker, /executionToken/u, "operator action completion is fenced to its current execution lease");
+assert.match(worker, /listOperatorActions/u, "a later operator turn can reconcile prior staged or applied actions");
+assert.match(worker, /harness:work-item:history/u, "each durable work item exposes paginated public activity");
+assert.match(worker, /if \(room !== "main"\)/u, "the only configured ledger room cannot create orphaned side ledgers");
+assert.doesNotMatch(worker, /CoordinatorJob|CoordinatorEffect|GITHUB_AUTOMATION_TOKEN|AUTONOMY_CALLBACK_SECRET|\/api\/autonomy\/callback|api\.github\.com/u);
 assert.match(worker, /AUTHORING_ENVELOPE_POLICY\.safeTextCharacters/u);
 assert.doesNotMatch(worker, /broadcast\(\{ type: "harness:annotations", annotations: await/u);
 assert.match(html, /id="load-earlier-messages"/u);
 assert.match(html, /id="load-earlier-activity"/u);
+assert.match(html, /Load earlier updates/u, "the UI can retrieve a work item's older status events");
 
 // Guard the established keyboard contract while changing composer behavior.
 assert.match(html, /event\.key === 'Enter' && !event\.shiftKey/);

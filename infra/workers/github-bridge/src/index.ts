@@ -1,30 +1,21 @@
-type Env = {
+/**
+ * Private, repository-scoped GitHub App capability.
+ *
+ * This module deliberately has no HTTP automation API.  Only a Worker
+ * Entrypoint can construct this capability, so the App private key never
+ * leaves this Worker and callers use a private service binding/RPC instead
+ * of a shared coordinator secret.
+ */
+export type GitHubBridgeEnv = {
 	ALLOWED_REPOSITORY: string;
 	PRODUCTION_ORIGIN: string;
-	GIT_PROXY_ASSERTION_SECRET: string;
-	APP_HARNESS_IDENTITY_SECRET: string;
 	GITHUB_APP_ID: string;
 	GITHUB_APP_INSTALLATION_ID: string;
 	GITHUB_APP_PRIVATE_KEY: string;
 };
 
-type Assertion = {
-	iss: "app-harness-os-native-git";
-	jobId: string;
-	repository: string;
-	generation: number;
-	exp: number;
-};
-
-type CoordinatorAssertion = {
-	iss: "app-harness-coordinator";
-	workItemId: string;
-	repository: string;
-	exp: number;
-};
-
-type Classification = "triage" | "agent" | "needs-review" | "rejected" | "deployed";
-type ModelClassification = {
+export type Classification = "triage" | "agent" | "needs-review" | "rejected" | "deployed";
+export type ModelClassification = {
 	changeType: "visual" | "content" | "data" | "behavior" | "infrastructure";
 	scope: "localized" | "bounded" | "broad";
 	risk: "low" | "medium" | "high";
@@ -34,17 +25,60 @@ type ModelClassification = {
 	ciProfile: "visual" | "content" | "behavior" | "data" | "infrastructure";
 };
 
+export type CreateIssueInput = {
+	eventId: string;
+	title: string;
+	body: string;
+	classification: Classification;
+};
+
+export type UpdateClassificationInput = {
+	issueNumber: number;
+	classification: Classification;
+	modelClassification?: ModelClassification;
+};
+
+export type PostStatusInput = {
+	issueNumber: number;
+	eventId: string;
+	body: string;
+};
+
+export type CloseAfterDeploymentInput = PostStatusInput & { deploymentUrl: string };
+
+export type DispatchPromotionInput = {
+	pullRequest: number;
+	stackId: string;
+	generation: number;
+	issueNumber: number;
+	parentBranch: string;
+	headSha: string;
+	/** Durable idempotency key used for exactly one workflow dispatch and observation. */
+	dispatchKey: string;
+	ciProfile: ModelClassification["ciProfile"];
+};
+
+export type CandidateObservationInput = {
+	branch: string;
+	pullRequestBase: string;
+};
+
+export type CandidateValidationObservationInput = {
+	pullRequest: number;
+	headSha: string;
+};
+
+export type PromotionRunObservationInput = {
+	/** Durable idempotency key used for exactly one workflow dispatch and observation. */
+	dispatchKey: string;
+	createdAfter?: string;
+};
+
 const encoder = new TextEncoder();
-const decoder = new TextDecoder();
-const GIT_PATH = /^\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\.git\/(info\/refs|git-upload-pack|git-receive-pack)$/;
-const ISSUE_PATH = /^\/v1\/issues\/(\d+)$/;
-const ISSUE_LABELS_PATH = /^\/v1\/issues\/(\d+)\/classification$/;
-const ISSUE_STATUS_PATH = /^\/v1\/issues\/(\d+)\/status$/;
-const ISSUE_CLOSE_PATH = /^\/v1\/issues\/(\d+)\/close-after-deployment$/;
-const EVENT_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/;
-// GitHub issue bodies are Markdown. Reject non-text control bytes while allowing
-// ordinary Markdown syntax (`code`, selectors with `=`, emoji, links, etc.).
+const EVENT_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/u;
+const GIT_SHA = /^[a-f0-9]{40}$/u;
 const SAFE_ISSUE_TEXT = /^[^\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]+$/u;
+const SIMPLE_IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/u;
 const CLASSIFICATION_LABELS: Readonly<Record<Classification, readonly string[]>> = {
 	triage: ["app-harness", "triage"],
 	agent: ["app-harness", "agent"],
@@ -75,144 +109,59 @@ function base64Url(bytes: Uint8Array): string {
 	return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/u, "");
 }
 
-function decodeBase64Url(value: string): Uint8Array | null {
-	if (!/^[A-Za-z0-9_-]+$/u.test(value)) return null;
-	try {
-		const padded = value.replaceAll("-", "+").replaceAll("_", "/") + "=".repeat((4 - value.length % 4) % 4);
-		const binary = atob(padded);
-		return Uint8Array.from(binary, (char) => char.charCodeAt(0));
-	} catch {
-		return null;
-	}
-}
-
-async function hmac(secret: string, value: string): Promise<Uint8Array> {
-	const key = await crypto.subtle.importKey("raw", encoder.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-	return new Uint8Array(await crypto.subtle.sign("HMAC", key, encoder.encode(value)));
-}
-
-function equal(left: Uint8Array, right: Uint8Array): boolean {
-	if (left.length !== right.length) return false;
-	let result = 0;
-	for (let index = 0; index < left.length; index += 1) result |= left[index] ^ right[index];
-	return result === 0;
-}
-
-async function validateAssertion(request: Request, env: Env): Promise<Assertion | null> {
-	const header = request.headers.get("x-app-harness-assertion");
-	if (!header) return null;
-	const [payloadPart, signaturePart, extra] = header.split(".");
-	if (!payloadPart || !signaturePart || extra) return null;
-	const payloadBytes = decodeBase64Url(payloadPart);
-	const signature = decodeBase64Url(signaturePart);
-	if (!payloadBytes || !signature || !equal(signature, await hmac(env.GIT_PROXY_ASSERTION_SECRET, payloadPart))) return null;
-	try {
-		const payload = JSON.parse(decoder.decode(payloadBytes)) as Assertion;
-		if (payload.iss !== "app-harness-os-native-git" || payload.repository !== env.ALLOWED_REPOSITORY) return null;
-		if (!Number.isInteger(payload.generation) || !Number.isFinite(payload.exp) || payload.exp <= Math.floor(Date.now() / 1000)) return null;
-		if (typeof payload.jobId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/u.test(payload.jobId)) return null;
-		return payload;
-	} catch {
-		return null;
-	}
-}
-
-async function validateCoordinatorAssertion(request: Request, env: Env): Promise<CoordinatorAssertion | null> {
-	const header = request.headers.get("x-app-harness-coordinator-assertion");
-	if (!header) return null;
-	const [payloadPart, signaturePart, extra] = header.split(".");
-	if (!payloadPart || !signaturePart || extra) return null;
-	const payloadBytes = decodeBase64Url(payloadPart);
-	const signature = decodeBase64Url(signaturePart);
-	if (!payloadBytes || !signature || !equal(signature, await hmac(env.APP_HARNESS_IDENTITY_SECRET, payloadPart))) return null;
-	try {
-		const payload = JSON.parse(decoder.decode(payloadBytes)) as CoordinatorAssertion;
-		if (payload.iss !== "app-harness-coordinator" || payload.repository !== env.ALLOWED_REPOSITORY) return null;
-		if (!Number.isFinite(payload.exp) || payload.exp <= Math.floor(Date.now() / 1000)) return null;
-		if (typeof payload.workItemId !== "string" || !EVENT_ID.test(payload.workItemId)) return null;
-		return payload;
-	} catch {
-		return null;
-	}
-}
-
 function pemToDer(pem: string): ArrayBuffer {
 	const body = pem.replace(/-----(BEGIN|END) [A-Z ]+-----/gu, "").replace(/\s+/gu, "");
 	const bytes = Uint8Array.from(atob(body), (char) => char.charCodeAt(0));
 	return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
 }
 
-async function appJwt(env: Env): Promise<string> {
-	const now = Math.floor(Date.now() / 1000);
-	const header = base64Url(encoder.encode(JSON.stringify({ alg: "RS256", typ: "JWT" })));
-	const payload = base64Url(encoder.encode(JSON.stringify({ iat: now - 30, exp: now + 540, iss: env.GITHUB_APP_ID })));
-	const key = await crypto.subtle.importKey("pkcs8", pemToDer(env.GITHUB_APP_PRIVATE_KEY), { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, ["sign"]);
-	const signature = new Uint8Array(await crypto.subtle.sign("RSASSA-PKCS1-v1_5", key, encoder.encode(`${header}.${payload}`)));
-	return `${header}.${payload}.${base64Url(signature)}`;
+function validIssueNumber(value: number): boolean {
+	return Number.isSafeInteger(value) && value > 0 && value <= 999_999_999;
 }
 
-async function installationToken(env: Env): Promise<string> {
-	const response = await fetch(`https://api.github.com/app/installations/${encodeURIComponent(env.GITHUB_APP_INSTALLATION_ID)}/access_tokens`, {
-		method: "POST",
-		headers: {
-			accept: "application/vnd.github+json",
-			authorization: `Bearer ${await appJwt(env)}`,
-			"user-agent": "app-harness-os-git-proxy",
-			"x-github-api-version": "2022-11-28",
-		},
-	});
-	if (!response.ok) throw new Error(`GitHub App installation token request failed (${response.status}).`);
-	const body = await response.json() as { token?: unknown };
-	if (typeof body.token !== "string" || !body.token) throw new Error("GitHub App returned no installation token.");
-	return body.token;
+function validText(value: string): boolean {
+	return Boolean(value) && SAFE_ISSUE_TEXT.test(value);
 }
 
-function json(value: unknown, status = 200): Response {
-	return new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" } });
+function validEventId(value: string): boolean {
+	return EVENT_ID.test(value);
 }
 
-function upstreamFailure(stage: string, response: Response): Response {
-	console.error("GitHub App identity bridge upstream rejection", { stage, status: response.status });
-	return new Response(`GitHub write unavailable at ${stage} (upstream ${response.status})`, { status: 503 });
+function validIdentifier(value: string): boolean {
+	return SIMPLE_IDENTIFIER.test(value);
 }
 
-function validIssueNumber(value: string | undefined): number | null {
-	if (!value || !/^[1-9]\d{0,8}$/u.test(value)) return null;
-	const number = Number(value);
-	return Number.isSafeInteger(number) ? number : null;
+function safeBranchName(value: string): boolean {
+	return !value.includes("..") && !value.startsWith("-") && !value.endsWith("/");
 }
 
-function readText(value: unknown): string | null {
-	if (typeof value !== "string" || !value || !SAFE_ISSUE_TEXT.test(value)) return null;
-	return value;
+function validTimestamp(value: string): boolean {
+	return Number.isFinite(Date.parse(value)) && /^\d{4}-\d{2}-\d{2}T/u.test(value);
 }
 
-function readEventId(value: unknown): string | null {
-	return typeof value === "string" && EVENT_ID.test(value) ? value : null;
+function promotionRunName(dispatchKey: string): string {
+	return `App Harness promotion · ${dispatchKey}`;
 }
 
-function readClassification(value: unknown): Classification | null {
-	return typeof value === "string" && Object.hasOwn(CLASSIFICATION_LABELS, value) ? value as Classification : null;
+function candidateRunName(pullRequest: number, headSha: string): string {
+	return `App Harness candidate · PR #${pullRequest} · ${headSha}`;
 }
 
-function enumValue<T extends readonly string[]>(value: unknown, allowed: T): T[number] | null {
-	return typeof value === "string" && (allowed as readonly string[]).includes(value) ? value as T[number] : null;
+function enumValue<T extends readonly string[]>(value: unknown, allowed: T): value is T[number] {
+	return typeof value === "string" && (allowed as readonly string[]).includes(value);
 }
 
-function readModelClassification(value: unknown): ModelClassification | null {
-	if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-	const raw = value as Record<string, unknown>;
-	const changeType = enumValue(raw.changeType, CHANGE_TYPES);
-	const scope = enumValue(raw.scope, SCOPES);
-	const risk = enumValue(raw.risk, RISKS);
-	const affectedSurface = enumValue(raw.affectedSurface, SURFACES);
-	const executionEligibility = enumValue(raw.executionEligibility, EXECUTIONS);
-	const ciProfile = enumValue(raw.ciProfile, CI_PROFILES);
-	if (!changeType || !scope || !risk || !affectedSurface || typeof raw.reversible !== "boolean" || !executionEligibility || !ciProfile) return null;
-	return { changeType, scope, risk, affectedSurface, reversible: raw.reversible, executionEligibility, ciProfile };
+function validModelClassification(value: ModelClassification): boolean {
+	return enumValue(value.changeType, CHANGE_TYPES)
+		&& enumValue(value.scope, SCOPES)
+		&& enumValue(value.risk, RISKS)
+		&& enumValue(value.affectedSurface, SURFACES)
+		&& typeof value.reversible === "boolean"
+		&& enumValue(value.executionEligibility, EXECUTIONS)
+		&& enumValue(value.ciProfile, CI_PROFILES);
 }
 
-function modelClassificationLabels(classification: ModelClassification | null): string[] {
+function modelClassificationLabels(classification: ModelClassification | undefined): string[] {
 	if (!classification) return [];
 	return [
 		`change-${classification.changeType}`,
@@ -225,22 +174,12 @@ function modelClassificationLabels(classification: ModelClassification | null): 
 	];
 }
 
-async function readJson(request: Request): Promise<Record<string, unknown> | null> {
-	if (!request.headers.get("content-type")?.toLowerCase().includes("application/json")) return null;
-	try {
-		const value = await request.json();
-		return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
-	} catch {
-		return null;
-	}
-}
-
 function githubHeaders(token: string): HeadersInit {
 	return {
 		accept: "application/vnd.github+json",
 		authorization: `Bearer ${token}`,
 		"content-type": "application/json",
-		"user-agent": "app-harness-os-git-proxy",
+		"user-agent": "app-harness-github-capability",
 		"x-github-api-version": "2022-11-28",
 	};
 }
@@ -253,158 +192,201 @@ function durableReferenceBody(eventId: string): string {
 	return `GitHub rejected the complete representation as unprocessable. The full text remains preserved in durable App Harness work item \`${eventId}\`.`;
 }
 
-async function withDurableReferenceFallback(
-	eventId: string,
-	body: string,
-	write: (body: string) => Promise<Response>,
-): Promise<Response> {
+async function withDurableReferenceFallback(eventId: string, body: string, write: (body: string) => Promise<Response>): Promise<Response> {
 	const result = await write(body);
 	return result.status === 422 ? write(durableReferenceBody(eventId)) : result;
 }
 
-async function upsertStatusComment(env: Env, token: string, issueNumber: number, eventId: string, body: string): Promise<Response> {
-	const marker = eventMarker(eventId);
-	const text = `${body}\n\n${marker}`;
-	const comments = await fetch(`https://api.github.com/repos/${env.ALLOWED_REPOSITORY}/issues/${issueNumber}/comments?per_page=100`, { headers: githubHeaders(token) });
-	if (!comments.ok) return comments;
-	const existing = await comments.json() as Array<{ id?: unknown; body?: unknown }>;
-	const matched = existing.find((comment) => typeof comment.id === "number" && typeof comment.body === "string" && comment.body.includes(marker));
-	if (matched && typeof matched.id === "number") {
-		return fetch(`https://api.github.com/repos/${env.ALLOWED_REPOSITORY}/issues/comments/${matched.id}`, { method: "PATCH", headers: githubHeaders(token), body: JSON.stringify({ body: text }) });
+function productionUrl(env: GitHubBridgeEnv, value: string): string {
+	const candidate = new URL(value);
+	const origin = new URL(env.PRODUCTION_ORIGIN);
+	if (candidate.protocol !== "https:" || candidate.origin !== origin.origin) throw new Error("Deployment URL is outside the configured production origin.");
+	return candidate.toString();
+}
+
+/** A small private capability, suitable for a named service binding. */
+export class GitHubCapability {
+	private readonly env: GitHubBridgeEnv;
+
+	constructor(env: GitHubBridgeEnv) {
+		this.env = env;
 	}
-	return fetch(`https://api.github.com/repos/${env.ALLOWED_REPOSITORY}/issues/${issueNumber}/comments`, { method: "POST", headers: githubHeaders(token), body: JSON.stringify({ body: text }) });
-}
 
-async function reconcileClassification(env: Env, token: string, issueNumber: number, classification: Classification, modelClassification: ModelClassification | null): Promise<Response> {
-	const current = await fetch(`https://api.github.com/repos/${env.ALLOWED_REPOSITORY}/issues/${issueNumber}`, { headers: githubHeaders(token) });
-	if (!current.ok) return current;
-	const issue = await current.json() as { labels?: Array<{ name?: unknown }> };
-	const labels = (issue.labels ?? []).flatMap((label) => typeof label.name === "string" ? [label.name] : []).filter((label) => !MANAGED_CLASSIFICATION_LABELS.has(label));
-	labels.push(...CLASSIFICATION_LABELS[classification], ...modelClassificationLabels(modelClassification));
-	return fetch(`https://api.github.com/repos/${env.ALLOWED_REPOSITORY}/issues/${issueNumber}`, { method: "PATCH", headers: githubHeaders(token), body: JSON.stringify({ labels }) });
-}
-
-async function findIssueByMarker(env: Env, token: string, eventId: string): Promise<{ number: number; htmlUrl: string } | null> {
-	const query = new URLSearchParams({ q: `repo:${env.ALLOWED_REPOSITORY} is:issue in:body "${eventMarker(eventId)}"`, per_page: "2" });
-	const response = await fetch(`https://api.github.com/search/issues?${query}`, { headers: githubHeaders(token) });
-	if (!response.ok) throw new Error(`GitHub issue search failed (${response.status}).`);
-	const body = await response.json() as { items?: Array<{ number?: unknown; html_url?: unknown }> };
-	const issue = body.items?.[0];
-	return typeof issue?.number === "number" && typeof issue.html_url === "string" ? { number: issue.number, htmlUrl: issue.html_url } : null;
-}
-
-function productionUrl(env: Env, value: unknown): string | null {
-	if (typeof value !== "string" || value.length > 1024) return null;
-	try {
-		const candidate = new URL(value);
-		const origin = new URL(env.PRODUCTION_ORIGIN);
-		return candidate.protocol === "https:" && candidate.origin === origin.origin ? candidate.toString() : null;
-	} catch {
-		return null;
+	private async appJwt(): Promise<string> {
+		const now = Math.floor(Date.now() / 1000);
+		const header = base64Url(encoder.encode(JSON.stringify({ alg: "RS256", typ: "JWT" })));
+		const payload = base64Url(encoder.encode(JSON.stringify({ iat: now - 30, exp: now + 540, iss: this.env.GITHUB_APP_ID })));
+		const key = await crypto.subtle.importKey("pkcs8", pemToDer(this.env.GITHUB_APP_PRIVATE_KEY), { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, ["sign"]);
+		const signature = new Uint8Array(await crypto.subtle.sign("RSASSA-PKCS1-v1_5", key, encoder.encode(`${header}.${payload}`)));
+		return `${header}.${payload}.${base64Url(signature)}`;
 	}
-}
 
-async function handleIssueBridge(request: Request, env: Env, url: URL): Promise<Response | null> {
-	if (request.method !== "POST") return null;
-	const create = url.pathname === "/v1/issues";
-	const issuePath = ISSUE_PATH.exec(url.pathname);
-	const labelPath = ISSUE_LABELS_PATH.exec(url.pathname);
-	const statusPath = ISSUE_STATUS_PATH.exec(url.pathname);
-	const closePath = ISSUE_CLOSE_PATH.exec(url.pathname);
-	if (!create && !issuePath && !labelPath && !statusPath && !closePath) return null;
-	const input = await readJson(request);
-	if (!input) return new Response("Not found", { status: 404 });
-	const eventId = readEventId(input.eventId);
-	if (!eventId) return new Response("Not found", { status: 404 });
-	if (create) {
-		const title = readText(input.title);
-		const body = readText(input.body);
-		const classification = readClassification(input.classification);
-		if (!title || !body || !classification) return new Response("Not found", { status: 404 });
-		const token = await installationToken(env);
-		const existing = await findIssueByMarker(env, token, eventId);
-		if (existing) return json({ issueNumber: existing.number, issueUrl: existing.htmlUrl, existing: true });
-		const result = await withDurableReferenceFallback(eventId, body, (representation) =>
-			fetch(`https://api.github.com/repos/${env.ALLOWED_REPOSITORY}/issues`, { method: "POST", headers: githubHeaders(token), body: JSON.stringify({ title, body: `${representation}\n\n${eventMarker(eventId)}`, labels: CLASSIFICATION_LABELS[classification] }) }),
+	async createRunnerToken(input: { repository: string; jobId: string; generation: number }): Promise<{ token: string; expiresAt: string }> {
+		if (input.repository !== this.env.ALLOWED_REPOSITORY || !validEventId(input.jobId) || !Number.isSafeInteger(input.generation) || input.generation < 1) {
+			throw new Error("Runner capability is outside the installed repository scope.");
+		}
+		const response = await fetch(`https://api.github.com/app/installations/${encodeURIComponent(this.env.GITHUB_APP_INSTALLATION_ID)}/access_tokens`, {
+			method: "POST",
+			headers: {
+				accept: "application/vnd.github+json",
+				authorization: `Bearer ${await this.appJwt()}`,
+				"user-agent": "app-harness-github-capability",
+				"x-github-api-version": "2022-11-28",
+			},
+		});
+		if (!response.ok) throw new Error(`GitHub App installation token request failed (${response.status}).`);
+		const body = await response.json() as { token?: unknown; expires_at?: unknown };
+		if (typeof body.token !== "string" || !body.token || typeof body.expires_at !== "string") throw new Error("GitHub App returned no installation capability.");
+		return { token: body.token, expiresAt: body.expires_at };
+	}
+
+	private async installationToken(): Promise<string> {
+		return (await this.createRunnerToken({ repository: this.env.ALLOWED_REPOSITORY, jobId: "github-api", generation: 1 })).token;
+	}
+
+	private async findIssueByMarker(token: string, eventId: string): Promise<{ number: number; htmlUrl: string } | null> {
+		const query = new URLSearchParams({ q: `repo:${this.env.ALLOWED_REPOSITORY} is:issue in:body "${eventMarker(eventId)}"`, per_page: "2" });
+		const response = await fetch(`https://api.github.com/search/issues?${query}`, { headers: githubHeaders(token) });
+		if (!response.ok) throw new Error(`GitHub issue search failed (${response.status}).`);
+		const body = await response.json() as { items?: Array<{ number?: unknown; html_url?: unknown }> };
+		const issue = body.items?.[0];
+		return typeof issue?.number === "number" && typeof issue.html_url === "string" ? { number: issue.number, htmlUrl: issue.html_url } : null;
+	}
+
+	private async upsertStatusComment(token: string, issueNumber: number, eventId: string, body: string): Promise<Response> {
+		const marker = eventMarker(eventId);
+		const text = `${body}\n\n${marker}`;
+		const comments = await fetch(`https://api.github.com/repos/${this.env.ALLOWED_REPOSITORY}/issues/${issueNumber}/comments?per_page=100`, { headers: githubHeaders(token) });
+		if (!comments.ok) return comments;
+		const existing = await comments.json() as Array<{ id?: unknown; body?: unknown }>;
+		const matched = existing.find((comment) => typeof comment.id === "number" && typeof comment.body === "string" && comment.body.includes(marker));
+		if (matched && typeof matched.id === "number") {
+			return fetch(`https://api.github.com/repos/${this.env.ALLOWED_REPOSITORY}/issues/comments/${matched.id}`, { method: "PATCH", headers: githubHeaders(token), body: JSON.stringify({ body: text }) });
+		}
+		return fetch(`https://api.github.com/repos/${this.env.ALLOWED_REPOSITORY}/issues/${issueNumber}/comments`, { method: "POST", headers: githubHeaders(token), body: JSON.stringify({ body: text }) });
+	}
+
+	private async reconcileClassification(token: string, issueNumber: number, classification: Classification, modelClassification?: ModelClassification): Promise<Response> {
+		const current = await fetch(`https://api.github.com/repos/${this.env.ALLOWED_REPOSITORY}/issues/${issueNumber}`, { headers: githubHeaders(token) });
+		if (!current.ok) return current;
+		const issue = await current.json() as { labels?: Array<{ name?: unknown }> };
+		const labels = (issue.labels ?? []).flatMap((label) => typeof label.name === "string" ? [label.name] : []).filter((label) => !MANAGED_CLASSIFICATION_LABELS.has(label));
+		labels.push(...CLASSIFICATION_LABELS[classification], ...modelClassificationLabels(modelClassification));
+		return fetch(`https://api.github.com/repos/${this.env.ALLOWED_REPOSITORY}/issues/${issueNumber}`, { method: "PATCH", headers: githubHeaders(token), body: JSON.stringify({ labels }) });
+	}
+
+	async createIssue(input: CreateIssueInput): Promise<{ issueNumber: number; issueUrl: string; existing?: true }> {
+		if (!validEventId(input.eventId) || !validText(input.title) || !validText(input.body) || !Object.hasOwn(CLASSIFICATION_LABELS, input.classification)) throw new Error("Invalid issue projection input.");
+		const token = await this.installationToken();
+		const existing = await this.findIssueByMarker(token, input.eventId);
+		if (existing) return { issueNumber: existing.number, issueUrl: existing.htmlUrl, existing: true };
+		const result = await withDurableReferenceFallback(input.eventId, input.body, (representation) =>
+			fetch(`https://api.github.com/repos/${this.env.ALLOWED_REPOSITORY}/issues`, { method: "POST", headers: githubHeaders(token), body: JSON.stringify({ title: input.title, body: `${representation}\n\n${eventMarker(input.eventId)}`, labels: CLASSIFICATION_LABELS[input.classification] }) }),
 		);
-		if (!result.ok) return new Response("GitHub write unavailable", { status: 503 });
+		if (!result.ok) throw new Error(`GitHub issue creation failed (${result.status}).`);
 		const issue = await result.json() as { number?: unknown; html_url?: unknown };
-		return typeof issue.number === "number" && typeof issue.html_url === "string" ? json({ issueNumber: issue.number, issueUrl: issue.html_url }) : new Response("GitHub write unavailable", { status: 503 });
+		if (typeof issue.number !== "number" || typeof issue.html_url !== "string") throw new Error("GitHub issue creation returned no issue.");
+		return { issueNumber: issue.number, issueUrl: issue.html_url };
 	}
-	const issueNumber = validIssueNumber((issuePath ?? labelPath ?? statusPath ?? closePath)?.[1]);
-	if (!issueNumber) return new Response("Not found", { status: 404 });
-	if (labelPath) {
-		const classification = readClassification(input.classification);
-		const modelClassification = input.modelClassification === undefined ? null : readModelClassification(input.modelClassification);
-		if (!classification || (input.modelClassification !== undefined && !modelClassification)) return new Response("Not found", { status: 404 });
-		const token = await installationToken(env);
-		const result = await reconcileClassification(env, token, issueNumber, classification, modelClassification);
-		return result.ok ? json({ issueNumber, classification, modelClassification: Boolean(modelClassification) }) : new Response("GitHub write unavailable", { status: 503 });
-	}
-	if (statusPath) {
-		const body = readText(input.body);
-		if (!body) return new Response("Not found", { status: 404 });
-		const token = await installationToken(env);
-		const result = await withDurableReferenceFallback(eventId, body, (representation) => upsertStatusComment(env, token, issueNumber, eventId, representation));
-		return result.ok ? json({ issueNumber, eventId }) : new Response("GitHub write unavailable", { status: 503 });
-	}
-	if (closePath) {
-		const deploymentUrl = productionUrl(env, input.deploymentUrl);
-		const body = readText(input.body);
-		if (!deploymentUrl || !body) return new Response("Not found", { status: 404 });
-		const live = await fetch(deploymentUrl, { method: "GET", redirect: "follow", headers: { "user-agent": "app-harness-os-git-proxy-verifier" } });
-		if (!live.ok) return upstreamFailure("deployment-verification", live);
-		await live.body?.cancel();
-		const token = await installationToken(env);
-		const labels = await reconcileClassification(env, token, issueNumber, "deployed", null);
-		if (!labels.ok) return upstreamFailure("completion-labels", labels);
-		const comment = await withDurableReferenceFallback(eventId, `${body}\n\nVerified reachable deployment: ${deploymentUrl}`, (representation) => upsertStatusComment(env, token, issueNumber, eventId, representation));
-		if (!comment.ok) return upstreamFailure("completion-comment", comment);
-		const close = await fetch(`https://api.github.com/repos/${env.ALLOWED_REPOSITORY}/issues/${issueNumber}`, { method: "PATCH", headers: githubHeaders(token), body: JSON.stringify({ state: "closed" }) });
-		return close.ok ? json({ issueNumber, state: "closed", deploymentUrl }) : upstreamFailure("issue-close", close);
-	}
-	return new Response("Not found", { status: 404 });
-}
 
-export default {
-	async fetch(request: Request, env: Env): Promise<Response> {
-		if (request.method !== "GET" && request.method !== "POST") return new Response("Not found", { status: 404 });
-		const url = new URL(request.url);
-		const identityRoute = url.pathname === "/v1/issues" || ISSUE_PATH.test(url.pathname) || ISSUE_LABELS_PATH.test(url.pathname) || ISSUE_STATUS_PATH.test(url.pathname) || ISSUE_CLOSE_PATH.test(url.pathname);
-		if (identityRoute) {
-			const assertion = await validateCoordinatorAssertion(request, env);
-			if (!assertion) return new Response("Not found", { status: 404 });
-			try {
-				const issueResponse = await handleIssueBridge(request, env, url);
-				if (issueResponse) return issueResponse;
-			} catch (error) {
-				console.error("GitHub App identity bridge failure", { workItemId: assertion.workItemId, error: error instanceof Error ? error.message : "unknown" });
-				return new Response("GitHub write unavailable", { status: 503 });
-			}
-			return new Response("Not found", { status: 404 });
+	async updateClassification(input: UpdateClassificationInput): Promise<{ issueNumber: number; classification: Classification }> {
+		if (!validIssueNumber(input.issueNumber) || !Object.hasOwn(CLASSIFICATION_LABELS, input.classification) || (input.modelClassification && !validModelClassification(input.modelClassification))) throw new Error("Invalid classification projection input.");
+		const result = await this.reconcileClassification(await this.installationToken(), input.issueNumber, input.classification, input.modelClassification);
+		if (!result.ok) throw new Error(`GitHub classification update failed (${result.status}).`);
+		return { issueNumber: input.issueNumber, classification: input.classification };
+	}
+
+	async postStatus(input: PostStatusInput): Promise<{ issueNumber: number; eventId: string }> {
+		if (!validIssueNumber(input.issueNumber) || !validEventId(input.eventId) || !validText(input.body)) throw new Error("Invalid issue status input.");
+		const result = await withDurableReferenceFallback(input.eventId, input.body, async (representation) => this.upsertStatusComment(await this.installationToken(), input.issueNumber, input.eventId, representation));
+		if (!result.ok) throw new Error(`GitHub status update failed (${result.status}).`);
+		return { issueNumber: input.issueNumber, eventId: input.eventId };
+	}
+
+	async closeAfterDeployment(input: CloseAfterDeploymentInput): Promise<{ issueNumber: number; state: "closed"; deploymentUrl: string }> {
+		if (!validIssueNumber(input.issueNumber) || !validEventId(input.eventId) || !validText(input.body)) throw new Error("Invalid deployment completion input.");
+		const deploymentUrl = productionUrl(this.env, input.deploymentUrl);
+		const live = await fetch(deploymentUrl, { method: "GET", redirect: "follow", headers: { "user-agent": "app-harness-github-capability-verifier" } });
+		if (!live.ok) throw new Error(`Deployment verification failed (${live.status}).`);
+		await live.body?.cancel();
+		const token = await this.installationToken();
+		const labels = await this.reconcileClassification(token, input.issueNumber, "deployed");
+		if (!labels.ok) throw new Error(`GitHub completion label update failed (${labels.status}).`);
+		const comment = await withDurableReferenceFallback(input.eventId, `${input.body}\n\nVerified reachable deployment: ${deploymentUrl}`, (representation) => this.upsertStatusComment(token, input.issueNumber, input.eventId, representation));
+		if (!comment.ok) throw new Error(`GitHub completion comment failed (${comment.status}).`);
+		const close = await fetch(`https://api.github.com/repos/${this.env.ALLOWED_REPOSITORY}/issues/${input.issueNumber}`, { method: "PATCH", headers: githubHeaders(token), body: JSON.stringify({ state: "closed" }) });
+		if (!close.ok) throw new Error(`GitHub issue close failed (${close.status}).`);
+		return { issueNumber: input.issueNumber, state: "closed", deploymentUrl };
+	}
+
+	async getMainSha(): Promise<{ sha: string }> {
+		const response = await fetch(`https://api.github.com/repos/${this.env.ALLOWED_REPOSITORY}/git/ref/heads/main`, { headers: githubHeaders(await this.installationToken()) });
+		if (!response.ok) throw new Error(`GitHub main reference read failed (${response.status}).`);
+		const body = await response.json() as { object?: { sha?: unknown } };
+		if (typeof body.object?.sha !== "string" || !GIT_SHA.test(body.object.sha)) throw new Error("GitHub main reference returned no immutable SHA.");
+		return { sha: body.object.sha };
+	}
+
+	async getCandidate(input: CandidateObservationInput): Promise<{ number: number; url: string; headSha: string; base: string; state: string } | null> {
+		if (!validIdentifier(input.branch) || !validIdentifier(input.pullRequestBase) || !safeBranchName(input.branch) || !safeBranchName(input.pullRequestBase)) throw new Error("Invalid candidate observation input.");
+		const owner = this.env.ALLOWED_REPOSITORY.split("/")[0];
+		const query = new URLSearchParams({ state: "all", head: `${owner}:${input.branch}`, base: input.pullRequestBase, per_page: "100" });
+		const response = await fetch(`https://api.github.com/repos/${this.env.ALLOWED_REPOSITORY}/pulls?${query}`, { headers: githubHeaders(await this.installationToken()) });
+		if (!response.ok) throw new Error(`GitHub candidate observation failed (${response.status}).`);
+		const pulls = await response.json() as Array<{ number?: unknown; html_url?: unknown; state?: unknown; head?: { ref?: unknown; sha?: unknown }; base?: { ref?: unknown } }>;
+		const candidate = pulls.find((pull) => pull.head?.ref === input.branch && pull.base?.ref === input.pullRequestBase);
+		if (!candidate) return null;
+		if (!validIssueNumber(candidate.number as number) || typeof candidate.html_url !== "string" || typeof candidate.state !== "string" || typeof candidate.head?.sha !== "string" || !GIT_SHA.test(candidate.head.sha)) throw new Error("GitHub candidate observation returned an invalid response.");
+		return { number: candidate.number as number, url: candidate.html_url, headSha: candidate.head.sha, base: input.pullRequestBase, state: candidate.state };
+	}
+
+	async dispatchPromotion(input: DispatchPromotionInput): Promise<{ dispatchKey: string; dispatched: true }> {
+		if (!validIssueNumber(input.pullRequest) || !validIssueNumber(input.issueNumber) || !validIdentifier(input.stackId) || !validIdentifier(input.dispatchKey) || !validIdentifier(input.parentBranch) || !GIT_SHA.test(input.headSha) || !Number.isSafeInteger(input.generation) || input.generation < 1 || !enumValue(input.ciProfile, CI_PROFILES)) {
+			throw new Error("Invalid promotion dispatch input.");
 		}
-		const assertion = await validateAssertion(request, env);
-		if (!assertion) return new Response("Not found", { status: 404 });
-		try {
-			const match = GIT_PATH.exec(url.pathname);
-			if (!match || `${match[1]}/${match[2]}`.toLowerCase() !== env.ALLOWED_REPOSITORY.toLowerCase()) return new Response("Not found", { status: 404 });
-			const headers = new Headers(request.headers);
-			headers.delete("authorization");
-			headers.delete("x-app-harness-assertion");
-			headers.delete("host");
-			headers.set("authorization", `Basic ${btoa(`x-access-token:${await installationToken(env)}`)}`);
-			headers.set("user-agent", "app-harness-os-git-proxy");
-			const upstream = await fetch(`https://github.com${url.pathname}${url.search}`, {
-				method: request.method,
-				headers,
-				body: request.method === "POST" ? request.body : undefined,
-			});
-			const responseHeaders = new Headers(upstream.headers);
-			responseHeaders.delete("set-cookie");
-			return new Response(upstream.body, { status: upstream.status, headers: responseHeaders });
-		} catch (error) {
-			console.error("git credential proxy failure", { jobId: assertion.jobId, generation: assertion.generation, error: error instanceof Error ? error.message : "unknown" });
-			return new Response("Credential bridge unavailable", { status: 503 });
-		}
-	},
-};
+		const response = await fetch(`https://api.github.com/repos/${this.env.ALLOWED_REPOSITORY}/actions/workflows/os-stack-promote.yml/dispatches`, {
+			method: "POST",
+			headers: githubHeaders(await this.installationToken()),
+			body: JSON.stringify({ ref: "main", inputs: {
+				pull_request: String(input.pullRequest), stack_id: input.stackId, generation: String(input.generation), issue_number: String(input.issueNumber), parent_branch: input.parentBranch, head_sha: input.headSha, dispatch_key: input.dispatchKey, ci_profile: input.ciProfile,
+			} }),
+		});
+		if (!response.ok) throw new Error(`GitHub promotion dispatch failed (${response.status}).`);
+		return { dispatchKey: input.dispatchKey, dispatched: true };
+	}
+
+	async observeCandidateValidation(input: CandidateValidationObservationInput): Promise<{ runId: number; status: string; conclusion: string | null; url: string; createdAt: string } | null> {
+		if (!validIssueNumber(input.pullRequest) || !GIT_SHA.test(input.headSha)) throw new Error("Invalid candidate validation observation input.");
+		const query = new URLSearchParams({ event: "pull_request_target", per_page: "100" });
+		const response = await fetch(`https://api.github.com/repos/${this.env.ALLOWED_REPOSITORY}/actions/workflows/os-stack-ci.yml/runs?${query}`, { headers: githubHeaders(await this.installationToken()) });
+		if (!response.ok) throw new Error(`GitHub candidate validation observation failed (${response.status}).`);
+		const body = await response.json() as { workflow_runs?: Array<{ id?: unknown; status?: unknown; conclusion?: unknown; html_url?: unknown; display_title?: unknown; created_at?: unknown; event?: unknown; path?: unknown }> };
+		const expectedTitle = candidateRunName(input.pullRequest, input.headSha);
+		const run = body.workflow_runs?.find((candidate) => candidate.display_title === expectedTitle && candidate.event === "pull_request_target" && typeof candidate.path === "string" && candidate.path.startsWith(".github/workflows/os-stack-ci.yml"));
+		if (!run) return null;
+		if (!Number.isSafeInteger(run.id) || (run.id as number) < 1 || typeof run.status !== "string" || (run.conclusion !== null && typeof run.conclusion !== "string") || typeof run.html_url !== "string" || typeof run.created_at !== "string") throw new Error("GitHub candidate validation observation returned an invalid response.");
+		return { runId: run.id as number, status: run.status, conclusion: run.conclusion, url: run.html_url, createdAt: run.created_at };
+	}
+
+	async observeWorkflowRun(input: { runId: number }): Promise<{ runId: number; status: string; conclusion: string | null; url: string }> {
+		if (!Number.isSafeInteger(input.runId) || input.runId < 1) throw new Error("Invalid workflow run identifier.");
+		const response = await fetch(`https://api.github.com/repos/${this.env.ALLOWED_REPOSITORY}/actions/runs/${input.runId}`, { headers: githubHeaders(await this.installationToken()) });
+		if (!response.ok) throw new Error(`GitHub workflow observation failed (${response.status}).`);
+		const body = await response.json() as { status?: unknown; conclusion?: unknown; html_url?: unknown };
+		if (typeof body.status !== "string" || (body.conclusion !== null && typeof body.conclusion !== "string") || typeof body.html_url !== "string") throw new Error("GitHub workflow observation returned an invalid response.");
+		return { runId: input.runId, status: body.status, conclusion: body.conclusion, url: body.html_url };
+	}
+
+	async findPromotionRun(input: PromotionRunObservationInput): Promise<{ runId: number; status: string; conclusion: string | null; url: string; createdAt: string } | null> {
+		if (!validIdentifier(input.dispatchKey) || (input.createdAfter !== undefined && !validTimestamp(input.createdAfter))) throw new Error("Invalid promotion observation input.");
+		const query = new URLSearchParams({ event: "workflow_dispatch", per_page: "100" });
+		const response = await fetch(`https://api.github.com/repos/${this.env.ALLOWED_REPOSITORY}/actions/workflows/os-stack-promote.yml/runs?${query}`, { headers: githubHeaders(await this.installationToken()) });
+		if (!response.ok) throw new Error(`GitHub promotion observation failed (${response.status}).`);
+		const body = await response.json() as { workflow_runs?: Array<{ id?: unknown; status?: unknown; conclusion?: unknown; html_url?: unknown; display_title?: unknown; created_at?: unknown }> };
+		const minimum = input.createdAfter ? Date.parse(input.createdAfter) : Number.NEGATIVE_INFINITY;
+		const run = body.workflow_runs?.find((candidate) => candidate.display_title === promotionRunName(input.dispatchKey) && typeof candidate.created_at === "string" && Date.parse(candidate.created_at) >= minimum);
+		if (!run) return null;
+		if (!Number.isSafeInteger(run.id) || (run.id as number) < 1 || typeof run.status !== "string" || (run.conclusion !== null && typeof run.conclusion !== "string") || typeof run.html_url !== "string" || typeof run.created_at !== "string") throw new Error("GitHub promotion observation returned an invalid response.");
+		return { runId: run.id as number, status: run.status, conclusion: run.conclusion, url: run.html_url, createdAt: run.created_at };
+	}
+}

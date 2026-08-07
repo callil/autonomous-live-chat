@@ -11,11 +11,9 @@ export type AppHarnessProps = {
   onRequest: (submission: AppHarnessSubmission) => Promise<void> | void;
   onOpenActivity?: () => void;
   activityCount?: number;
-  /** @deprecated Product-level request caps were removed. Retained as a no-op for source compatibility. */
-  requestLimit?: number;
 };
 
-const TARGET_SELECTOR = "[data-app-harness-id], [data-target-id]";
+const TARGET_SELECTOR = "[data-app-harness-id]";
 
 function CrosshairIcon() {
   return <svg aria-hidden="true" viewBox="0 0 20 20"><circle cx="10" cy="10" r="4"/><path d="M10 2v4M10 14v4M2 10h4M14 10h4"/></svg>;

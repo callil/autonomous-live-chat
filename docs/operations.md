@@ -17,8 +17,8 @@ npm run check
 - `npm run deploy` deploys only `apps/demo`.
 - `deploy-native-git-runner.yml` builds and deploys the Sandbox runner remotely on GitHub-hosted infrastructure.
 - `deploy-github-bridge.yml` deploys the credential/status bridge.
-- `os-stack-ci.yml` validates immutable candidate heads without privileged deployment credentials.
-- `os-stack-promote.yml` serializes `main` mutation, verifies the tested tree, deploys, and sends the signed reconciliation callback.
+- `os-stack-ci.yml` is evaluated from protected `main`, then validates immutable candidate heads without privileged deployment credentials.
+- `os-stack-promote.yml` reads the matching GitHub Actions validation directly, serializes `main` mutation, verifies the tested tree, and deploys.
 
 Ordinary demo releases do not rebuild or reset the runner or bridge Durable Objects.
 
@@ -30,7 +30,7 @@ Repository Actions secrets are installed into the relevant Worker via standard i
 - OpenAI API credential used inside the coding runner;
 - GitHub App ID, installation ID, and private key held by the bridge/runner Worker boundary;
 - coordinator/runner HMAC secrets used to bind calls to durable jobs;
-- promotion callback secret.
+- no promotion callback secret: the persistent operator records final workflow evidence in the durable ledger after reading GitHub's immutable run and deployment artifacts.
 
 Rotate a secret for suspected disclosure or planned lifecycle policy—not as a general retry mechanism. A deployment or upstream outage should resume from durable state with the same uncompromised identity.
 
