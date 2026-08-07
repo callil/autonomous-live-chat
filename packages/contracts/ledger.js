@@ -149,7 +149,10 @@ export function recordLedgerPlan(item, { operatorId, leaseId, plan, now }) {
 	const at = timestamp(now, "Plan time");
 	requireLease(item, { operatorId, leaseId }, at);
 	// A delegated plan may be revised until an inner implementation run exists.
-	if (item.phase !== "classified" && !(item.phase === "delegated" && !item.activeImplementation)) throw new Error("Only classified work can receive a plan.");
+	// A plan may be revised until a candidate has merged: classified work,
+	// delegated work with no live run, and a candidate whose validation failed
+	// (a restack) are all legal replan points.
+	if (!(item.phase === "classified" || (item.phase === "delegated" && !item.activeImplementation) || item.phase === "candidate" || item.phase === "validating")) throw new Error("Only classified work can receive a plan.");
 	if (!plan || typeof plan !== "object") throw new Error("Plan is required.");
 	const issue = item.artifacts?.issue;
 	if (!issue || !Number.isSafeInteger(issue.number) || issue.number < 1) throw new Error("A plan requires the existing GitHub issue artifact.");
@@ -179,9 +182,16 @@ export function recordLedgerPlan(item, { operatorId, leaseId, plan, now }) {
 		throw new Error("Only a one-node root stack plan is currently supported: nodeId must be root.");
 	}
 	if (item.plan && normalized.revision <= item.plan.revision) throw new Error(`A revised plan must use revision ${item.plan.revision + 1} or later.`);
+	// A revised plan starts a fresh candidate lineage: stale candidate and
+	// validation evidence from the previous generation must not survive it.
+	const artifacts = { ...item.artifacts };
+	delete artifacts.candidate;
+	delete artifacts.validation;
+	delete artifacts.pullRequestUrl;
 	return next(item, "delegated", at, {
 		plan: normalized,
 		activeImplementation: null,
+		artifacts,
 	});
 }
 

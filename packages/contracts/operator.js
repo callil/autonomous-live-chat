@@ -64,6 +64,7 @@ export function assertOperatorCommandAllowed(workItem, command, now) {
 	}
 	if (command.kind === "promote") {
 		if (workItem.phase !== "validating" || workItem.artifacts.validation === undefined) throw new Error("Promotion requires a validated immutable candidate.");
+		if (workItem.artifacts.validation?.conclusion !== "success") throw new Error("Promotion requires a successful validation. Validation failed or is unfinished: stage a revised plan (next revision, next generation, fresh baseSha) to restack the candidate.");
 		return;
 	}
 	if (command.kind === "record-state") return;
