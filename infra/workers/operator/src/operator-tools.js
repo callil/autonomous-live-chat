@@ -17,6 +17,7 @@ export const SYSTEM_PROMPT =
 	+ "Results arrive by push: never poll getCandidate. stageCandidate from a pull-request-opened State.facts.runnerResult; on failure or implementationProblem, stageImplementation again or replan. "
 	+ "Stage from pushed State.facts. On validation success stageState validating, then WAIT: candidates auto-merge and deploy on their own. When facts.merged and a success facts.mainDeploy arrive, stageState deployed with both as artifacts, then completed. "
 	+ "stagePromotion is the fallback if no merged fact arrives after a long wait. "
+	+ "On a mergeTimeoutProblem, observeCandidatePullRequest: if mergeableState is dirty the candidate is conflicted — restack immediately (stagePlan next generation, fresh baseSha); if merged, keep waiting for facts. "
 	+ "On validation or promotion failure, or phase retryable (the failed run was already cleared), restack: stagePlan with the next generation and a fresh getMainSha baseSha; never wait for a cleared run. "
 	+ "Observe only when the phase needs an answer and no fact is present. "
 	+ "When only an external result can advance, reply WAITING. Reply exactly PROGRESSED, WAITING, PARKED:<code>, or COMPLETE.";
@@ -43,6 +44,7 @@ export const TOOLS = [
 		pullRequest: { type: "integer" },
 		headSha: { type: "string" },
 	}),
+	tool("observeCandidatePullRequest", "Read the recorded candidate pull request's live merge state (state, merged, mergeableState). Use on a mergeTimeoutProblem: mergeableState dirty means the candidate is conflicted and must restack. The pull request number is supplied by the loop.", {}),
 	tool("findPromotionRun", "Read the deterministic GitHub Actions promotion run for a dispatch key. Fallback only: the result normally arrives by push in State.facts.promotion.", {
 		dispatchKey: { type: "string" },
 		createdAfter: { type: ["string", "null"] },
@@ -123,7 +125,7 @@ export const TOOLS = [
 	}),
 ];
 
-export const OBSERVATION_TOOLS = new Set(["getMainSha", "getCandidate", "observeCandidateValidation", "findPromotionRun", "inspectPromotionRun", "inspectImplementation"]);
+export const OBSERVATION_TOOLS = new Set(["getMainSha", "getCandidate", "observeCandidatePullRequest", "observeCandidateValidation", "findPromotionRun", "inspectPromotionRun", "inspectImplementation"]);
 export const STAGE_TOOLS = new Set([...TOOLS.map((entry) => entry.function.name)].filter((name) => !OBSERVATION_TOOLS.has(name)));
 
 function stageArtifacts(value) {

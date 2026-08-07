@@ -240,6 +240,13 @@ export class OperatorTurn extends DurableObject<Env> {
 					case "getMainSha": return { ...await this.env.GITHUB.getMainSha() };
 					case "getCandidate": return { candidate: await this.env.GITHUB.getCandidate(args as { branch: string; pullRequestBase: string }) };
 					case "observeCandidateValidation": return { validation: await this.env.GITHUB.observeCandidateValidation(args as { pullRequest: number; headSha: string }) };
+					case "observeCandidatePullRequest": {
+						// The pull request number is the ledger's recorded candidate
+						// identity, loop-injected from the snapshot artifact — never a
+						// model argument, so a typo cannot observe someone else's PR.
+						if (!turn.candidatePr) return { error: "No candidate pull request is recorded for this work item yet." };
+						return { pullRequest: await this.env.GITHUB.observeCandidatePullRequest({ number: turn.candidatePr }) };
+					}
 					case "findPromotionRun": return { run: await this.env.GITHUB.findPromotionRun({ dispatchKey: String(args.dispatchKey), ...(typeof args.createdAfter === "string" ? { createdAfter: args.createdAfter } : {}) }) };
 					case "inspectPromotionRun": return { ...await this.env.GITHUB.observeWorkflowRun(args as { runId: number }) };
 					case "inspectImplementation": {
