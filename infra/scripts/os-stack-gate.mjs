@@ -50,7 +50,7 @@ export function validatePullRequest(pr, commit, files, options, comparison) {
 	if (options.expectedIssue && issue !== options.expectedIssue) throw new Error("Candidate branch does not match the expected issue.");
 	if (options.expectedGeneration && generation !== options.expectedGeneration) throw new Error("Candidate branch does not match the expected generation.");
 	const headSha = exactSha(head.sha, "pull request head");
-	const baseSha = exactSha(base.sha, "pull request base");
+	const baseSha = exactSha(options.recordedParentBase ?? base.sha, "recorded parent base");
 	if (options.expectedHead && headSha !== options.expectedHead) throw new Error("Candidate head changed after orchestration.");
 
 	const open = pr.state === "open";
@@ -169,13 +169,22 @@ async function verifyPullRequestCommand() {
 	const pullRequest = integer(required("PR"), "PR");
 	const expectedHead = process.env.EXPECTED_HEAD ? exactSha(process.env.EXPECTED_HEAD, "EXPECTED_HEAD") : undefined;
 	const pr = await api(`repos/${repo}/pulls/${pullRequest}`);
+	// The immutability contract is against the candidate's RECORDED parent
+	// base, not whatever the base branch has advanced to since: under
+	// auto-merge, main moves constantly and every open candidate would
+	// otherwise read as diverged the moment any sibling lands. Textual
+	// mergeability stays GitHub's job; the trusted claim verified here is
+	// that the history is exactly the recorded base plus new work.
+	const recordedParentBase = (typeof pr.body === "string" ? pr.body : "").match(/- Parent base: `[^`]+` at `([0-9a-f]{40})`/u)?.[1];
+	if (!recordedParentBase) throw new Error("Pull request provenance must record the parent base revision.");
 	const [files, commit, comparison] = await Promise.all([
 		pullRequestFiles(repo, pullRequest),
 		api(`repos/${repo}/git/commits/${pr.head.sha}`),
-		api(`repos/${repo}/compare/${pr.base.sha}...${pr.head.sha}`),
+		api(`repos/${repo}/compare/${recordedParentBase}...${pr.head.sha}`),
 	]);
 	const result = validatePullRequest(pr, commit, files, {
 		repo,
+		recordedParentBase,
 		expectedParent: process.env.EXPECTED_PARENT,
 		expectedHead,
 		expectedIssue: process.env.EXPECTED_ISSUE ? integer(process.env.EXPECTED_ISSUE, "EXPECTED_ISSUE") : undefined,
