@@ -78,6 +78,11 @@ function safeRequest(input) {
 const CLONE_TIMEOUT_MS = 120_000;
 const GIT_TIMEOUT_MS = 60_000;
 const AGENT_TIMEOUT_MS = 260_000;
+// The demo's own test file is dependency-free (plain node, relative imports
+// only), so it runs in the checkout without npm ci. An npm install would blow
+// the run budget; this is the whole reason the local gate is affordable.
+const LOCAL_TEST_TIMEOUT_MS = 30_000;
+const AUTO_MERGE_TIMEOUT_MS = 30_000;
 const GH_STACK_TIMEOUT_MS = 120_000;
 const GITHUB_FETCH_TIMEOUT_MS = 30_000;
 const CALLBACK_TIMEOUT_MS = 15_000;
@@ -414,13 +419,30 @@ async function main() {
 	const headSha = head.stdout.trim();
 	if (!status.success || status.stdout.trim()) return artifact(request, "candidate-failed", { classification: "candidate-working-tree-dirty", agent });
 	if (!head.success || !SHA.test(headSha) || headSha === baseSha) return artifact(request, "candidate-failed", { classification: "candidate-head-unavailable", agent });
+
+	// Local fast-fail gate BEFORE anything is pushed: the demo's own test file
+	// is the cheapest honest signal a candidate is broken. CI remains the merge
+	// authority; this only saves a doomed push-and-validate round trip.
+	postHeartbeat("local-tests");
+	const localTests = await run("node", ["apps/demo/test/composer.test.mjs"], { cwd: request.checkoutDirectory, timeoutMs: LOCAL_TEST_TIMEOUT_MS });
+	if (!localTests.success) return artifact(request, "candidate-failed", { classification: localTests.stderr === "step-timeout" ? "local-tests-timeout" : "local-tests-failed", agent, ...stderrTail(localTests) });
+	postHeartbeat("local-tests-passed");
+
 	const submitted = await submitOneNodeStack(request, headSha);
 	if ("classification" in submitted) return artifact(request, "candidate-failed", { classification: submitted.classification, agent });
 	postHeartbeat("pushed");
 	const pullRequest = await findAndAnnotatePullRequest(request, headSha);
 	if ("classification" in pullRequest) return artifact(request, "candidate-failed", { classification: pullRequest.classification, agent });
 	appendProgress("pull-request-annotated");
-	return artifact(request, "pull-request-opened", { baseSha, headSha, pullRequest, stack: { id: request.candidate.stack.stackId, nodeId: request.candidate.stack.nodeId, branch: request.candidate.stack.branch, parentBranch: request.candidate.stack.parentBranch, topology: submitted.topology }, agent });
+
+	// Fast lane: arm GitHub auto-merge so the PR merges itself the moment the
+	// required provenance and validate-candidate checks pass. Best effort and
+	// non-fatal by design — the operator's promotion dispatch stays the
+	// fallback merge path, so a failure here costs latency, never the run.
+	const autoMergeArm = await run("gh", ["pr", "merge", String(pullRequest.number), "--auto", "--squash"], { cwd: request.checkoutDirectory, timeoutMs: AUTO_MERGE_TIMEOUT_MS });
+	postHeartbeat(autoMergeArm.success ? "auto-merge-armed" : "auto-merge-unarmed");
+
+	return artifact(request, "pull-request-opened", { baseSha, headSha, pullRequest, autoMerge: { armed: autoMergeArm.success }, stack: { id: request.candidate.stack.stackId, nodeId: request.candidate.stack.nodeId, branch: request.candidate.stack.branch, parentBranch: request.candidate.stack.parentBranch, topology: submitted.topology }, agent });
 }
 
 // A wedged child process must never exceed the run budget silently: emit a

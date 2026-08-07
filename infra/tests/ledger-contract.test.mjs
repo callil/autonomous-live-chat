@@ -82,6 +82,50 @@ assert.throws(() => recordLedgerExternalState(validating, {
 	now: 9,
 }), /Only a deployed candidate can complete/, "completion cannot skip immutable candidate validation and deployment");
 
+// ---- deployed truth guard: promotion lane OR auto-merge lane, never neither ----
+const DEPLOY_URL = "https://autonomous-live-chat.example.workers.dev/";
+const MERGED_EVIDENCE = { number: 1, url: "https://github.com/callil/autonomous-live-chat/pull/1", headSha: "2".repeat(40), mergeCommitSha: "3".repeat(40), branch: "app-harness-os/1/g1" };
+const MAIN_DEPLOY_SUCCESS = { runId: 77, url: "https://github.com/callil/autonomous-live-chat/actions/runs/77", conclusion: "success" };
+assert.throws(() => recordLedgerExternalState(validating, {
+	phase: "deployed",
+	artifacts: { deploymentUrl: DEPLOY_URL },
+	now: 9,
+}), /promotion evidence in artifacts\.promotion, or merged plus main-deploy evidence/u, "no evidence, no deployed");
+assert.throws(() => recordLedgerExternalState(validating, {
+	phase: "deployed",
+	artifacts: { deploymentUrl: DEPLOY_URL, merged: MERGED_EVIDENCE },
+	now: 9,
+}), /promotion evidence in artifacts\.promotion, or merged plus main-deploy evidence/u, "a merge alone is intent, not deployment");
+assert.throws(() => recordLedgerExternalState(validating, {
+	phase: "deployed",
+	artifacts: { deploymentUrl: DEPLOY_URL, merged: MERGED_EVIDENCE, mainDeploy: { ...MAIN_DEPLOY_SUCCESS, conclusion: "failure" } },
+	now: 9,
+}), /success conclusion/u, "a failed main deploy run can never certify deployed");
+assert.throws(() => recordLedgerExternalState(validating, {
+	phase: "deployed",
+	artifacts: { deploymentUrl: DEPLOY_URL, mainDeploy: MAIN_DEPLOY_SUCCESS },
+	now: 9,
+}), /promotion evidence in artifacts\.promotion, or merged plus main-deploy evidence/u, "a deploy run without the merged fact proves nothing about this candidate");
+assert.throws(() => recordLedgerExternalState(validating, {
+	phase: "deployed",
+	artifacts: { deploymentUrl: DEPLOY_URL, promotion: { url: "https://github.com/callil/autonomous-live-chat/actions/runs/70", runId: 70 } },
+	now: 9,
+}), /success conclusion/u, "a promotion dispatch receipt without a success conclusion is still intent");
+const autoMergeDeployed = recordLedgerExternalState(validating, {
+	phase: "deployed",
+	artifacts: { deploymentUrl: DEPLOY_URL, merged: MERGED_EVIDENCE, mainDeploy: MAIN_DEPLOY_SUCCESS },
+	now: 9,
+});
+assert.equal(autoMergeDeployed.phase, "deployed", "merged evidence plus a successful main deploy run is a legal fast-lane deployment");
+const autoMergeCompleted = recordLedgerExternalState(autoMergeDeployed, { phase: "completed", now: 10 });
+assert.equal(autoMergeCompleted.phase, "completed", "the fast lane completes through deployed like every other item");
+const promotionDeployed = recordLedgerExternalState(validating, {
+	phase: "deployed",
+	artifacts: { deploymentUrl: DEPLOY_URL, promotion: { url: "https://github.com/callil/autonomous-live-chat/actions/runs/70", runId: 70, conclusion: "success" } },
+	now: 9,
+});
+assert.equal(promotionDeployed.phase, "deployed", "the promotion lane remains a legal deployment path");
+
 // A candidate whose validation failed remains replannable: the restack path
 // stays open without any lease or claim ceremony.
 const restacked = recordLedgerPlan(validating, {

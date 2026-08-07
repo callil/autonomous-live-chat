@@ -137,6 +137,25 @@ assert.match(jobEntrypointSource, /candidate-working-tree-dirty/u);
 assert.match(jobEntrypointSource, /stack-head-not-pushed/u);
 assert.doesNotMatch(jobEntrypointSource, /console\.log/u, "the background process emits only bounded JSONL");
 
+// --- Fast lane: local test gate and auto-merge arming ------------------------
+
+// The dependency-free demo test runs in the checkout BEFORE anything is
+// pushed; npm ci would blow the run budget and must never appear here.
+assert.match(jobEntrypointSource, /LOCAL_TEST_TIMEOUT_MS = 30_000/u, "the local test gate carries its own bounded budget");
+assert.match(jobEntrypointSource, /node", \["apps\/demo\/test\/composer\.test\.mjs"\]/u, "the demo's dependency-free test file runs directly under node");
+assert.doesNotMatch(jobEntrypointSource, /run\("npm"/u, "no npm invocation may enter the bounded sandbox run");
+assert.match(jobEntrypointSource, /local-tests-failed/u);
+assert.match(jobEntrypointSource, /local-tests-timeout/u, "a hung local test is classified distinctly, not folded into failure");
+assert.ok(jobEntrypointSource.indexOf('["apps/demo/test/composer.test.mjs"]') < jobEntrypointSource.indexOf("await submitOneNodeStack"), "local tests run before the branch is pushed");
+
+// Auto-merge is armed immediately after the PR is annotated: bounded and
+// non-fatal, with the operator's promotion dispatch as the fallback path.
+assert.match(jobEntrypointSource, /AUTO_MERGE_TIMEOUT_MS = 30_000/u);
+assert.match(jobEntrypointSource, /gh", \["pr", "merge", String\(pullRequest\.number\), "--auto", "--squash"\]/u, "auto-merge is armed with squash, matching the promotion merge strategy");
+assert.match(jobEntrypointSource, /autoMerge: \{ armed: autoMergeArm\.success \}/u, "the terminal artifact reports whether the fast lane is armed");
+assert.match(jobEntrypointSource, /postHeartbeat\(autoMergeArm\.success \? "auto-merge-armed" : "auto-merge-unarmed"\)/u, "arming emits a progress heartbeat either way and never fails the run");
+assert.ok(jobEntrypointSource.indexOf('"--auto", "--squash"') > jobEntrypointSource.indexOf("pull-request-annotated"), "auto-merge arms only after the PR exists and is annotated");
+
 // The direct agent stages file contents only, so the job entrypoint owns the
 // Git identity, staging, and commit that NanoCodex used to perform itself.
 assert.match(jobEntrypointSource, /"config", "user\.email"/u);
