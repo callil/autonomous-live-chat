@@ -5,6 +5,7 @@ import { AUTHORING_ENVELOPE_POLICY } from "../../../packages/contracts/index.js"
 const html = await readFile(new URL("../public/index.html", import.meta.url), "utf8");
 const entry = await readFile(new URL("../src/entry.ts", import.meta.url), "utf8");
 const worker = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
+const avatarColors = await readFile(new URL("../public/avatar-colors.js", import.meta.url), "utf8");
 const clientScript = html.match(/<script>([\s\S]*?)<\/script>/u)?.[1];
 
 assert.ok(clientScript, "the browser client script is present");
@@ -21,6 +22,9 @@ assert.match(entry, /\.replace\(COMPOSER_HINT, `\$\{COMPOSER_HINT\}\$\{SHIPPED_L
 assert.match(entry, /activity\.replaceChildren\(count\);/u, "the compact activity control removes its original Activity copy");
 assert.doesNotMatch(entry, /active-status-label|icons\.activity/u, "the compact activity control has no Active copy or activity icon");
 assert.match(entry, /count\.textContent = String\(active\.length\);/u, "the active count is displayed without an issue-number prefix");
+assert.match(avatarColors, /const color = avatarColor\(name\.textContent\);/u, "message colors are generated once from the author's name");
+assert.match(avatarColors, /avatar\.style\.color = color;/u, "the generated color is applied to the avatar initial");
+assert.match(avatarColors, /name\.style\.color = color;/u, "the same generated color is applied to the author's name");
 const browserSafeTextPolicy = html.match(/TARGET_SAFE_TEXT_CHARACTERS = (\d+)/u);
 assert.equal(Number(browserSafeTextPolicy?.[1]), AUTHORING_ENVELOPE_POLICY.safeTextCharacters, "the no-build demo mirrors the shared privacy envelope exactly");
 assert.doesNotMatch(worker, /MAX_(?:MESSAGE_LENGTH|REQUEST_LENGTH|STORED_MESSAGES|STORED_ANNOTATIONS|STORED_WORK_ITEMS)/u);
