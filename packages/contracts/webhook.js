@@ -215,7 +215,19 @@ export function matchGithubFactToWorkItem(fact, items, promotions = []) {
 	if (fact.kind === "merged" || fact.kind === "stack") {
 		// The pull request carries both immutable candidate identities: prefer
 		// the recorded candidate head revision, fall back to the plan branch.
-		return ordered.find((item) => item.artifacts?.candidate?.headSha === fact.headSha || item.plan?.branch === fact.branch)?.id ?? null;
+		const exact = ordered.find((item) => item.artifacts?.candidate?.headSha === fact.headSha || item.plan?.branch === fact.branch)?.id;
+		if (exact) return exact;
+		// The durable join is the ISSUE NUMBER inside the branch name: every
+		// generation of a request shares it, and no restack rotates it away. A
+		// merge of ANY generation belongs to the item with that issue - without
+		// this, an item that restacked past its own merge regenerates forever
+		// (observed live: one request reached generation 12 re-implementing its
+		// own shipped change).
+		const issue = Number(/^app-harness-os\/(\d+)\/g\d+$/u.exec(fact.branch ?? "")?.[1]);
+		if (Number.isInteger(issue) && issue > 0) {
+			return ordered.find((item) => item.artifacts?.issue?.number === issue)?.id ?? null;
+		}
+		return null;
 	}
 	return null;
 }

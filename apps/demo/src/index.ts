@@ -785,6 +785,16 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		// promotes without waiting for its next wake.
 		if (parsed.fact.kind === "merged") {
 			for (const workItemId of merged.freshIds) await this.popRoomStackBottom(workItemId, parsed.fact.mergeCommitSha);
+			// A merge of ANY generation means the request is shipped: cancel any
+			// in-flight regeneration mechanically so the item records deployed
+			// from the evidence instead of re-implementing its own change.
+			for (const workItemId of merged.freshIds) {
+				const current = await this.loadWorkItem(workItemId);
+				if (current && !TERMINAL_PHASES.has(current.phase) && current.activeImplementation) {
+					const settled = { ...current, activeImplementation: null, version: current.version + 1, updatedAt: Date.now() };
+					await this.persistTransition(current.version, settled, "The request's pull request merged; the in-flight regeneration was cancelled and the merge evidence stands.", "system").catch(() => undefined);
+				}
+			}
 		}
 		// A stack fact whose base no longer names the node's recorded parent is
 		// GitHub's retarget after the node below merged: mark the node — tip,
