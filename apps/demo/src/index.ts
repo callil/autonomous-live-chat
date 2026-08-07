@@ -139,6 +139,8 @@ type OperatorGatewayTransport = {
 /** External facts recorded by push (runner today, GitHub webhooks next). */
 type ExternalFacts = {
 	runnerResult?: { runId: string; state: string; classification?: string; stderrTail?: string; headSha?: string; pullRequest?: { number: number; url: string }; at: number };
+	/** Live step heartbeat from the running job; last write wins, never deduped against the terminal result. */
+	runnerProgress?: { runId: string; step: string; at: number };
 };
 type ExternalFactInput = { source: "runner"; workItemId: string; runId: string; fact: NonNullable<ExternalFacts["runnerResult"]> };
 
@@ -350,7 +352,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		const current = await this.requireWorkItem(input.workItemId);
 		const result = applyImplementationStart(current, { operatorId: OPERATOR_ID, leaseId: input.leaseId, runId: input.runId, now: Date.now() });
 		if (result.disposition !== "started") return { disposition: result.disposition, item: result.item as StoredWorkItem };
-		const item = await this.persistTransition(current.version, result.item as StoredWorkItem, "The operator delegated the next missing artifact to an isolated NanoCodex run.", "cloudflare-os");
+		const item = await this.persistTransition(current.version, result.item as StoredWorkItem, "The operator delegated the next missing artifact to an isolated coding-agent run.", "cloudflare-os");
 		return { disposition: result.disposition, item };
 	}
 
@@ -593,6 +595,22 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 	 * the operator stages the actual transition itself.
 	 */
 	async ingestExternalFact(input: unknown): Promise<{ accepted: boolean }> {
+		// Live progress heartbeats are recorded under their own fact key with
+		// last-write-wins semantics and no wake, so a heartbeat can never mask
+		// or dedupe the terminal runner result for the same run identifier.
+		const progressFact = normalizeRunnerProgressInput(input);
+		if (progressFact) {
+			const recorded = await this.ctx.storage.transaction(async (txn) => {
+				const item = await txn.get<StoredWorkItem>(this.workItemKey(progressFact.workItemId));
+				if (!item || item.phase !== "implementing" || item.activeImplementation?.runId !== progressFact.runId) return false;
+				const key = `${EXTERNAL_FACT_PREFIX}${item.id}`;
+				const facts = (await txn.get<ExternalFacts>(key)) ?? {};
+				facts.runnerProgress = { runId: progressFact.runId, step: progressFact.step, at: Date.now() };
+				await txn.put(key, facts);
+				return true;
+			});
+			return { accepted: recorded };
+		}
 		const parsed = normalizeExternalFactInput(input);
 		if (!parsed) return { accepted: false };
 		const merged = await this.ctx.storage.transaction(async (txn) => {
@@ -1134,6 +1152,7 @@ function operatorWakeState(item: StoredWorkItem | undefined, actions: StoredOper
 	// Pushed external facts ride the snapshot; only facts for the currently
 	// active implementation run are shown so a stale run cannot masquerade.
 	const runnerResult = facts?.runnerResult && item.activeImplementation && facts.runnerResult.runId === item.activeImplementation.runId ? facts.runnerResult : undefined;
+	const runnerProgress = facts?.runnerProgress && item.activeImplementation && facts.runnerProgress.runId === item.activeImplementation.runId ? facts.runnerProgress : undefined;
 	// Surface a stalled implementation run as a fact: the disposable runner
 	// derives its own process identity, so a re-staged implement command with
 	// a fresh runId starts a clean isolated run instead of resuming a corpse.
@@ -1160,7 +1179,7 @@ function operatorWakeState(item: StoredWorkItem | undefined, actions: StoredOper
 		plan: item.plan,
 		...(planProblem ? { planProblem } : {}),
 		...(implementationProblem ? { implementationProblem } : {}),
-		...(runnerResult ? { facts: { runnerResult } } : {}),
+		...(runnerResult || runnerProgress ? { facts: { ...(runnerResult ? { runnerResult } : {}), ...(runnerProgress ? { runnerProgress } : {}) } } : {}),
 		activeImplementation: item.activeImplementation,
 		artifacts: item.artifacts,
 		actions: actions.slice(-OPERATOR_STATE_ACTION_LIMIT).map((action) => ({
@@ -1190,6 +1209,21 @@ function normalizeOperatorNoteKey(value: unknown): string | undefined {
  * monotonic by construction: one fact per run identifier, first write wins,
  * so a later delivery can never downgrade recorded evidence.
  */
+/** A live heartbeat from the running job: `artifact.progress === true` plus a step name. */
+function normalizeRunnerProgressInput(value: unknown): { workItemId: string; runId: string; step: string } | null {
+	if (!value || typeof value !== "object") return null;
+	const raw = value as Record<string, unknown>;
+	if (raw.source !== "runner") return null;
+	if (typeof raw.workItemId !== "string" || !isUuid(raw.workItemId)) return null;
+	if (typeof raw.runId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$/u.test(raw.runId)) return null;
+	const artifact = raw.artifact;
+	if (!artifact || typeof artifact !== "object") return null;
+	const rawArtifact = artifact as Record<string, unknown>;
+	if (rawArtifact.progress !== true) return null;
+	if (typeof rawArtifact.step !== "string" || !/^[a-z][a-z-]{0,40}$/u.test(rawArtifact.step)) return null;
+	return { workItemId: raw.workItemId, runId: raw.runId, step: rawArtifact.step };
+}
+
 function normalizeExternalFactInput(value: unknown): ExternalFactInput | null {
 	if (!value || typeof value !== "object") return null;
 	const raw = value as Record<string, unknown>;
