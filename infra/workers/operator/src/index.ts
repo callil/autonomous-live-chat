@@ -406,9 +406,14 @@ export class OperatorTurn extends DurableObject<Env> {
 	private absorbReceipt(turn: TurnState, command: { kind: string; runId?: string }, result: unknown): void {
 		const receipt = result as { version?: unknown; phase?: unknown; ledger?: { version?: unknown; phase?: unknown } };
 		const version = Number.isSafeInteger(receipt?.version) ? receipt.version as number : Number.isSafeInteger(receipt?.ledger?.version) ? receipt.ledger!.version as number : undefined;
-		if (version !== undefined) turn.version = version;
-		const phase = typeof receipt?.phase === "string" ? receipt.phase : typeof receipt?.ledger?.phase === "string" ? receipt.ledger.phase : undefined;
-		if (phase !== undefined) turn.phase = phase;
+		// Monotonic: a deduped re-stage of an old command echoes its ANCIENT
+		// receipt, and absorbing that would regress the version (and phase)
+		// and poison every later command in the turn with a stale revision.
+		if (version !== undefined && version > turn.version) {
+			turn.version = version;
+			const phase = typeof receipt?.phase === "string" ? receipt.phase : typeof receipt?.ledger?.phase === "string" ? receipt.ledger.phase : undefined;
+			if (phase !== undefined) turn.phase = phase;
+		}
 		if (command.kind === "implement" && typeof command.runId === "string") turn.activeRunId = command.runId;
 		const runner = (result as { runner?: { runId?: unknown } })?.runner;
 		if (runner && typeof runner.runId === "string") turn.runnerRunId = runner.runId;
