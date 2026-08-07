@@ -33,6 +33,8 @@ type TurnState = {
 	runnerRunId?: string;
 	planBranch: string;
 	issueNumber: number;
+	candidatePr: number;
+	candidateHeadSha: string;
 	messages: ModelMessage[];
 	toolCalls: number;
 	tokens: number;
@@ -149,6 +151,8 @@ export class OperatorTurn extends DurableObject<Env> {
 			activeRunId: snapshot.activeImplementation?.runId ?? "",
 			planBranch: snapshot.plan?.branch ?? "",
 			issueNumber: Number.isSafeInteger(snapshot.artifacts?.issue?.number) ? snapshot.artifacts!.issue!.number! : 0,
+			candidatePr: Number.isSafeInteger((snapshot.artifacts as { candidate?: { pullRequestNumber?: unknown } } | undefined)?.candidate?.pullRequestNumber) ? (snapshot.artifacts as { candidate: { pullRequestNumber: number } }).candidate.pullRequestNumber : 0,
+			candidateHeadSha: typeof (snapshot.artifacts as { candidate?: { headSha?: unknown } } | undefined)?.candidate?.headSha === "string" ? (snapshot.artifacts as { candidate: { headSha: string } }).candidate.headSha : "",
 			messages: [
 				{ role: "system", content: SYSTEM_PROMPT },
 				{ role: "user", content: `State: ${ledgerSnapshot.state}` },
@@ -252,6 +256,8 @@ export class OperatorTurn extends DurableObject<Env> {
 				activeRunId: turn.activeRunId,
 				planBranch: turn.planBranch,
 				issueNumber: turn.issueNumber,
+				candidatePr: turn.candidatePr,
+				candidateHeadSha: turn.candidateHeadSha,
 			});
 			return this.stageAndExecute(turn, command);
 		} catch (error) {
@@ -312,6 +318,11 @@ export class OperatorTurn extends DurableObject<Env> {
 		if (command.kind === "implement" && typeof command.runId === "string") turn.activeRunId = command.runId;
 		const runner = (result as { runner?: { runId?: unknown } })?.runner;
 		if (runner && typeof runner.runId === "string") turn.runnerRunId = runner.runId;
+		if (command.kind === "record-candidate") {
+			const candidate = command as { pullRequestNumber?: unknown; headSha?: unknown };
+			if (Number.isSafeInteger(candidate.pullRequestNumber)) turn.candidatePr = candidate.pullRequestNumber as number;
+			if (typeof candidate.headSha === "string") turn.candidateHeadSha = candidate.headSha;
+		}
 	}
 
 	private async finish(turn: TurnState, outcome: string): Promise<void> {

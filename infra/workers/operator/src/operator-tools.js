@@ -82,11 +82,7 @@ export const TOOLS = [
 		pullRequestUrl: { type: "string" },
 		message: { type: "string" },
 	}),
-	tool("stagePromotion", "Dispatch the trusted promotion workflow for the validated candidate.", {
-		pullRequestNumber: { type: "integer" },
-		headSha: { type: "string" },
-		dispatchKey: { type: "string", description: "Fresh unique identifier for this promotion dispatch." },
-	}),
+	tool("stagePromotion", "Dispatch the trusted promotion workflow for the validated candidate. The candidate identity and dispatch key are supplied by the loop.", {}),
 	tool("stageState", "Record an externally observed phase transition with its evidence.", {
 		phase: { type: "string", enum: EXTERNAL_PHASES },
 		artifacts: {
@@ -170,7 +166,12 @@ export function commandFor(name, args, ctx) {
 		case "stageIssue": return { kind: "create-issue", title: args.title, body: args.body, classification: args.classification };
 		case "stageImplementation": return { kind: "implement", runId: ctx.minted };
 		case "stageCandidate": return { kind: "record-candidate", runId: ctx.activeRunId, branch: ctx.planBranch, headSha: args.headSha, pullRequestNumber: args.pullRequestNumber, pullRequestUrl: args.pullRequestUrl, message: args.message };
-		case "stagePromotion": return { kind: "promote", pullRequestNumber: args.pullRequestNumber, headSha: args.headSha, dispatchKey: args.dispatchKey };
+		case "stagePromotion": {
+			// Candidate identity is the ledger's fact and the dispatch key is a
+			// minted nonce - mechanical values the model must never retype.
+			if (!ctx.candidatePr || !ctx.candidateHeadSha) throw new Error("No validated candidate is recorded for promotion yet.");
+			return { kind: "promote", pullRequestNumber: ctx.candidatePr, headSha: ctx.candidateHeadSha, dispatchKey: ctx.minted };
+		}
 		case "stageState": return { kind: "record-state", phase: args.phase, ...stageArtifacts(args.artifacts), message: args.message, source: args.source };
 		default: throw new Error(`Unknown operator stage tool '${name}'.`);
 	}
