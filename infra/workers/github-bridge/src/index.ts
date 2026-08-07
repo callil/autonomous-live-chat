@@ -143,10 +143,6 @@ function promotionRunName(dispatchKey: string): string {
 	return `App Harness promotion · ${dispatchKey}`;
 }
 
-function candidateRunName(pullRequest: number, headSha: string): string {
-	return `App Harness candidate · PR #${pullRequest} · ${headSha}`;
-}
-
 function enumValue<T extends readonly string[]>(value: unknown, allowed: T): value is T[number] {
 	return typeof value === "string" && (allowed as readonly string[]).includes(value);
 }

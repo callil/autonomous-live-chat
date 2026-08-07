@@ -26,11 +26,13 @@ Ordinary demo releases do not rebuild or reset the runner or bridge Durable Obje
 
 Repository Actions secrets are installed into the relevant Worker via standard input. Values are never committed or printed. The important categories are:
 
-- Cloudflare deploy credential;
-- OpenAI API credential used inside the coding runner;
-- GitHub App ID, installation ID, and private key held by the bridge/runner Worker boundary;
-- coordinator/runner HMAC secrets used to bind calls to durable jobs;
-- no promotion callback secret: the persistent operator records final workflow evidence in the durable ledger after reading GitHub's immutable run and deployment artifacts.
+- `CLOUDFLARE_API_TOKEN` (repository Actions): trusted CI, promotion, and Worker deploys.
+- `APP_HARNESS_OPENAI_API_KEY` (repository Actions): provisioning source for the runner's model credential.
+- `APP_HARNESS_GITHUB_APP_ID` / `_INSTALLATION_ID` / `_PRIVATE_KEY` (repository Actions): provisioning source for the GitHub App capability Worker.
+- `OPENAI_API_KEY` (Worker `app-harness-os-native-git`): the only secret the disposable runner holds; repository access uses short-lived installation tokens minted by the GitHub App Worker over a private service binding.
+- `GITHUB_APP_ID` / `GITHUB_APP_INSTALLATION_ID` / `GITHUB_APP_PRIVATE_KEY` (Worker `app-harness-os-git-proxy`): the sole GitHub App identity owner.
+- The demo Worker and the operator Gatekeeper hold no secrets at all; every cross-service call rides a private service binding.
+- No promotion callback secret exists: the persistent operator records final workflow evidence in the durable ledger after reading GitHub's immutable run and deployment artifacts.
 
 Rotate a secret for suspected disclosure or planned lifecycle policy—not as a general retry mechanism. A deployment or upstream outage should resume from durable state with the same uncompromised identity.
 

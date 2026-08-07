@@ -165,8 +165,6 @@ const SUBMISSION_INDEX_PREFIX = "submission-index:";
 const MESSAGE_SEQUENCE_KEY = "sequence:message";
 const ANNOTATION_SEQUENCE_KEY = "sequence:annotation";
 const WORK_ITEM_SEQUENCE_KEY = "sequence:work-item";
-const LEDGER_MIGRATION_KEY = "migration:ledger-only:v1";
-const CLEAN_OPERATOR_STATE_KEY = "migration:clean-operator-state:v1";
 const WAKE_BATCH_SIZE = 16;
 const WAKE_RETRY_BASE_MS = 1_000;
 const OPERATOR_LEASE_MAX_MS = 15 * 60_000;
@@ -242,8 +240,6 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 	constructor(ctx: DurableObjectState, env: RuntimeEnv) {
 		super(ctx, env);
 		this.ctx.blockConcurrencyWhile(async () => {
-			await this.migrateToLedgerOnly();
-			await this.resetExperimentalOperatorState();
 			await this.scheduleWakeAlarm();
 		});
 	}
@@ -414,7 +410,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		// A candidate can only ever belong to the active implementation run; the
 		// operator decides to record it, the ledger owns the run identity.
 		if (input.command.kind === "record-candidate" && workItem.activeImplementation) {
-			input.command = { ...input.command, runId: workItem.activeImplementation.runId };
+			input.command = { ...input.command, runId: workItem.activeImplementation.runId, ...(workItem.plan ? { branch: workItem.plan.branch } : {}) };
 		}
 		// Deployment reconciliation facts are the ledger's own: the applied
 		// promote action is the promotion evidence, and the deployment target is
@@ -1036,60 +1032,6 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		await this.ctx.storage.transaction(async (txn) => Promise.all([txn.put(this.messageKey(message.id), message), txn.put(this.orderKey(MESSAGE_ORDER_PREFIX, message.sequence!, message.id), message.id)]));
 	}
 
-	private async migrateToLedgerOnly(): Promise<void> {
-		if (await this.ctx.storage.get<boolean>(LEDGER_MIGRATION_KEY)) return;
-		const legacyMessages = (await this.ctx.storage.get<ChatMessage[]>("messages")) ?? [];
-		const legacyAnnotations = (await this.ctx.storage.get<HarnessAnnotation[]>("harness-annotations")) ?? [];
-		for (const message of legacyMessages) if (!(await this.ctx.storage.get(this.messageKey(message.id)))) await this.saveMessage(message);
-		for (const annotation of legacyAnnotations) if (!(await this.ctx.storage.get(this.annotationKey(annotation.id)))) {
-			annotation.sequence ??= await this.nextSequence(ANNOTATION_SEQUENCE_KEY);
-			await this.ctx.storage.put({ [this.annotationKey(annotation.id)]: annotation, [this.orderKey(ANNOTATION_ORDER_PREFIX, annotation.sequence, annotation.id)]: annotation.id });
-		}
-		const legacyItems = await this.ctx.storage.list<Record<string, unknown>>({ prefix: "harness-work-item:" });
-		for (const [legacyKey, legacy] of legacyItems) {
-			const id = typeof legacy.id === "string" && isUuid(legacy.id) ? legacy.id : null;
-			if (!id || await this.ctx.storage.get(this.workItemKey(id))) continue;
-			const now = typeof legacy.createdAt === "number" ? legacy.createdAt : Date.now();
-			const phase = legacyPhase(legacy.phase);
-			const request = typeof legacy.summary === "string" ? legacy.summary : "Migrated App Harness request";
-			const base = createLedgerWorkItem({ id, room: "main", request, target: legacy.target, submissionId: typeof legacy.clientSubmissionId === "string" ? legacy.clientSubmissionId : undefined, now });
-			const message = Array.isArray(legacy.activity) && typeof (legacy.activity.at(-1) as { message?: unknown } | undefined)?.message === "string" ? (legacy.activity.at(-1) as { message: string }).message : "Migrated from the previous coordinator ledger.";
-			const event: LedgerEvent = { id: `${id}:1`, workItemId: id, sequence: 1, phase, message, source: "system", at: typeof legacy.updatedAt === "number" ? legacy.updatedAt : now };
-			const artifacts: Record<string, unknown> = {};
-			if (legacy.githubIssue) artifacts.issue = legacy.githubIssue;
-			if (legacy.githubPullRequestUrl) artifacts.pullRequestUrl = legacy.githubPullRequestUrl;
-			const item: StoredWorkItem = { ...base, phase, artifacts, kind: legacy.kind === "comment" || legacy.kind === "draw" ? legacy.kind : "request", annotationId: typeof legacy.annotationId === "string" ? legacy.annotationId : undefined, sequence: typeof legacy.sequence === "number" ? legacy.sequence : await this.nextSequence(WORK_ITEM_SEQUENCE_KEY), eventSequence: 1, latestEvent: event, updatedAt: event.at };
-			await this.ctx.storage.put({ [this.workItemKey(id)]: item, [this.orderKey(WORK_ITEM_ORDER_PREFIX, item.sequence!, id)]: id, [this.eventKey(id, 1)]: event });
-			await this.ctx.storage.delete(legacyKey);
-		}
-		for (const prefix of ["coordinator-job:", "coordinator-outbox:", "stack-ledger:", "workflow:"]) {
-			for await (const page of this.storagePages(prefix)) for (const batch of storageDeleteBatches([...page.keys()])) await this.ctx.storage.delete(batch);
-		}
-		await this.ctx.storage.delete(["messages", "harness-annotations", "harness-work-items", "workflow"]);
-		await this.ctx.storage.put(LEDGER_MIGRATION_KEY, true);
-	}
-
-	private async resetExperimentalOperatorState(): Promise<void> {
-		if (await this.ctx.storage.get<boolean>(CLEAN_OPERATOR_STATE_KEY)) return;
-		// Keep the Durable Object identity and monotonic action counter. Old
-		// Cloudflare OS approvals therefore cannot collide with a fresh action ID,
-		// while their deleted action records fail closed if delivered late.
-		const prefixes = [
-			MESSAGE_PREFIX, ANNOTATION_PREFIX, WORK_ITEM_PREFIX, EVENT_PREFIX, WAKE_PREFIX,
-			ACTION_PREFIX, ACTION_KEY_PREFIX, ACTION_ACTIVE_PREFIX,
-			MESSAGE_ORDER_PREFIX, ANNOTATION_ORDER_PREFIX, WORK_ITEM_ORDER_PREFIX,
-			SUBMISSION_INDEX_PREFIX, "ledger-operator-note:",
-		];
-		for (const prefix of prefixes) {
-			for await (const page of this.storagePages(prefix)) {
-				for (const batch of storageDeleteBatches([...page.keys()])) await this.ctx.storage.delete(batch);
-			}
-		}
-		await this.ctx.storage.delete([MESSAGE_SEQUENCE_KEY, ANNOTATION_SEQUENCE_KEY, WORK_ITEM_SEQUENCE_KEY]);
-		await this.ctx.storage.deleteAlarm();
-		await this.ctx.storage.put(CLEAN_OPERATOR_STATE_KEY, true);
-	}
-
 	private notice(socket: WebSocket, message: string): void { socket.send(JSON.stringify({ type: "workflow:notice", message })); }
 	private broadcast(payload: unknown): void {
 		const body = JSON.stringify(payload);
@@ -1130,15 +1072,6 @@ function publicWorkItem(item: StoredWorkItem, events: LedgerEvent[], activityHas
 		githubCiUrl: typeof validation?.url === "string" ? validation.url : typeof promotion?.url === "string" ? promotion.url : typeof item.artifacts.githubCiUrl === "string" ? item.artifacts.githubCiUrl : undefined,
 		deploymentUrl: typeof item.artifacts.deploymentUrl === "string" ? item.artifacts.deploymentUrl : undefined,
 	};
-}
-
-function legacyPhase(value: unknown): LedgerPhase {
-	if (value === "completed") return "completed";
-	if (value === "rejected") return "rejected";
-	if (value === "needs_review") return "needs_review";
-	if (value === "building") return "implementing";
-	if (value === "triaged" || value === "queued") return "classified";
-	return "submitted";
 }
 
 /**
