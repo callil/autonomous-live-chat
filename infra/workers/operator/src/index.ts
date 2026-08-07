@@ -149,7 +149,7 @@ export class OperatorTurn extends DurableObject<Env> {
 		return {
 			workItemId: turn?.workItemId ?? null,
 			turn: turn
-				? { status: turn.status, wakeKey: turn.wakeKey, turnNumber: turn.turnNumber, toolCalls: turn.toolCalls, tokens: turn.tokens, startedAt: turn.startedAt, outcome: turn.outcome ?? null, calls: turn.calls }
+				? { status: turn.status, wakeKey: turn.wakeKey, turnNumber: turn.turnNumber, toolCalls: turn.toolCalls, tokens: turn.tokens, startedAt: turn.startedAt, outcome: turn.outcome ?? null, calls: turn.calls, state: turn.messages.find((entry) => entry.role === "user")?.content ?? null }
 				: null,
 			recentTurns: recent ?? [],
 			spendToday: spend ?? { turns: 0, toolCalls: 0, tokens: 0 },
@@ -421,6 +421,7 @@ export default {
 		if (url.pathname === "/status") return Response.json({ ok: true, service: "app-harness-operator", paused: env.OPERATOR_PAUSED === "true" });
 		const match = url.pathname.match(/^\/status\/([0-9a-f-]{36})$/iu);
 		if (!match) return new Response("Not found", { status: 404 });
-		return Response.json(await env.OPERATOR_TURN.getByName(match[1].toLowerCase()).status());
+		const workItemId = match[1].toLowerCase();
+		return Response.json(await env.OPERATOR_TURN.getByName(workItemId).status());
 	},
 } satisfies ExportedHandler<Env>;
