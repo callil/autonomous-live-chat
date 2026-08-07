@@ -183,9 +183,9 @@ const OPERATOR_EMAIL = "callil.capuozzo@gmail.com";
 // Cloudflare OS freezes workspace resources and chat capability types. Create
 // one clean permanent operator identity after the exact Gatekeeper schema is
 // live; experimental workspaces are never reused.
-const OPERATOR_GADGET_KEY = "app-harness-operator";
-const OPERATOR_CHAT_KEY = "ledger-operator";
-const OPERATOR_INSTRUCTION = "Operate APP_HARNESS. Read getWorkItem({workItemId}) and listActions({workItemId}), then progress one step only: claim -> classification -> issue -> plan -> implementation -> candidate -> validating -> promotion -> deployed -> completed. Declared observations: getMainSha, inspectImplementation, getCandidate, observeCandidateValidation, findPromotionRun, inspectPromotionRun. Declared writes: stageClaim, stageClassification, stageIssue, stagePlan, stageImplementation, stageCandidate, stagePromotion, stageState, stageRelease, stageDefer. Reconcile existing effects first and use declared argument types only; never invent methods. stageRelease and stageDefer are parking exits: after either, stop. If blocked or unchanged, stop. Reply exactly PROGRESSED, PARKED:<code>, or COMPLETE.";
+const OPERATOR_GADGET_KEY = "app-harness-operator-v2";
+const OPERATOR_CHAT_KEY = "ledger-operator-v2";
+const OPERATOR_INSTRUCTION = "Operate APP_HARNESS. State below is the authoritative JSON snapshot of this work item, its lease, artifacts, and staged actions; trust it and act without re-reading. Progress one step only: claim -> classification -> issue -> plan -> implementation -> candidate -> validating -> promotion -> deployed -> completed. Stage exactly one declared write via env.APP_HARNESS with workItemId, expectedVersion = State.version, leaseId = State.leaseId: stageClaim, stageClassification, stageIssue, stagePlan, stageImplementation, stageCandidate, stagePromotion, stageState, stageRelease, stageDefer. When State.leaseId is null, stageClaim first with a fresh unique leaseId string and leaseMs 600000. Observations getWorkItem, listActions, getMainSha, inspectImplementation, getCandidate, observeCandidateValidation, findPromotionRun, inspectPromotionRun exist only for facts State lacks. Use declared argument types only; never invent methods. stageRelease and stageDefer are parking exits: after either, stop. If blocked or unchanged, stop. Reply exactly PROGRESSED, PARKED:<code>, or COMPLETE.";
 const GITHUB_REPOSITORY = "callil/autonomous-live-chat";
 const PRODUCTION_DEPLOYMENT_HOST = "autonomous-live-chat.coda-a.workers.dev";
 
@@ -783,6 +783,11 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 				continue;
 			}
 			const inFlight = reservation.wake;
+			// Embed the authoritative ledger state in the wake itself. The bounded
+			// operator model then stages its one command directly instead of
+			// spending its small turn budget re-reading state it already owns.
+			const stateItem = await this.loadWorkItem(inFlight.workItemId);
+			const stateActions = stateItem ? await this.listOperatorActions({ workItemId: stateItem.id }) : [];
 			const responseTarget = await this.ctx.restore({ type: "operator-note", workItemId: inFlight.workItemId, expectedVersion: inFlight.version, turn: inFlight.turn }) as RpcStub<OperatorNoteTarget>;
 			try {
 				const result = await (this.env.OS_WORKSPACE as OsWorkspaceGateway).submitExternalMessage({
@@ -790,7 +795,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 					gadgetKey: OPERATOR_GADGET_KEY,
 					chatKey: OPERATOR_CHAT_KEY,
 					messageKey: `ledger-event:${inFlight.id}:v${inFlight.version}:t${inFlight.turn}`,
-					prompt: `${OPERATOR_INSTRUCTION} Work item: ${inFlight.workItemId}. Revision hint: ${inFlight.version}.`,
+					prompt: `${OPERATOR_INSTRUCTION} Work item: ${inFlight.workItemId}. Revision hint: ${inFlight.version}. State: ${operatorWakeState(stateItem, stateActions)}`,
 					gadgetTitle: "App Harness operator",
 					chatGatewayRpcTarget: responseTarget,
 				});
@@ -1046,6 +1051,41 @@ function legacyPhase(value: unknown): LedgerPhase {
 	if (value === "building") return "implementing";
 	if (value === "triaged" || value === "queued") return "classified";
 	return "submitted";
+}
+
+const OPERATOR_STATE_ACTION_LIMIT = 10;
+const OPERATOR_STATE_RESULT_CHARS = 400;
+const OPERATOR_STATE_MAX_CHARS = 6_000;
+
+/**
+ * Compact authoritative snapshot embedded in each operator wake. It carries
+ * facts, never a decision: the model still chooses the single next command,
+ * and the durable ledger still enforces phase, lease, ordering, and
+ * idempotency invariants against whatever the model stages.
+ */
+function operatorWakeState(item: StoredWorkItem | undefined, actions: StoredOperatorAction[]): string {
+	if (!item) return "null";
+	const snapshot = {
+		workItemId: item.id,
+		phase: item.phase,
+		version: item.version,
+		leaseId: item.lease && item.lease.expiresAt > Date.now() ? item.lease.id : null,
+		request: String(item.request ?? "").slice(0, 600),
+		classification: item.classification,
+		plan: item.plan,
+		activeImplementation: item.activeImplementation,
+		artifacts: item.artifacts,
+		actions: actions.slice(-OPERATOR_STATE_ACTION_LIMIT).map((action) => ({
+			id: action.id,
+			kind: action.command.kind,
+			status: action.status,
+			...(action.result === undefined ? {} : { result: JSON.stringify(action.result).slice(0, OPERATOR_STATE_RESULT_CHARS) }),
+		})),
+	};
+	const text = JSON.stringify(snapshot);
+	if (text.length <= OPERATOR_STATE_MAX_CHARS) return text;
+	const trimmed = JSON.stringify({ ...snapshot, actions: snapshot.actions.map(({ id, kind, status }) => ({ id, kind, status })) });
+	return trimmed.length <= OPERATOR_STATE_MAX_CHARS ? trimmed : JSON.stringify({ workItemId: item.id, phase: item.phase, version: item.version, leaseId: snapshot.leaseId, request: snapshot.request });
 }
 
 function normalizeOperatorMessage(value: unknown): string {
