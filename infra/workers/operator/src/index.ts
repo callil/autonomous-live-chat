@@ -1,7 +1,7 @@
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import type { AppHarnessLedger, GitHubRepositoryBinding, NativeGitRunnerBinding, StagedOperatorAction } from "./contracts";
 import { executeCommand } from "./execute";
-import { callModel, MODEL_CALL_TIMEOUT_MS, ModelError, withRetry, type ModelMessage, type ToolCall } from "./model";
+import { callModel, MODEL_CALL_TIMEOUT_MS, ModelError, probeModel, withRetry, type ModelMessage, type ToolCall } from "./model";
 import { commandFor, OBSERVATION_TOOLS, SYSTEM_PROMPT, TOOLS } from "./operator-tools.js";
 
 type Env = {
@@ -72,6 +72,12 @@ const STAGE_TIMEOUT_MS = 120_000;
 const SNAPSHOT_TIMEOUT_MS = 15_000;
 // A turn that ends WAITING re-pokes itself: DO-local alarm, no ledger involved.
 const WAITING_REPOKE_MS = 60_000;
+// Sandbox capacity backpressure: when startRun reports the pool is full, the
+// LOOP ends the turn WAITING with this longer re-poke instead of handing the
+// error to the model, which would hot-retry it. With admission control at
+// three slots against eight sandboxes this is the rare backstop, not the norm.
+const CAPACITY_REPOKE_MS = 90_000;
+const CAPACITY_WAIT_OUTCOME = "WAITING:sandbox-capacity";
 // Crash backstop: if the isolate dies mid-turn, the alarm resumes the
 // persisted transcript from its pending record.
 const TURN_ALARM_BACKSTOP_MS = 60_000;
@@ -87,6 +93,15 @@ export class OperatorGateway extends WorkerEntrypoint<Env> {
 			return { accepted: false, message: "The wake is outside the operator contract." };
 		}
 		return this.env.OPERATOR_TURN.getByName(input.workItemId).acceptWake(input);
+	}
+
+	/**
+	 * One minimal model call, spent by the ledger sweep while a credit outage
+	 * fact stands: the first success is the recovery signal that clears the
+	 * fact and resumes pokes.
+	 */
+	async probeModel(): Promise<{ ok: boolean; status?: number }> {
+		return probeModel(this.env);
 	}
 }
 
@@ -229,9 +244,19 @@ export class OperatorTurn extends DurableObject<Env> {
 				reply = await withRetry(() => callModel(this.env, turn.messages, TOOLS, Number(this.env.MAX_TOKENS_PER_TURN) - turn.tokens), {
 					attempts: 3,
 					baseMs: 500,
-					retryOn: (error) => (error instanceof ModelError && (error.status === 429 || error.status >= 500)) || error instanceof TypeError,
+					// An exhausted balance is not transient overload: no retry can
+					// succeed until the balance is restored, so it is never retried.
+					retryOn: (error) => (error instanceof ModelError && (error.status === 429 || error.status >= 500) && !error.creditsExhausted) || error instanceof TypeError,
 				});
 			} catch (error) {
+				if (error instanceof ModelError && error.creditsExhausted) {
+					// Exhausted credits are a system-wide outage, not a work-item
+					// failure: report the health note to the ledger — which pauses
+					// sweep pokes and probes for recovery — then park distinctly.
+					await this.env.LEDGER.ingestExternalFact({ source: "operator", workItemId: turn.workItemId, note: "model-credits-exhausted" })
+						.catch((noteError) => console.error("Failed to report exhausted model credits to the ledger.", { workItemId: turn.workItemId, noteError }));
+					return this.finish(turn, "PARKED:model-credits-exhausted");
+				}
 				// A dead provider is not a work-item failure: park this turn and let
 				// the next event or the ledger sweep re-drive it later.
 				return this.finish(turn, `PARKED:model-unavailable:${String(error instanceof Error ? error.message : error).slice(0, 80)}`);
@@ -269,6 +294,12 @@ export class OperatorTurn extends DurableObject<Env> {
 		turn.calls.push({ name: pending.name, ok: failure === undefined, ...(typeof failure === "string" ? { error: failure.slice(0, 200) } : {}) });
 		turn.pending = undefined;
 		await this.ctx.storage.put("turn", turn);
+		// Sandbox capacity exhaustion is backpressure, not model feedback: a
+		// model shown the error hot-retries it. The loop ends the turn WAITING
+		// under its own longer re-poke and lets the pool drain passively.
+		if (pending.name === "stageImplementation" && typeof failure === "string" && failure.includes("sandbox-capacity-exhausted")) {
+			return this.finish(turn, CAPACITY_WAIT_OUTCOME);
+		}
 	}
 
 	private async invokeTool(turn: TurnState, pending: NonNullable<TurnState["pending"]>): Promise<Record<string, unknown>> {
@@ -398,11 +429,12 @@ export class OperatorTurn extends DurableObject<Env> {
 			await this.ctx.storage.setAlarm(Date.now());
 			return;
 		}
-		if (outcome === "WAITING") {
+		if (outcome === "WAITING" || outcome === CAPACITY_WAIT_OUTCOME) {
 			// The turn wants a time-based re-poke: the DO sets its own alarm and
-			// re-drives itself with a fresh snapshot. No ledger involvement.
+			// re-drives itself with a fresh snapshot. No ledger involvement. A
+			// capacity wait re-pokes later than an ordinary wait.
 			await this.ctx.storage.put("poked", turn.workItemId);
-			await this.ctx.storage.setAlarm(Date.now() + WAITING_REPOKE_MS);
+			await this.ctx.storage.setAlarm(Date.now() + (outcome === CAPACITY_WAIT_OUTCOME ? CAPACITY_REPOKE_MS : WAITING_REPOKE_MS));
 			return;
 		}
 		await this.ctx.storage.deleteAlarm();

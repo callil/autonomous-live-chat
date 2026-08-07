@@ -25,9 +25,24 @@ export type ModelEnv = {
 export const MODEL_CALL_TIMEOUT_MS = 45_000;
 
 export class ModelError extends Error {
-	constructor(readonly status: number, detail: string) {
+	constructor(readonly status: number, detail: string, readonly code?: string) {
 		super(`Model call failed (${status}): ${detail}`);
 	}
+
+	/**
+	 * OpenAI reports an exhausted balance as 429 with error.type/code
+	 * "insufficient_quota". Unlike ordinary 429 overload, no retry can succeed
+	 * until the balance is restored, so the loop must park distinctly instead
+	 * of burning its retry budget.
+	 */
+	get creditsExhausted(): boolean {
+		return this.code === "insufficient_quota";
+	}
+}
+
+/** Distinguish exhausted credits from transient overload in a 429 body. */
+export function modelErrorCode(status: number, detail: string): string | undefined {
+	return status === 429 && /insufficient_quota/u.test(detail) ? "insufficient_quota" : undefined;
 }
 
 type WorkersAiResult = {
@@ -68,17 +83,34 @@ export async function callModel(env: ModelEnv, messages: ModelMessage[], tools: 
 		body: JSON.stringify({
 			model: env.MODEL_ID,
 			messages,
-			tools,
-			tool_choice: "auto",
-			parallel_tool_calls: false,
+			// The 1-token recovery probe sends no tools at all; a regular turn
+			// always carries the full vocabulary.
+			...(tools.length ? { tools, tool_choice: "auto", parallel_tool_calls: false } : {}),
 			max_completion_tokens: Math.max(1, Math.min(Number(env.MAX_TOKENS_PER_TURN), maxTokens ?? Number(env.MAX_TOKENS_PER_TURN))),
 		}),
 	});
-	if (!response.ok) throw new ModelError(response.status, (await response.text()).slice(0, 300));
+	if (!response.ok) {
+		const detail = await response.text();
+		throw new ModelError(response.status, detail.slice(0, 300), modelErrorCode(response.status, detail));
+	}
 	const body = await response.json() as { choices?: Array<{ message?: ModelMessage }>; usage?: { total_tokens?: number } };
 	const message = body.choices?.[0]?.message;
 	if (!message) throw new ModelError(502, "Model response carried no message.");
 	return { message, usage: body.usage };
+}
+
+/**
+ * One minimal chat call: enough tokens to prove the account can buy tokens
+ * again after a recorded credit outage, and nothing more. The ledger sweep
+ * calls this through OperatorGateway while the outage fact stands.
+ */
+export async function probeModel(env: ModelEnv): Promise<{ ok: boolean; status?: number }> {
+	try {
+		await callModel(env, [{ role: "user", content: "Reply with ok." }], [], 16);
+		return { ok: true };
+	} catch (error) {
+		return { ok: false, ...(error instanceof ModelError ? { status: error.status } : {}) };
+	}
 }
 
 export async function withRetry<T>(action: () => Promise<T>, options: { attempts: number; baseMs: number; retryOn: (error: unknown) => boolean }): Promise<T> {
