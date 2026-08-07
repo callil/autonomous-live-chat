@@ -1,0 +1,37 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "app-harness-operator",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-08-05",
+	"compatibility_flags": ["nodejs_compat"],
+	"migrations": [{ "tag": "v1", "new_sqlite_classes": ["OperatorTurn"] }],
+	"durable_objects": {
+		"bindings": [{ "name": "OPERATOR_TURN", "class_name": "OperatorTurn" }]
+	},
+	// The private capability surface is byte-identical to the retired
+	// Cloudflare OS gatekeeper's: this is a transport swap, not a rearchitecture.
+	"services": [
+		{ "binding": "LEDGER", "service": "autonomous-live-chat", "entrypoint": "LedgerService" },
+		{ "binding": "RUNNER", "service": "app-harness-os-native-git", "entrypoint": "NativeGitRunner" },
+		{ "binding": "GITHUB", "service": "app-harness-os-git-proxy", "entrypoint": "GitHubAppCapability" }
+	],
+	"ai": { "binding": "AI" },
+	"vars": {
+		"REPOSITORY": "callil/autonomous-live-chat",
+		// "openai" (OpenAI-compatible fetch) or "workers-ai" (env.AI, no key).
+		"MODEL_PROVIDER": "openai",
+		"MODEL_ID": "gpt-5.4-nano",
+		// Any OpenAI-compatible host works here. Pointing this at an AI Gateway
+		// OpenAI-compatible endpoint (https://gateway.ai.cloudflare.com/v1/
+		// <account-id>/default/openai) adds logging and cross-provider failover;
+		// the direct OpenAI URL is the working default until a gateway is
+		// configured at deploy time. MODEL_API_KEY is a wrangler secret and is
+		// optional when the gateway stores the provider key.
+		"MODEL_BASE_URL": "https://api.openai.com/v1",
+		"MAX_TOOL_CALLS_PER_TURN": "12",
+		"MAX_TOKENS_PER_TURN": "24000",
+		"OPERATOR_PAUSED": "false"
+	},
+	"observability": { "enabled": true, "logs": { "invocation_logs": false } },
+	"upload_source_maps": true
+}

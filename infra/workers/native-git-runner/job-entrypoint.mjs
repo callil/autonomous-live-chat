@@ -40,15 +40,25 @@ function safeBranch(value) {
 	return typeof value === "string" && BRANCH.test(value) && !value.includes("..") && !value.startsWith("-") && !value.endsWith("/") ? value : null;
 }
 
+// The callback is best-effort transport, never a gate: an invalid shape is
+// dropped so a misconfigured worker cannot fail an otherwise good run.
+function safeCallback(value) {
+	if (!value || typeof value !== "object") return null;
+	if (typeof value.url !== "string" || !value.url.startsWith("https://")) return null;
+	if (typeof value.workItemId !== "string" || !EVENT_ID.test(value.workItemId)) return null;
+	if (typeof value.runId !== "string" || !EVENT_ID.test(value.runId)) return null;
+	return { url: value.url, workItemId: value.workItemId, runId: value.runId };
+}
+
 function safeRequest(input) {
 	const job = input?.job;
 	if (!job || typeof job.jobId !== "string" || !EVENT_ID.test(job.jobId) || typeof job.repository !== "string" || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(job.repository) || !Number.isInteger(job.generation) || job.generation < 1 || typeof input.runId !== "string" || !EVENT_ID.test(input.runId) || typeof input.checkoutDirectory !== "string" || !input.checkoutDirectory.startsWith("/workspace/") || typeof input.instructions !== "string" || typeof input.model !== "string" || !MODEL.test(input.model)) return null;
-	if (input.candidate === null) return { ...input, job, candidate: null };
+	if (input.candidate === null) return { ...input, job, candidate: null, callback: safeCallback(input.callback) };
 	const candidate = input.candidate;
 	const branch = safeBranch(candidate?.stack?.branch);
 	const parentBranch = safeBranch(candidate?.stack?.parentBranch);
 	if (candidate?.change?.kind !== "repository-task" || typeof candidate.change.request !== "string" || !candidate.change.request.trim() || typeof candidate?.stack?.stackId !== "string" || !EVENT_ID.test(candidate.stack.stackId) || candidate.stack.nodeId !== "root" || !branch || !parentBranch || parentBranch !== "main" || candidate.stack.pullRequestBase !== "main" || !Number.isInteger(candidate.stack.issueNumber) || candidate.stack.issueNumber < 1 || typeof candidate.stack.parentBaseSha !== "string" || !SHA.test(candidate.stack.parentBaseSha) || branch !== `app-harness-os/${candidate.stack.issueNumber}/g${job.generation}`) return null;
-	return { ...input, job, candidate: { ...candidate, change: { ...candidate.change, request: candidate.change.request.trim() }, stack: { ...candidate.stack, branch, parentBranch } } };
+	return { ...input, job, candidate: { ...candidate, change: { ...candidate.change, request: candidate.change.request.trim() }, stack: { ...candidate.stack, branch, parentBranch } }, callback: safeCallback(input.callback) };
 }
 
 // Every step budget in milliseconds. Any single step can block forever — a
@@ -59,6 +69,7 @@ const GIT_TIMEOUT_MS = 60_000;
 const AGENT_TIMEOUT_MS = 540_000;
 const GH_STACK_TIMEOUT_MS = 120_000;
 const GITHUB_FETCH_TIMEOUT_MS = 30_000;
+const CALLBACK_TIMEOUT_MS = 15_000;
 const RUN_DEADLINE_MS = 650_000;
 const WATCHDOG_INTERVAL_MS = 5_000;
 const KILL_GRACE_MS = 2_000;
@@ -202,12 +213,35 @@ function artifact(request, state, extra = {}) {
 	return { jobId: request.job.jobId, state, ...extra };
 }
 
+function stderrTail(result) {
+	const tail = typeof result?.stderr === "string" ? result.stderr.trim().slice(-400) : "";
+	return tail ? { stderrTail: tail } : {};
+}
+
+// Report the terminal artifact to the ledger by push, so the operator wakes on
+// completion instead of polling. Failure here is non-fatal: the artifact was
+// already emitted, and the ledger's stalled-implementation fact is the backstop.
+let terminalCallback = null;
+
+async function postCallback(result) {
+	if (!terminalCallback) return;
+	try {
+		await fetch(terminalCallback.url, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ workItemId: terminalCallback.workItemId, runId: terminalCallback.runId, artifact: result }),
+			signal: AbortSignal.timeout(CALLBACK_TIMEOUT_MS),
+		});
+	} catch { /* best effort by design */ }
+}
+
 async function main() {
 	const request = safeRequest(await readRequest());
 	if (!request) throw new Error("input-invalid");
+	terminalCallback = request.callback;
 	const cloneBranch = request.candidate?.stack.parentBranch ?? "main";
 	const clone = await run("git", ["clone", "--branch", cloneBranch, `https://github.com/${request.job.repository}.git`, request.checkoutDirectory], { timeoutMs: CLONE_TIMEOUT_MS });
-	if (!clone.success) return artifact(request, "checkout-failed", { exitCode: clone.exitCode, classification: classifyGitTransportFailure(clone.stderr) });
+	if (!clone.success) return artifact(request, "checkout-failed", { exitCode: clone.exitCode, classification: classifyGitTransportFailure(clone.stderr), ...stderrTail(clone) });
 	const base = await run("git", ["-C", request.checkoutDirectory, "rev-parse", "HEAD"], { timeoutMs: GIT_TIMEOUT_MS });
 	const baseSha = base.stdout.trim();
 	if (!base.success || !SHA.test(baseSha)) return artifact(request, "checkout-failed", { classification: "checkout-head-unavailable" });
@@ -215,7 +249,7 @@ async function main() {
 	if (request.candidate.stack.parentBaseSha && request.candidate.stack.parentBaseSha !== baseSha) return artifact(request, "needs-restack", { baseSha, classification: "parent-base-sha-mismatch", stack: { id: request.candidate.stack.stackId, nodeId: request.candidate.stack.nodeId, branch: request.candidate.stack.branch, parentBranch: request.candidate.stack.parentBranch } });
 
 	const remote = await run("git", ["-C", request.checkoutDirectory, "ls-remote", "--heads", "origin", `refs/heads/${request.candidate.stack.branch}`], { timeoutMs: GIT_TIMEOUT_MS });
-	if (!remote.success) return artifact(request, "candidate-failed", { classification: classifyGitTransportFailure(remote.stderr) });
+	if (!remote.success) return artifact(request, "candidate-failed", { classification: classifyGitTransportFailure(remote.stderr), ...stderrTail(remote) });
 	const remoteSha = remote.stdout.trim().split(/\s+/u)[0];
 	const checkout = SHA.test(remoteSha)
 		? await run("git", ["-C", request.checkoutDirectory, "fetch", "origin", `refs/heads/${request.candidate.stack.branch}:refs/remotes/origin/${request.candidate.stack.branch}`], { timeoutMs: GIT_TIMEOUT_MS }).then(async (fetchResult) => fetchResult.success ? run("git", ["-C", request.checkoutDirectory, "checkout", "-B", request.candidate.stack.branch, `refs/remotes/origin/${request.candidate.stack.branch}`], { timeoutMs: GIT_TIMEOUT_MS }) : fetchResult)
@@ -226,7 +260,7 @@ async function main() {
 	const agentExecution = await run("node", ["/opt/app-harness/agent-entrypoint.mjs"], { cwd: request.checkoutDirectory, input: agentInput, timeoutMs: AGENT_TIMEOUT_MS });
 	let agent = null;
 	try { agent = JSON.parse(agentExecution.stdout.trim()); } catch { agent = null; }
-	if (!agentExecution.success || !agent?.ok) return artifact(request, "candidate-failed", { classification: typeof agent?.classification === "string" ? agent.classification : agentExecution.exitCode === 124 ? "nanocodex-step-timeout" : "nanocodex-output-invalid", agent: agent && typeof agent === "object" ? agent : undefined });
+	if (!agentExecution.success || !agent?.ok) return artifact(request, "candidate-failed", { classification: typeof agent?.classification === "string" ? agent.classification : agentExecution.exitCode === 124 ? "nanocodex-step-timeout" : "nanocodex-output-invalid", agent: agent && typeof agent === "object" ? agent : undefined, ...stderrTail(agentExecution) });
 
 	const status = await run("git", ["-C", request.checkoutDirectory, "status", "--porcelain"], { timeoutMs: GIT_TIMEOUT_MS });
 	const head = await run("git", ["-C", request.checkoutDirectory, "rev-parse", "HEAD"], { timeoutMs: GIT_TIMEOUT_MS });
@@ -275,9 +309,12 @@ try {
 	clearInterval(watchdog);
 	killAllChildren();
 	await emit(result);
+	await postCallback(result);
 } catch {
 	clearInterval(watchdog);
 	killAllChildren();
-	await emit({ jobId: "unknown", state: "candidate-failed", classification: "runner-entrypoint-failed" });
+	const failure = { jobId: "unknown", state: "candidate-failed", classification: "runner-entrypoint-failed" };
+	await emit(failure);
+	await postCallback(failure);
 	process.exitCode = 1;
 }
