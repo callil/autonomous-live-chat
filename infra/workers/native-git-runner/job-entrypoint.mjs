@@ -295,9 +295,13 @@ const watchdog = setInterval(async () => {
 	// load-bearing rather than cosmetic. It is still raced against a hard cap:
 	// if stdout itself is blocked the write can never resolve, and exiting
 	// without the artifact still beats hanging here forever.
+	// The push callback rides the same race: the operator relies on pushed
+	// terminal facts, so a deadline-exceeded run must wake it too, not wait
+	// for the stalled-run backstop.
+	const deadline = { jobId: terminalCallback?.workItemId ?? "unknown", state: "candidate-failed", classification: "nanocodex-deadline-exceeded" };
 	await Promise.race([
-		emit({ jobId: "unknown", state: "candidate-failed", classification: "nanocodex-deadline-exceeded" }),
-		new Promise((resolve) => setTimeout(resolve, KILL_GRACE_MS)),
+		emit(deadline).then(() => postCallback(deadline)),
+		new Promise((resolve) => setTimeout(resolve, KILL_GRACE_MS + CALLBACK_TIMEOUT_MS)),
 	]);
 	process.exit(1);
 }, WATCHDOG_INTERVAL_MS);

@@ -170,7 +170,7 @@ export class OperatorTurn extends DurableObject<Env> {
 
 			let reply;
 			try {
-				reply = await withRetry(() => callModel(this.env, turn.messages, TOOLS), {
+				reply = await withRetry(() => callModel(this.env, turn.messages, TOOLS, Number(this.env.MAX_TOKENS_PER_TURN) - turn.tokens), {
 					attempts: 3,
 					baseMs: 500,
 					retryOn: (error) => (error instanceof ModelError && (error.status === 429 || error.status >= 500)) || error instanceof TypeError,
@@ -235,10 +235,20 @@ export class OperatorTurn extends DurableObject<Env> {
 			// 1. Durable log first. Idempotency keys and the single-active lock are
 			//    the ledger's, unchanged; a duplicate returns the existing action.
 			const staged = await this.env.LEDGER.stageOperatorAction({ workItemId: turn.workItemId, expectedVersion: turn.version, command });
-			if (staged.status === "applied" || staged.status === "rejected") return summarizeAction(staged);
+			if (staged.status === "applied") {
+				// A crash-resumed replay lands here: the command already executed.
+				// The receipt must still be absorbed, or every later command in
+				// this turn stages against the pre-action revision and is refused.
+				await this.absorbAppliedAction(turn, command, staged);
+				return summarizeAction(staged);
+			}
+			if (staged.status === "rejected") return summarizeAction(staged);
 			// 2. Claim execution under the same token and lease protocol.
 			const begun = await this.env.LEDGER.beginOperatorAction({ actionId: staged.id });
-			if (begun.disposition !== "execute" || !begun.executionToken) return summarizeAction(begun.action);
+			if (begun.disposition !== "execute" || !begun.executionToken) {
+				if (begun.action.status === "applied") await this.absorbAppliedAction(turn, command, begun.action);
+				return summarizeAction(begun.action);
+			}
 			// 3. Execute against the private capabilities, then record the truth.
 			try {
 				const result = await executeCommand(this.env, begun.workItem, begun.action.command);
@@ -257,6 +267,15 @@ export class OperatorTurn extends DurableObject<Env> {
 			// Tool-level failure is data, not a crash: the model sees it and corrects.
 			return { error: String(error instanceof Error ? error.message : error).slice(0, 300) };
 		}
+	}
+
+	/** A replayed or reconciled applied action carries its receipt as a JSON string. */
+	private async absorbAppliedAction(turn: TurnState, command: { kind: string; leaseId?: string; runId?: string }, action: { result?: unknown }): Promise<void> {
+		if (action.result === undefined || action.result === null) return;
+		try {
+			this.absorbReceipt(turn, command, typeof action.result === "string" ? JSON.parse(action.result) : action.result);
+			await this.ctx.storage.put("turn", turn);
+		} catch { /* an unparseable receipt leaves the turn state as it was */ }
 	}
 
 	/** Keep the loop-owned staging facts current as receipts arrive. */
