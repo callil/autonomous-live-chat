@@ -177,6 +177,7 @@ const OPERATOR_TURN_RESPONSE_LEASE_MS = OPERATOR_LEASE_MAX_MS;
 const OPERATOR_TURN_DELIVERY_ATTEMPTS = 3;
 const ACTION_APPLY_LEASE_MS = 60_000;
 const STAGED_ACTION_RECOVERY_MS = 90_000;
+const REJECTED_ACTION_PARK_THRESHOLD = 6;
 const READY_PHASES = new Set<LedgerPhase>(["submitted", "retryable"]);
 const TERMINAL_PHASES = new Set<LedgerPhase>(["completed", "needs_review", "rejected"]);
 const OPERATOR_ID = "cloudflare-os";
@@ -536,7 +537,15 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		const workItem = await this.loadWorkItem(rejected.workItemId);
 		if (workItem) {
 			await this.appendActionEvent(workItem.id, workItem.phase, `Cloudflare OS could not apply ${rejected.command.kind.replaceAll("-", " ")}${failure ? `: ${failure}` : "."}`);
-			await this.scheduleWakeAlarm();
+			// Rejections re-queue wakes, so an operator that cannot converge would
+			// otherwise churn forever. A bounded rejection budget parks truthfully.
+			const rejections = (await this.listOperatorActions({ workItemId: workItem.id })).filter((action) => action.status === "rejected").length;
+			if (!TERMINAL_PHASES.has(workItem.phase) && rejections >= REJECTED_ACTION_PARK_THRESHOLD) {
+				const parked = { ...workItem, phase: "needs_review" as const, version: workItem.version + 1, lease: null, activeImplementation: null, updatedAt: Date.now() };
+				await this.persistTransition(workItem.version, parked, `Cloudflare OS rejected ${rejections} staged commands for this work item; work is parked for review with its ledger and artifacts intact.`, "system");
+			} else {
+				await this.scheduleWakeAlarm();
+			}
 		}
 		return rejected;
 	}
