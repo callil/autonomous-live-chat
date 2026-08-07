@@ -34,12 +34,9 @@
 	},
 	"services": [
 		{
-			"binding": "OS_WORKSPACE",
-			"service": "app-harness-os",
-			"entrypoint": "ExternalMessageGateway",
-			"props": {
-				"source": "app-harness"
-			}
+			"binding": "OPERATOR",
+			"service": "app-harness-operator",
+			"entrypoint": "OperatorGateway"
 		}
 	],
 	"durable_objects": {
@@ -58,8 +55,7 @@
 	},
 	"upload_source_maps": true,
 	"compatibility_flags": [
-		"nodejs_compat",
-		"allow_irrevocable_stub_storage"
+		"nodejs_compat"
 	]
 	/**
 	 * Smart Placement

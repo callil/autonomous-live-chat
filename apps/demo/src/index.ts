@@ -1,6 +1,4 @@
-// Wrangler's generated module declaration omits the documented runtime symbol.
-// @ts-expect-error Cloudflare OS exercises restore for persistent RPC callbacks.
-import { DurableObject, RpcTarget, WorkerEntrypoint, restore, type RpcStub } from "cloudflare:workers";
+import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import {
 	AUTHORING_ENVELOPE_POLICY,
 	DELIVERY_POLICY,
@@ -132,28 +130,26 @@ type StoredOperatorAction = {
 	createdAt: number;
 	updatedAt: number;
 };
-type OperatorNoteRestore = { type: "operator-note"; workItemId: string; expectedVersion: number; turn: number };
 type OperatorResponse = { text: string; idempotencyKey: string };
 
-type OsWorkspaceGateway = {
-	submitExternalMessage(input: {
-		callerEmail: string;
-		gadgetKey: string;
-		chatKey: string;
-		messageKey: string;
-		prompt: string;
-		gadgetTitle: string;
-		chatGatewayRpcTarget: RpcStub<OperatorNoteTarget>;
-	}): Promise<{ accepted: true; chatPath: string } | { accepted: false; message: string }>;
+type OperatorGatewayTransport = {
+	submitWake(input: { workItemId: string; version: number; turn: number; wakeKey: string; state: string }): Promise<{ accepted: true } | { accepted: false; message: string }>;
 };
 
-type RuntimeEnv = Omit<Env, "OS_WORKSPACE" | "OPERATOR_PAUSED"> & { OS_WORKSPACE: unknown; OPERATOR_PAUSED?: string };
+/** External facts recorded by push (runner today, GitHub webhooks next). */
+type ExternalFacts = {
+	runnerResult?: { runId: string; state: string; classification?: string; stderrTail?: string; headSha?: string; pullRequest?: { number: number; url: string }; at: number };
+};
+type ExternalFactInput = { source: "runner"; workItemId: string; runId: string; fact: NonNullable<ExternalFacts["runnerResult"]> };
+
+type RuntimeEnv = Omit<Env, "OPERATOR" | "OPERATOR_PAUSED"> & { OPERATOR: unknown; OPERATOR_PAUSED?: string };
 
 const MESSAGE_PREFIX = "message:";
 const ANNOTATION_PREFIX = "annotation:";
 const WORK_ITEM_PREFIX = "ledger-work-item:";
 const EVENT_PREFIX = "ledger-event:";
 const WAKE_PREFIX = "ledger-wake:";
+const EXTERNAL_FACT_PREFIX = "ledger-external-fact:";
 const ACTION_PREFIX = "ledger-operator-action:";
 const ACTION_KEY_PREFIX = "ledger-operator-action-key:";
 const ACTION_ACTIVE_PREFIX = "ledger-operator-action-active:";
@@ -168,10 +164,9 @@ const WORK_ITEM_SEQUENCE_KEY = "sequence:work-item";
 const WAKE_BATCH_SIZE = 16;
 const WAKE_RETRY_BASE_MS = 1_000;
 const OPERATOR_LEASE_MAX_MS = 15 * 60_000;
-// Cloudflare OS permits only one undelivered external-message response per
-// persistent chat. Keep that turn as the barrier for the full operator lease;
-// normal progress resumes immediately from the response callback.
-const OPERATOR_TURN_RESPONSE_LEASE_MS = OPERATOR_LEASE_MAX_MS;
+// The operator turn is a bounded model loop, not a chat; the response lease
+// only covers one wall-clocked turn plus its note delivery.
+const OPERATOR_TURN_RESPONSE_LEASE_MS = 90_000;
 const OPERATOR_TURN_DELIVERY_ATTEMPTS = 3;
 const ACTION_APPLY_LEASE_MS = 60_000;
 const STAGED_ACTION_RECOVERY_MS = 90_000;
@@ -183,31 +178,13 @@ const OPERATOR_TURN_HARD_BUDGET = 60;
 const READY_PHASES = new Set<LedgerPhase>(["submitted", "retryable"]);
 const TERMINAL_PHASES = new Set<LedgerPhase>(["completed", "needs_review", "rejected"]);
 const OPERATOR_ID = "cloudflare-os";
-const OPERATOR_EMAIL = "callil.capuozzo@gmail.com";
-// Cloudflare OS freezes workspace resources and chat capability types. Create
-// one clean permanent operator identity after the exact Gatekeeper schema is
-// live; experimental workspaces are never reused.
-const OPERATOR_GADGET_KEY = "app-harness-operator-v4";
-const OPERATOR_CHAT_KEY = "ledger-operator-v5";
-const OPERATOR_INSTRUCTION = "Operate APP_HARNESS. State below is the authoritative JSON snapshot of this work item, its lease, artifacts, and staged actions; trust it and act without re-reading. Progress steps in order: claim -> classification -> issue -> plan -> implementation -> candidate -> validating -> promotion -> deployed -> completed. Each stage call returns its final outcome; on completed, immediately stage the next step in this same turn, and advance as many consecutive steps as the ledger allows. On rejected, the result error says why: stage a corrected command once or stop. Stage exactly one declared write via the App Harness operator binding (env.APP_HARNESS, or env.APP_HARNESS_2 when the workspace carries a duplicate - use whichever exposes the declared methods) with workItemId, expectedVersion = State.version, leaseId = State.leaseId: stageClaim, stageClassification, stageIssue, stagePlan, stageImplementation, stageCandidate, stagePromotion, stageState, stageRelease, stageDefer. When State.leaseId is null, stageClaim first with a fresh unique leaseId string and leaseMs 900000. For stageImplementation mint a fresh unique runId string. In phase implementing never stage implement again: read getCandidate(branch = State.plan.branch, pullRequestBase = main), and once it returns a pull request, stageCandidate with that number, url, and headSha. In phase validating: read observeCandidateValidation(pullRequest, headSha); when conclusion is success, stageState phase validating with artifacts { validation: { url, runId, conclusion } }, then stagePromotion with the candidate pullRequestNumber, headSha, and a fresh unique dispatchKey. If validation or promotion concludes failure, restack: stagePlan again with the next revision, the next generation, and a fresh getMainSha baseSha, then re-implement. After the promotion run succeeds (findPromotionRun/inspectPromotionRun), stageState phase deployed with artifacts { promotion: { url, runId }, deploymentUrl: the production origin }, then stageState phase completed. For stagePlan: nodeId root, parentBranch and pullRequestBase main, baseSha getMainSha().sha, parentBaseSha = baseSha, branch app-harness-os/<issueNumber>/g<generation>, revision 1 (increment revision to replace a plan before implementation starts). Observations getWorkItem, listActions, getMainSha, inspectImplementation, getCandidate, observeCandidateValidation, findPromotionRun, inspectPromotionRun exist only for facts State lacks. Use declared argument types only; never invent methods. A rejected action's result.error says why it failed: stage a corrected command instead of repeating it. An action still staged with no result lost its approval: stage the identical command again to resubmit it. stageRelease and stageDefer are parking exits: after either, stop. If blocked or unchanged, stop. Reply exactly PROGRESSED, PARKED:<code>, or COMPLETE.";
 const GITHUB_REPOSITORY = "callil/autonomous-live-chat";
 const PRODUCTION_DEPLOYMENT_HOST = "autonomous-live-chat.coda-a.workers.dev";
 
-class OperatorNoteTarget extends RpcTarget {
-	constructor(
-		private readonly room: ChatRoom,
-		private readonly workItemId: string,
-		private readonly expectedVersion: number,
-		private readonly turn: number,
-	) { super(); }
-	async onGadgetResponse(response: OperatorResponse): Promise<void> {
-		await this.room.recordOperatorNote(this.workItemId, this.expectedVersion, this.turn, response);
-	}
-}
-
 /**
- * Private typed capability exposed to the persistent Cloudflare OS workspace.
- * These methods validate and persist decisions but never choose the next one.
+ * Private typed capability exposed to the operator worker over a service
+ * binding. These methods validate and persist decisions but never choose the
+ * next one.
  */
 export class LedgerService extends WorkerEntrypoint<RuntimeEnv> {
 	private room(): DurableObjectStub<ChatRoom> { return this.env.CHAT_ROOM.getByName("main") as unknown as DurableObjectStub<ChatRoom>; }
@@ -228,13 +205,14 @@ export class LedgerService extends WorkerEntrypoint<RuntimeEnv> {
 	beginOperatorAction(input: { actionId: number }): Promise<{ disposition: "execute" | "busy" | "applied" | "rejected" | "stale"; action: StoredOperatorAction; workItem: StoredWorkItem; executionToken?: string }> { return this.room().beginOperatorAction(input); }
 	completeOperatorAction(input: { actionId: number; idempotencyKey: string; executionToken: string; result: unknown }): Promise<StoredOperatorAction> { return this.room().completeOperatorAction(input); }
 	rejectOperatorAction(input: { actionId: number; executionToken: string; error?: string }): Promise<StoredOperatorAction> { return this.room().rejectOperatorAction(input); }
+	recordOperatorNote(input: { workItemId: string; expectedVersion: number; turn: number; response: OperatorResponse }): Promise<void> { return this.room().recordOperatorNote(input.workItemId, input.expectedVersion, input.turn, input.response); }
+	ingestExternalFact(input: unknown): Promise<{ accepted: boolean }> { return this.room().ingestExternalFact(input); }
 }
 
 /**
  * One room Durable Object owns chat, annotations, and the sole work ledger.
- * Its only alarm responsibility is idempotent notification delivery to the
- * persistent OS workspace; it contains no GitHub, runner, CI, or promotion
- * decision loop.
+ * Its only alarm responsibility is idempotent wake delivery to the operator
+ * worker; it contains no GitHub, runner, CI, or promotion decision loop.
  */
 export class ChatRoom extends DurableObject<RuntimeEnv> {
 	constructor(ctx: DurableObjectState, env: RuntimeEnv) {
@@ -242,12 +220,6 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		this.ctx.blockConcurrencyWhile(async () => {
 			await this.scheduleWakeAlarm();
 		});
-	}
-
-	[restore](params: unknown): RpcTarget {
-		const candidate = params as Partial<OperatorNoteRestore> | null;
-		if (!candidate || candidate.type !== "operator-note" || typeof candidate.workItemId !== "string" || !isUuid(candidate.workItemId) || !Number.isSafeInteger(candidate.expectedVersion) || candidate.expectedVersion! < 1 || !Number.isSafeInteger(candidate.turn) || candidate.turn! < 1) throw new TypeError("Unknown App Harness restore target.");
-		return new OperatorNoteTarget(this, candidate.workItemId, candidate.expectedVersion!, candidate.turn!);
 	}
 
 	async fetch(request: Request): Promise<Response> {
@@ -343,12 +315,12 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		const current = await this.requireWorkItem(input.workItemId);
 		const result = claimWorkItem(current, { operatorId: OPERATOR_ID, leaseId: input.leaseId, now: Date.now(), leaseMs: input.leaseMs });
 		if (result.disposition === "busy" || result.disposition === "deferred" || result.disposition === "terminal") return result.item as StoredWorkItem;
-		return this.persistTransition(current.version, result.item as StoredWorkItem, `Cloudflare OS ${result.disposition} this work item.`, "cloudflare-os");
+		return this.persistTransition(current.version, result.item as StoredWorkItem, `The operator ${result.disposition} this work item.`, "cloudflare-os");
 	}
 
 	async release(input: { workItemId: string; leaseId: string }): Promise<StoredWorkItem> {
 		const current = await this.requireWorkItem(input.workItemId);
-		return this.persistTransition(current.version, releaseWorkItem(current, { operatorId: OPERATOR_ID, leaseId: input.leaseId, now: Date.now() }) as StoredWorkItem, "Cloudflare OS released this work item for the next operator turn.", "cloudflare-os");
+		return this.persistTransition(current.version, releaseWorkItem(current, { operatorId: OPERATOR_ID, leaseId: input.leaseId, now: Date.now() }) as StoredWorkItem, "The operator released this work item for the next turn.", "cloudflare-os");
 	}
 
 	async defer(input: { workItemId: string; leaseId: string; delayMs: number; message: string }): Promise<StoredWorkItem> {
@@ -373,7 +345,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		const current = await this.requireWorkItem(input.workItemId);
 		const result = applyImplementationStart(current, { operatorId: OPERATOR_ID, leaseId: input.leaseId, runId: input.runId, now: Date.now() });
 		if (result.disposition !== "started") return { disposition: result.disposition, item: result.item as StoredWorkItem };
-		const item = await this.persistTransition(current.version, result.item as StoredWorkItem, "Cloudflare OS delegated the next missing artifact to an isolated NanoCodex run.", "cloudflare-os");
+		const item = await this.persistTransition(current.version, result.item as StoredWorkItem, "The operator delegated the next missing artifact to an isolated NanoCodex run.", "cloudflare-os");
 		return { disposition: result.disposition, item };
 	}
 
@@ -463,7 +435,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 			await Promise.all([txn.put(ACTION_COUNTER_KEY, id), txn.put(`${ACTION_PREFIX}${id}`, action), txn.put(`${ACTION_KEY_PREFIX}${key}`, id), txn.put(`${ACTION_ACTIVE_PREFIX}${current.id}`, id), this.putWakeInTransaction(txn, current)]);
 			return action;
 		});
-		await this.appendActionEvent(workItem.id, workItem.phase, `Cloudflare OS staged ${action.command.kind.replaceAll("-", " ")}.`);
+		await this.appendActionEvent(workItem.id, workItem.phase, `The operator staged ${action.command.kind.replaceAll("-", " ")}.`);
 		await this.scheduleWakeAlarm();
 		return action;
 	}
@@ -511,7 +483,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 			return { disposition: "execute" as const, action: applying, workItem, executionToken };
 		});
 		if (begun.disposition === "execute") {
-			await this.appendActionEvent(begun.workItem.id, begun.workItem.phase, `Cloudflare OS is executing ${begun.action.command.kind.replaceAll("-", " ")}.`);
+			await this.appendActionEvent(begun.workItem.id, begun.workItem.phase, `The operator is executing ${begun.action.command.kind.replaceAll("-", " ")}.`);
 			await this.scheduleWakeAlarm();
 		}
 		return begun;
@@ -534,7 +506,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		if (completed.command.kind !== "defer") {
 			const workItem = await this.loadWorkItem(completed.workItemId);
 			if (workItem) {
-				await this.appendActionEvent(workItem.id, workItem.phase, `Cloudflare OS completed ${completed.command.kind.replaceAll("-", " ")}.`);
+				await this.appendActionEvent(workItem.id, workItem.phase, `The operator completed ${completed.command.kind.replaceAll("-", " ")}.`);
 				await this.scheduleWakeAlarm();
 			}
 		}
@@ -555,13 +527,13 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		});
 		const workItem = await this.loadWorkItem(rejected.workItemId);
 		if (workItem) {
-			await this.appendActionEvent(workItem.id, workItem.phase, `Cloudflare OS could not apply ${rejected.command.kind.replaceAll("-", " ")}${failure ? `: ${failure}` : "."}`);
+			await this.appendActionEvent(workItem.id, workItem.phase, `The operator could not apply ${rejected.command.kind.replaceAll("-", " ")}${failure ? `: ${failure}` : "."}`);
 			// Rejections re-queue wakes, so an operator that cannot converge would
 			// otherwise churn forever. A bounded rejection budget parks truthfully.
 			const rejections = (await this.listOperatorActions({ workItemId: workItem.id })).filter((action) => action.status === "rejected").length;
 			if (!TERMINAL_PHASES.has(workItem.phase) && rejections >= REJECTED_ACTION_PARK_THRESHOLD) {
 				const parked = { ...workItem, phase: "needs_review" as const, version: workItem.version + 1, lease: null, activeImplementation: null, updatedAt: Date.now() };
-				await this.persistTransition(workItem.version, parked, `Cloudflare OS rejected ${rejections} staged commands for this work item; work is parked for review with its ledger and artifacts intact.`, "system");
+				await this.persistTransition(workItem.version, parked, `The operator rejected ${rejections} staged commands for this work item; work is parked for review with its ledger and artifacts intact.`, "system");
 			} else {
 				await this.scheduleWakeAlarm();
 			}
@@ -608,6 +580,48 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		}
 	}
 
+	/**
+	 * One entry point for pushed external facts (the runner today, GitHub
+	 * webhooks next). A fact never writes work-item state directly: it is
+	 * verified against the item, merged monotonically into the per-item fact
+	 * record the wake snapshot embeds, and answered with an immediate wake so
+	 * the operator stages the actual transition itself.
+	 */
+	async ingestExternalFact(input: unknown): Promise<{ accepted: boolean }> {
+		const parsed = normalizeExternalFactInput(input);
+		if (!parsed) return { accepted: false };
+		const merged = await this.ctx.storage.transaction(async (txn) => {
+			const item = await txn.get<StoredWorkItem>(this.workItemKey(parsed.workItemId));
+			if (!item || TERMINAL_PHASES.has(item.phase)) return undefined;
+			// The ledger run identifier is the bearer credential: minted per
+			// implementation run, known only to the ledger and the isolated
+			// runner process, and it doubles as the dedupe key.
+			if (item.phase !== "implementing" || item.activeImplementation?.runId !== parsed.runId) return undefined;
+			const key = `${EXTERNAL_FACT_PREFIX}${item.id}`;
+			const facts = (await txn.get<ExternalFacts>(key)) ?? {};
+			if (facts.runnerResult?.runId === parsed.runId) return { duplicate: true };
+			facts.runnerResult = parsed.fact;
+			await txn.put(key, facts);
+			return { duplicate: false };
+		});
+		if (!merged) return { accepted: false };
+		if (merged.duplicate) return { accepted: true };
+		const current = await this.loadWorkItem(parsed.workItemId);
+		if (current) {
+			const message = parsed.fact.state === "pull-request-opened"
+				? "The isolated runner reported a candidate pull request."
+				: `The isolated runner finished: ${parsed.fact.state}${parsed.fact.classification ? ` (${parsed.fact.classification})` : ""}.`;
+			if (current.resumeAt !== null && current.resumeAt !== undefined) {
+				// The completion supersedes any defer that was waiting for it.
+				await this.persistTransition(current.version, { ...current, resumeAt: null, version: current.version + 1 }, message, "runner");
+			} else {
+				await this.appendActionEvent(current.id, current.phase, message, "runner");
+				await this.queueOperatorWake(current);
+			}
+		}
+		return { accepted: true };
+	}
+
 	private requireActionLease(workItem: StoredWorkItem, command: OperatorCommand, now: number): void {
 		if (command.kind === "claim") return;
 		if (!workItem.lease || workItem.lease.operatorId !== OPERATOR_ID || workItem.lease.id !== command.leaseId || workItem.lease.expiresAt <= now) {
@@ -615,12 +629,12 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		}
 	}
 
-	private async appendActionEvent(workItemId: string, phase: LedgerPhase, message: string): Promise<void> {
+	private async appendActionEvent(workItemId: string, phase: LedgerPhase, message: string, source: LedgerEvent["source"] = "cloudflare-os"): Promise<void> {
 		const item = await this.ctx.storage.transaction(async (txn) => {
 			const current = await txn.get<StoredWorkItem>(this.workItemKey(workItemId));
 			if (!current) return undefined;
 			const eventSequence = current.eventSequence + 1;
-			const event: LedgerEvent = { id: `${current.id}:${eventSequence}`, workItemId: current.id, sequence: eventSequence, phase, message: normalizeOperatorMessage(message), source: "cloudflare-os", at: Date.now() };
+			const event: LedgerEvent = { id: `${current.id}:${eventSequence}`, workItemId: current.id, sequence: eventSequence, phase, message: normalizeOperatorMessage(message), source, at: Date.now() };
 			const updated = { ...current, eventSequence, latestEvent: event, updatedAt: event.at };
 			await Promise.all([txn.put(this.workItemKey(updated.id), updated), txn.put(this.eventKey(updated.id, eventSequence), event)]);
 			return updated;
@@ -704,7 +718,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 	private newWorkItem(input: { kind: StoredWorkItem["kind"]; request: string; target?: TargetEnvelope; submissionId?: string; annotationId?: string; now: number }): StoredWorkItem {
 		const id = crypto.randomUUID();
 		const base = createLedgerWorkItem({ id, room: "main", request: input.request, target: input.target, submissionId: input.submissionId, now: input.now });
-		const event: LedgerEvent = { id: `${id}:1`, workItemId: id, sequence: 1, phase: "submitted", message: "Request received and durably queued for Cloudflare OS.", source: "user", at: input.now };
+		const event: LedgerEvent = { id: `${id}:1`, workItemId: id, sequence: 1, phase: "submitted", message: "Request received and durably queued for the operator.", source: "user", at: input.now };
 		return { ...base, kind: input.kind, annotationId: input.annotationId, eventSequence: 1, latestEvent: event };
 	}
 
@@ -826,7 +840,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 				const exhausted = reservation.item;
 				if (!TERMINAL_PHASES.has(exhausted.phase)) {
 					const parked = { ...exhausted, phase: "needs_review" as const, version: exhausted.version + 1, lease: null, activeImplementation: null, updatedAt: Date.now() };
-					await this.persistTransition(exhausted.version, parked, "Cloudflare OS did not return a completed turn after three durable delivery attempts. Work is parked for review without losing its ledger or artifacts.", "system");
+					await this.persistTransition(exhausted.version, parked, "The operator did not return a completed turn after three durable delivery attempts. Work is parked for review without losing its ledger or artifacts.", "system");
 				}
 				continue;
 			}
@@ -836,30 +850,28 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 			// spending its small turn budget re-reading state it already owns.
 			const stateItem = await this.loadWorkItem(inFlight.workItemId);
 			const stateActions = stateItem ? await this.listOperatorActions({ workItemId: stateItem.id }) : [];
-			const responseTarget = await this.ctx.restore({ type: "operator-note", workItemId: inFlight.workItemId, expectedVersion: inFlight.version, turn: inFlight.turn }) as RpcStub<OperatorNoteTarget>;
+			const stateFacts = stateItem ? await this.ctx.storage.get<ExternalFacts>(`${EXTERNAL_FACT_PREFIX}${stateItem.id}`) : undefined;
+			// Each delivered or recovery turn keeps its independently idempotent key.
+			const wakeKey = `ledger-event:${inFlight.id}:v${inFlight.version}:t${inFlight.turn}`;
 			try {
-				const result = await (this.env.OS_WORKSPACE as OsWorkspaceGateway).submitExternalMessage({
-					callerEmail: OPERATOR_EMAIL,
-					gadgetKey: OPERATOR_GADGET_KEY,
-					chatKey: OPERATOR_CHAT_KEY,
-					messageKey: `ledger-event:${inFlight.id}:v${inFlight.version}:t${inFlight.turn}`,
-					prompt: `${OPERATOR_INSTRUCTION} Work item: ${inFlight.workItemId}. Revision hint: ${inFlight.version}. State: ${operatorWakeState(stateItem, stateActions)}`,
-					gadgetTitle: "App Harness operator",
-					chatGatewayRpcTarget: responseTarget,
+				const result = await (this.env.OPERATOR as OperatorGatewayTransport).submitWake({
+					workItemId: inFlight.workItemId,
+					version: inFlight.version,
+					turn: inFlight.turn,
+					wakeKey,
+					state: operatorWakeState(stateItem, stateActions, stateFacts),
 				});
-				if (!result.accepted) throw new Error(`Cloudflare OS rejected the durable wake: ${result.message}`);
+				if (!result.accepted) throw new Error(`The operator worker declined the durable wake: ${result.message}`);
 			} catch (error) {
-				console.error("Failed to deliver the durable ledger wake to Cloudflare OS.", { workItemId: inFlight.workItemId, version: inFlight.version, turn: inFlight.turn, error });
+				console.error("Failed to deliver the durable ledger wake to the operator worker.", { workItemId: inFlight.workItemId, version: inFlight.version, turn: inFlight.turn, error });
 				// A delivery failure must be public: silent retries looked exactly
 				// like a healthy idle system for hours.
 				const failedItem = await this.loadWorkItem(inFlight.workItemId);
-				if (failedItem) await this.appendActionEvent(failedItem.id, failedItem.phase, `Cloudflare OS wake delivery failed (turn ${inFlight.turn}): ${String(error instanceof Error ? error.message : error).slice(0, 200)}. Retrying.`).catch(() => undefined);
+				if (failedItem) await this.appendActionEvent(failedItem.id, failedItem.phase, `Operator wake delivery failed (turn ${inFlight.turn}): ${String(error instanceof Error ? error.message : error).slice(0, 200)}. Retrying.`).catch(() => undefined);
 				await this.ctx.storage.transaction(async (txn) => {
 					const current = await txn.get<WakeRecord>(key);
 					if (current?.version === inFlight.version && (current.turn ?? 1) === inFlight.turn) await txn.put(key, { ...inFlight, state: "pending", availableAt: now + Math.min(WAKE_RETRY_BASE_MS * 2 ** Math.min(inFlight.attempts, 8), 5 * 60_000) });
 				});
-			} finally {
-				responseTarget[Symbol.dispose]();
 			}
 		}
 	}
@@ -935,7 +947,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 				if (!expired) continue;
 				const item = await this.loadWorkItem(expired.workItemId);
 				if (item && !TERMINAL_PHASES.has(item.phase)) {
-					await this.appendActionEvent(item.id, item.phase, `Cloudflare OS must reconcile an interrupted ${expired.command.kind.replaceAll("-", " ")} before retrying.`);
+					await this.appendActionEvent(item.id, item.phase, `The operator must reconcile an interrupted ${expired.command.kind.replaceAll("-", " ")} before retrying.`);
 					await this.queueOperatorWake(item);
 				}
 			}
@@ -1112,14 +1124,17 @@ const OPERATOR_STATE_MAX_CHARS = 6_000;
  * and the durable ledger still enforces phase, lease, ordering, and
  * idempotency invariants against whatever the model stages.
  */
-function operatorWakeState(item: StoredWorkItem | undefined, actions: StoredOperatorAction[]): string {
+function operatorWakeState(item: StoredWorkItem | undefined, actions: StoredOperatorAction[], facts?: ExternalFacts): string {
 	if (!item) return "null";
+	// Pushed external facts ride the snapshot; only facts for the currently
+	// active implementation run are shown so a stale run cannot masquerade.
+	const runnerResult = facts?.runnerResult && item.activeImplementation && facts.runnerResult.runId === item.activeImplementation.runId ? facts.runnerResult : undefined;
 	// Surface a stalled implementation run as a fact: the disposable runner
 	// derives its own process identity, so a re-staged implement command with
 	// a fresh runId starts a clean isolated run instead of resuming a corpse.
 	let implementationProblem: string | undefined;
 	if (item.phase === "implementing" && item.activeImplementation && Date.now() - item.activeImplementation.startedAt > STALLED_IMPLEMENTATION_MS) {
-		implementationProblem = "The active implementation run exceeded its execution budget and cannot resume. Stage stageImplementation again with a fresh unique runId to restart the isolated run.";
+		implementationProblem = "The active implementation run exceeded its execution budget and cannot resume. Stage stageImplementation again to restart the isolated run.";
 	}
 	// Surface a recorded plan the runner would refuse as a fact, so the
 	// bounded model stages a revised plan instead of retrying implement.
@@ -1140,6 +1155,7 @@ function operatorWakeState(item: StoredWorkItem | undefined, actions: StoredOper
 		plan: item.plan,
 		...(planProblem ? { planProblem } : {}),
 		...(implementationProblem ? { implementationProblem } : {}),
+		...(runnerResult ? { facts: { runnerResult } } : {}),
 		activeImplementation: item.activeImplementation,
 		artifacts: item.artifacts,
 		actions: actions.slice(-OPERATOR_STATE_ACTION_LIMIT).map((action) => ({
@@ -1162,6 +1178,36 @@ function normalizeOperatorMessage(value: unknown): string {
 
 function normalizeOperatorNoteKey(value: unknown): string | undefined {
 	return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$/u.test(value) ? value : undefined;
+}
+
+/**
+ * Verify a pushed external fact before it can touch the room. The merge is
+ * monotonic by construction: one fact per run identifier, first write wins,
+ * so a later delivery can never downgrade recorded evidence.
+ */
+function normalizeExternalFactInput(value: unknown): ExternalFactInput | null {
+	if (!value || typeof value !== "object") return null;
+	const raw = value as Record<string, unknown>;
+	if (raw.source !== "runner") return null;
+	if (typeof raw.workItemId !== "string" || !isUuid(raw.workItemId)) return null;
+	if (typeof raw.runId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$/u.test(raw.runId)) return null;
+	const artifact = raw.artifact;
+	if (!artifact || typeof artifact !== "object") return null;
+	const rawArtifact = artifact as Record<string, unknown>;
+	if (typeof rawArtifact.state !== "string" || !/^[a-z][a-z-]{0,40}$/u.test(rawArtifact.state)) return null;
+	const fact: NonNullable<ExternalFacts["runnerResult"]> = { runId: raw.runId, state: rawArtifact.state, at: Date.now() };
+	if (typeof rawArtifact.classification === "string") fact.classification = rawArtifact.classification.slice(0, 80);
+	if (typeof rawArtifact.stderrTail === "string") fact.stderrTail = rawArtifact.stderrTail.slice(0, 400);
+	if (typeof rawArtifact.headSha === "string" && /^[0-9a-f]{40}$/iu.test(rawArtifact.headSha)) fact.headSha = rawArtifact.headSha.toLowerCase();
+	if (rawArtifact.pullRequest && typeof rawArtifact.pullRequest === "object") {
+		const pullRequest = rawArtifact.pullRequest as { number?: unknown; url?: unknown };
+		if (Number.isSafeInteger(pullRequest.number) && (pullRequest.number as number) >= 1) {
+			try {
+				fact.pullRequest = { number: pullRequest.number as number, url: assertGitHubPullRequestUrl(pullRequest.url, pullRequest.number) };
+			} catch { /* an unverifiable pull request reference is omitted, not trusted */ }
+		}
+	}
+	return { source: "runner", workItemId: raw.workItemId, runId: raw.runId, fact };
 }
 
 
@@ -1345,7 +1391,20 @@ function roomName(pathname: string): string | null {
 
 export default {
 	async fetch(request, env): Promise<Response> {
-		const room = roomName(new URL(request.url).pathname);
+		const pathname = new URL(request.url).pathname;
+		if (pathname === "/api/runner/complete") {
+			// The isolated runner reports its terminal artifact by push. The
+			// per-run ledger identifier inside the payload is the bearer
+			// credential; the room verifies it against the active implementation.
+			if (request.method !== "POST") return new Response("Method not allowed", { status: 405 });
+			const body = await request.text();
+			if (utf8Bytes(body) > 256_000) return new Response("Payload too large", { status: 413 });
+			let payload: { workItemId?: unknown; runId?: unknown; artifact?: unknown };
+			try { payload = JSON.parse(body) as typeof payload; } catch { return new Response("Invalid JSON", { status: 400 }); }
+			const outcome = await env.CHAT_ROOM.getByName("main").ingestExternalFact({ source: "runner", workItemId: payload.workItemId, runId: payload.runId, artifact: payload.artifact });
+			return Response.json(outcome, { status: outcome.accepted ? 200 : 403 });
+		}
+		const room = roomName(pathname);
 		if (room) {
 			if (request.method !== "GET") return new Response("Method not allowed", { status: 405 });
 			if (room !== "main") return new Response("Unknown room", { status: 404 });
