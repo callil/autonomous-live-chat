@@ -209,7 +209,13 @@ async function callModel(body) {
 		throw classified("transport", "agent-model-unreachable", true);
 	}
 	if (response.status === 429 || response.status >= 500) throw classified("upstream", "agent-model-unavailable", true);
-	if (!response.ok) throw classified("rejected", "agent-model-rejected");
+	if (!response.ok) {
+		// The provider's own words are the diagnosis (dead model vs gated org
+		// vs bad shape); put a bounded slice on the transcript stream.
+		const detail = (await response.text().catch(() => "")).slice(0, 400);
+		await emit({ type: "model.call.rejected", payload: { status: response.status, detail } });
+		throw classified(`rejected: ${response.status} ${detail.slice(0, 160)}`, "agent-model-rejected");
+	}
 	try { return await response.json(); } catch { throw classified("decode", "agent-model-rejected"); }
 }
 
