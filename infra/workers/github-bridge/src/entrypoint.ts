@@ -1,10 +1,12 @@
 import { WorkerEntrypoint } from "cloudflare:workers";
 import { GitHubCapability, type CandidateObservationInput, type CandidateValidationObservationInput, type CloseAfterDeploymentInput, type CreateIssueInput, type DispatchPromotionInput, type GitHubBridgeEnv, type PostStatusInput, type PromotionRunObservationInput, type UpdateClassificationInput } from "./index";
+import { handleGithubWebhook } from "./webhook";
 
 /**
  * The only exported GitHub App capability.  This Worker is called over a
- * named private service binding; its public HTTP surface intentionally does
- * nothing.  The App private key is resolved only in this process.
+ * named private service binding; its public HTTP surface serves exactly one
+ * route: the signed GitHub webhook receiver.  The App private key is resolved
+ * only in this process.
  */
 export class GitHubAppCapability extends WorkerEntrypoint<GitHubBridgeEnv> {
 	private capability(): GitHubCapability {
@@ -25,7 +27,11 @@ export class GitHubAppCapability extends WorkerEntrypoint<GitHubBridgeEnv> {
 }
 
 export default {
-	fetch(): Response {
+	async fetch(request: Request, env: GitHubBridgeEnv): Promise<Response> {
+		if (new URL(request.url).pathname === "/github/webhook") {
+			if (request.method !== "POST") return new Response("Method not allowed", { status: 405 });
+			return handleGithubWebhook(request, env);
+		}
 		return new Response("Not found", { status: 404 });
 	},
 };

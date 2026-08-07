@@ -30,11 +30,13 @@ Repository Actions secrets are installed into the relevant Worker via standard i
 - `CLOUDFLARE_API_TOKEN` (repository Actions): trusted CI, promotion, and Worker deploys.
 - `APP_HARNESS_OPENAI_API_KEY` (repository Actions): provisioning source for the runner's model credential.
 - `APP_HARNESS_GITHUB_APP_ID` / `_INSTALLATION_ID` / `_PRIVATE_KEY` (repository Actions): provisioning source for the GitHub App capability Worker.
+- `APP_HARNESS_GITHUB_WEBHOOK_SECRET` (repository Actions): provisioning source for the bridge's GitHub webhook secret, installed by `deploy-github-bridge.yml`. The same value is configured on the GitHub App's webhook settings page.
 - `OPENAI_API_KEY` (Worker `app-harness-os-native-git`): the only secret the disposable runner holds; repository access uses short-lived installation tokens minted by the GitHub App Worker over a private service binding.
 - `GITHUB_APP_ID` / `GITHUB_APP_INSTALLATION_ID` / `GITHUB_APP_PRIVATE_KEY` (Worker `app-harness-os-git-proxy`): the sole GitHub App identity owner.
+- `GITHUB_WEBHOOK_SECRET` (Worker `app-harness-os-git-proxy`): authenticates GitHub webhook deliveries to the bridge's `POST /github/webhook` receiver; part of the GitHub App identity the bridge already solely owns.
 - `MODEL_API_KEY` (Worker `app-harness-operator`): optional model-provider credential for the operator's OpenAI-compatible endpoint; unnecessary when an AI Gateway stores the provider key.
 - The demo Worker holds no secrets at all; every cross-service call rides a private service binding.
-- No promotion callback secret exists: the persistent operator records final workflow evidence in the durable ledger after reading GitHub's immutable run and deployment artifacts.
+- No promotion callback secret exists: the persistent operator records final workflow evidence in the durable ledger after reading GitHub's immutable run and deployment artifacts. The webhook secret authenticates only the GitHub-to-bridge event push; the bridge-to-ledger hop rides a private service binding, so no callback secret authorizes a ledger write.
 
 Rotate a secret for suspected disclosure or planned lifecycle policy—not as a general retry mechanism. A deployment or upstream outage should resume from durable state with the same uncompromised identity.
 

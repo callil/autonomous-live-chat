@@ -6,12 +6,20 @@
  * leaves this Worker and callers use a private service binding/RPC instead
  * of a shared coordinator secret.
  */
+export type LedgerFactIngress = {
+	ingestExternalFact(input: unknown): Promise<{ accepted: boolean }>;
+};
+
 export type GitHubBridgeEnv = {
 	ALLOWED_REPOSITORY: string;
 	PRODUCTION_ORIGIN: string;
 	GITHUB_APP_ID: string;
 	GITHUB_APP_INSTALLATION_ID: string;
 	GITHUB_APP_PRIVATE_KEY: string;
+	/** Authenticates GitHub webhook deliveries; owned only by this Worker. */
+	GITHUB_WEBHOOK_SECRET?: string;
+	/** Private service binding to the demo Worker's LedgerService. */
+	LEDGER: LedgerFactIngress;
 };
 
 export type Classification = "triage" | "agent" | "needs-review" | "rejected" | "deployed";
