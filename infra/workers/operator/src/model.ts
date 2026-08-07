@@ -41,15 +41,19 @@ function normalizeWorkersAi(raw: unknown): ModelReply {
 	};
 }
 
-export async function callModel(env: ModelEnv, messages: ModelMessage[], tools: ToolDefinition[]): Promise<ModelReply> {
+export async function callModel(env: ModelEnv, messages: ModelMessage[], tools: ToolDefinition[], maxTokens?: number): Promise<ModelReply> {
 	if (env.MODEL_PROVIDER === "workers-ai") {
 		if (!env.AI) throw new ModelError(500, "Workers AI binding is not configured.");
 		// The default gateway auto-provisions, adding observability and failover.
 		const raw = await env.AI.run(env.MODEL_ID, { messages, tools: tools.map((entry) => entry.function), max_tokens: Number(env.MAX_TOKENS_PER_TURN) }, { gateway: { id: "default" } });
 		return normalizeWorkersAi(raw);
 	}
+	// A hung provider request must not outlive the turn: the DO's alarm can
+	// re-drive the loop but cannot cancel an in-flight fetch, so the request
+	// carries its own deadline.
 	const response = await fetch(`${env.MODEL_BASE_URL}/chat/completions`, {
 		method: "POST",
+		signal: AbortSignal.timeout(45_000),
 		headers: {
 			"content-type": "application/json",
 			// With gateway-stored provider keys the direct credential is optional.
@@ -61,7 +65,7 @@ export async function callModel(env: ModelEnv, messages: ModelMessage[], tools: 
 			tools,
 			tool_choice: "auto",
 			parallel_tool_calls: false,
-			max_completion_tokens: Number(env.MAX_TOKENS_PER_TURN),
+			max_completion_tokens: Math.max(1, Math.min(Number(env.MAX_TOKENS_PER_TURN), maxTokens ?? Number(env.MAX_TOKENS_PER_TURN))),
 		}),
 	});
 	if (!response.ok) throw new ModelError(response.status, (await response.text()).slice(0, 300));
