@@ -421,7 +421,9 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		// this deployment's production origin. The operator still decides when.
 		if (input.command.kind === "record-state" && (input.command.phase === "deployed" || input.command.phase === "completed")) {
 			const artifacts: Record<string, unknown> = { ...(input.command.artifacts ?? {}) };
-			if (typeof artifacts.deploymentUrl !== "string") artifacts.deploymentUrl = `https://${PRODUCTION_DEPLOYMENT_HOST}/`;
+			let deploymentUrl: URL | undefined;
+			try { deploymentUrl = new URL(String(artifacts.deploymentUrl)); } catch { deploymentUrl = undefined; }
+			if (!deploymentUrl || deploymentUrl.protocol !== "https:") artifacts.deploymentUrl = `https://${PRODUCTION_DEPLOYMENT_HOST}/`;
 			if (!artifacts.promotion && !workItem.artifacts.promotion) {
 				const promote = (await this.listOperatorActions({ workItemId: workItem.id })).findLast((action) => action.command.kind === "promote" && action.status === "applied");
 				if (promote && promote.command.kind === "promote") artifacts.promotion = { dispatchKey: promote.command.dispatchKey };
