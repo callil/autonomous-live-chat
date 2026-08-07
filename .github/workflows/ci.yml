@@ -15,6 +15,10 @@ concurrency:
 
 jobs:
   verify:
+    # Agent candidate branches are validated by the trusted candidate workflow
+    # against their immutable head; running the same baseline here again would
+    # only duplicate it.
+    if: ${{ !startsWith(github.event.pull_request.head.ref || '', 'app-harness-os/') }}
     runs-on: ubuntu-latest
     steps:
       - name: Check out the exact revision without persisted credentials
