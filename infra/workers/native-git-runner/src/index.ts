@@ -253,7 +253,7 @@ export class NativeGitRunner extends WorkerEntrypoint<Env> {
 		};
 		if (this.env.SANDBOX_CLOUDFLARE_ACCOUNT_ID) env.CLOUDFLARE_ACCOUNT_ID = this.env.SANDBOX_CLOUDFLARE_ACCOUNT_ID;
 		try {
-			await session.startProcess(`node /opt/app-harness/job-entrypoint.mjs < ${ids.requestPath}`, {
+			await session.startProcess(`node /opt/app-harness/job-entrypoint.mjs ${ids.requestPath}`, {
 				cwd: "/workspace",
 				env,
 				processId: ids.runId,

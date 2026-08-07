@@ -10,6 +10,16 @@ function emit(value) {
 }
 
 async function readRequest() {
+	// The request file path arrives as an argument so this process never
+	// depends on shell stdin redirection, which would hang forever if the
+	// sandbox spawned the command without a shell.
+	const path = process.argv[2];
+	if (typeof path === "string" && path.startsWith("/tmp/")) {
+		const { readFile } = await import("node:fs/promises");
+		const input = await readFile(path, "utf8");
+		if (input.length > 128_000) throw new Error("request-too-large");
+		return JSON.parse(input);
+	}
 	let input = "";
 	for await (const chunk of process.stdin) {
 		input += chunk;
@@ -167,6 +177,14 @@ async function main() {
 	if ("classification" in pullRequest) return artifact(request, "candidate-failed", { classification: pullRequest.classification, agent });
 	return artifact(request, "pull-request-opened", { baseSha, headSha, pullRequest, stack: { id: request.candidate.stack.stackId, nodeId: request.candidate.stack.nodeId, branch: request.candidate.stack.branch, parentBranch: request.candidate.stack.parentBranch, topology: submitted.topology }, agent });
 }
+
+// A wedged child process must never exceed the run budget silently: emit a
+// truthful terminal artifact and exit before the platform's process timeout.
+const deadline = setTimeout(() => {
+	emit({ jobId: "unknown", state: "candidate-failed", classification: "nanocodex-deadline-exceeded" });
+	process.exit(1);
+}, 660_000);
+deadline.unref?.();
 
 try {
 	emit(await main());
