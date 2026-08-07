@@ -19,7 +19,11 @@
     "./wake": {
       "types": "./wake.d.ts",
       "import": "./wake.js"
+    },
+    "./webhook": {
+      "types": "./webhook.d.ts",
+      "import": "./webhook.js"
     }
   },
-  "files": ["index.js", "index.d.ts", "ledger.js", "ledger.d.ts", "operator.js", "operator.d.ts", "wake.js", "wake.d.ts"]
+  "files": ["index.js", "index.d.ts", "ledger.js", "ledger.d.ts", "operator.js", "operator.d.ts", "wake.js", "wake.d.ts", "webhook.js", "webhook.d.ts"]
 }
