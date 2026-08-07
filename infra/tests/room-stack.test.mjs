@@ -4,12 +4,15 @@ import {
 	appendReservedNode,
 	canonicalStackPlan,
 	isStaleStackNode,
+	markNodeRetargeted,
 	normalizeRoomStack,
 	pinStackNode,
 	popBottomNode,
+	stackNodeContext,
 	stackTipPinned,
 	truncateStack,
 } from "../../packages/contracts/room-stack.js";
+import { extractGithubWebhookFact } from "../../packages/contracts/webhook.js";
 
 const A = "a".repeat(40);
 const B = "b".repeat(40);
@@ -99,6 +102,63 @@ assert.equal(popped.stack.baseSha, D, "the recorded base advances to the merge c
 assert.equal(popped.stack.stackId, "stack-item-a", "the epoch continues for the survivors");
 assert.equal(popBottomNode(threeDeep, "item-b", D).popped, false, "a non-bottom node can never pop");
 assert.deepEqual(popBottomNode(rooted.stack, "item-a", D).stack, EMPTY, "popping the only node ends the epoch");
+
+// ==== Retarget marking and merge-train coordinates ====
+
+// Marking only sets the flag: tip, order, head shas, and the recorded parent
+// stay byte-identical, because the survivor's unchanged provenance is exactly
+// what the gate's ancestor-of-main rule verifies.
+const markable = pinStackNode(stacked.stack, "item-b", C).stack;
+const marked = markNodeRetargeted(markable, "item-b");
+assert.equal(marked.marked, true);
+assert.equal(marked.stack.order[1].retargeted, true, "only the marker changes");
+assert.deepEqual({ ...marked.stack.order[1], retargeted: undefined }, { ...markable.order[1], retargeted: undefined }, "every other node field is untouched");
+assert.deepEqual(marked.stack.tip, markable.tip, "the tip is untouched by a retarget");
+assert.equal(markNodeRetargeted(marked.stack, "item-b").marked, false, "marking is idempotent");
+assert.equal(markNodeRetargeted(marked.stack, "item-missing").marked, false, "marking an absent node changes nothing");
+assert.equal(normalizeRoomStack(JSON.parse(JSON.stringify(marked.stack))).order[1].retargeted, true, "the marker survives persistence and normalization");
+
+assert.deepEqual(stackNodeContext(marked.stack, "item-a"), { position: 1, size: 2, expectedOrder: [], retargeted: false }, "the bottom node's context has nothing beneath it");
+assert.deepEqual(stackNodeContext(marked.stack, "item-b"), { position: 2, size: 2, expectedOrder: ["app-harness-os/10/g1"], retargeted: true }, "an upper node's context carries the exact branch order beneath it and its retarget marker");
+assert.equal(stackNodeContext(marked.stack, "item-missing"), null, "an unstacked item has no merge-train coordinates");
+
+// ==== End to end: two queued items ride one stack; the bottom merges ====
+
+// Two queued requests build the two-node record exactly as the room does:
+// root plan appended reserved, pinned by its candidate, dependent plan
+// appended on the pinned tip, pinned by its own candidate.
+const MERGE_COMMIT = "e".repeat(40);
+let train = appendReservedNode(undefined, { workItemId: "item-first", nodeId: "root", branch: "app-harness-os/20/g1", parentBranch: "main", parentBaseSha: A, stackId: "stack-epoch" }).stack;
+train = pinStackNode(train, "item-first", B).stack;
+train = appendReservedNode(train, { workItemId: "item-second", nodeId: "n-second00", branch: "app-harness-os/21/g1", parentBranch: "app-harness-os/20/g1", parentBaseSha: B, stackId: "stack-epoch" }).stack;
+train = pinStackNode(train, "item-second", C).stack;
+assert.deepEqual(train.order.map((node) => node.workItemId), ["item-first", "item-second"], "two queued items form a two-node record");
+assert.deepEqual(stackNodeContext(train, "item-second").expectedOrder, ["app-harness-os/20/g1"], "the second item's runner topology assertion is the branch below it");
+
+// The bottom node's PR merges: the webhook merged fact pops it and advances
+// the base; the survivor's stacked (retarget) fact only marks it.
+const mergedFact = extractGithubWebhookFact({
+	event: "pull_request",
+	payload: { action: "closed", pull_request: { number: 71, html_url: "https://github.com/callil/autonomous-live-chat/pull/71", merged: true, merge_commit_sha: MERGE_COMMIT, head: { ref: "app-harness-os/20/g1", sha: B } } },
+});
+const poppedTrain = popBottomNode(train, "item-first", mergedFact.mergeCommitSha);
+assert.equal(poppedTrain.popped, true, "the merged fact pops the bottom node");
+assert.equal(poppedTrain.stack.baseSha, MERGE_COMMIT, "the recorded base advances to the merge commit");
+assert.deepEqual(poppedTrain.stack.order.map((node) => node.workItemId), ["item-second"], "the survivor is the new bottom");
+assert.deepEqual(poppedTrain.stack.tip, { branch: "app-harness-os/21/g1", headSha: C }, "the survivor's pinned tip is untouched: zero regeneration");
+
+const retargetFact = extractGithubWebhookFact({
+	event: "pull_request",
+	payload: { action: "stacked", stack: { position: 1, size: 1 }, pull_request: { number: 72, html_url: "https://github.com/callil/autonomous-live-chat/pull/72", head: { ref: "app-harness-os/21/g1", sha: C }, base: { ref: "main" } } },
+});
+assert.equal(retargetFact.base, "main", "GitHub retargeted the survivor to main");
+const survivorNode = poppedTrain.stack.order[0];
+assert.notEqual(survivorNode.parentBranch, retargetFact.base, "the fact's base no longer names the recorded parent: this is the retarget");
+const retargetedTrain = markNodeRetargeted(poppedTrain.stack, "item-second").stack;
+assert.equal(retargetedTrain.order[0].retargeted, true, "the survivor is marked retargeted");
+assert.equal(retargetedTrain.order[0].parentBranch, "app-harness-os/20/g1", "the recorded parent provenance is untouched — the gate's ancestor rule carries it");
+assert.equal(isStaleStackNode(retargetedTrain, "item-second"), false, "a retargeted survivor is NOT stale: no replan, no new generation");
+assert.deepEqual(stackNodeContext(retargetedTrain, "item-second"), { position: 1, size: 1, expectedOrder: [], retargeted: true }, "the survivor is now the bottom: it may promote");
 
 // ==== canonicalStackPlan: the empty stack is byte-identical to today ====
 
@@ -203,5 +263,23 @@ assert.match(demoWorker, /if \(staleSurvivors\.length\) await this\.nudgeRestack
 assert.match(demoWorker, /The room stack tip is not pinned yet: the item below must record its candidate first\. Reply WAITING/u, "the tip-pinned admission conjunct refuses with a teaching error");
 assert.match(demoWorker, /restackProblem/u, "a stale survivor's snapshot carries the restack fact");
 assert.match(demoWorker, /Your parent was restacked and this node left the room stack\. Stage a revised plan \(revision \$\{item\.plan \? item\.plan\.revision \+ 1 : 1\}, next generation, fresh getMainSha baseSha\)/u, "the restack fact names the exact next revision");
+
+// ==== Room wiring: retarget ingestion, the pop, and the backstops ====
+
+assert.match(demoWorker, /if \(parsed\.fact\.kind === "merged"\) \{\n\t\t\tfor \(const workItemId of merged\.freshIds\) await this\.popRoomStackBottom\(workItemId, parsed\.fact\.mergeCommitSha\);/u, "the merged webhook fact pops the bottom node and advances the recorded base");
+assert.match(demoWorker, /if \(parsed\.fact\.kind === "stack"\) \{\n\t\t\tfor \(const workItemId of merged\.freshIds\) await this\.markRoomStackRetargeted\(workItemId, parsed\.fact\.base\);/u, "the stack fact marks a retargeted survivor without touching its provenance");
+assert.match(demoWorker, /private async popRoomStackBottom\(workItemId: string, mergeCommitSha: string\)/u);
+assert.match(demoWorker, /if \(bottom\) await this\.nudgeRestackSurvivor\(bottom\.workItemId\);/u, "the new bottom item gets one sweep-class poke so it promotes promptly");
+assert.match(demoWorker, /private async markRoomStackRetargeted\(workItemId: string, base: string\)/u);
+assert.match(demoWorker, /if \(!node \|\| node\.parentBranch === base\) return;/u, "a stack fact whose base still names the recorded parent is a join or move, never a retarget");
+assert.match(demoWorker, /private async reconcileStackBottom\(now: number\)/u, "the sweep reconciles a lost merged delivery for the stack bottom");
+assert.match(demoWorker, /await this\.reconcileStackBottom\(now\);/u, "reconciliation runs on every sweep");
+assert.match(demoWorker, /observeCandidatePullRequest\(\{ number: candidate!\.pullRequestNumber as number \}\)/u, "the backstop is one bounded bridge observation of the recorded candidate PR");
+assert.match(demoWorker, /observed\.merged && typeof observed\.mergeCommitSha === "string"/u, "only an observed merge with its commit reconciles the pop");
+assert.match(demoWorker, /async rebuildStack\(\)/u, "the nuke-and-rebuild lever parks stacked items and clears the record");
+assert.match(demoWorker, /"\/api\/admin\/rebuild-stack"/u, "the lever rides the bearer-authed admin surface");
+assert.match(demoWorker, /gh stack unstack/u, "the trusted server-side unstack is documented as an operator-side manual step, never executed by this worker");
+assert.match(demoWorker, /const mergeTrainHold = stackNode && stackNode\.position > 1 && validation\?\.conclusion === "success"/u, "a green upper node holds instead of promoting");
+assert.match(demoWorker, /stack: \{ position: stackNode\.position, size: stackNode\.size, expectedOrder: stackNode\.expectedOrder/u, "the snapshot carries the merge-train coordinates the loop supplies to the runner");
 
 console.log("room stack: append/pin/truncate/pop transforms, one-node byte equivalence, and room wiring passed");

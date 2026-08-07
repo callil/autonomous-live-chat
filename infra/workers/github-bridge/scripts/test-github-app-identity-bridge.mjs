@@ -28,6 +28,7 @@ globalThis.fetch = async (input, init = {}) => {
 	if (url.endsWith("/git/ref/heads/main")) return Response.json({ object: { sha: "a".repeat(40) } });
 	if (url.endsWith("/pulls/55")) return Response.json({ state: "open", merged: false, mergeable_state: "dirty" });
 	if (url.endsWith("/pulls/56")) return Response.json({ state: "open", merged: false, mergeable_state: null });
+	if (url.endsWith("/pulls/57")) return Response.json({ state: "closed", merged: true, mergeable_state: null, merge_commit_sha: "c".repeat(40) });
 	if (url.includes("/pulls?")) {
 		const query = new URL(url).searchParams;
 		return Response.json(query.get("head") === "callil:app-harness-os/42/g1" ? [{ number: 55, html_url: "https://github.com/callil/autonomous-live-chat/pull/55", state: "open", head: { ref: "app-harness-os/42/g1", sha: "b".repeat(40) }, base: { ref: "main" } }] : []);
@@ -35,7 +36,7 @@ globalThis.fetch = async (input, init = {}) => {
 	if (url.endsWith("/actions/workflows/os-stack-promote.yml/dispatches") && method === "POST") {
 		const body = JSON.parse(init.body);
 		assert.equal(body.inputs.dispatch_key, "dispatch-work-42", "the immutable durable dispatch key is forwarded to Actions");
-		assert.deepEqual(Object.keys(body.inputs).sort(), ["ci_profile", "dispatch_key", "generation", "head_sha", "issue_number", "parent_branch", "pull_request", "stack_id"], "Actions receives only the explicit promotion contract");
+		assert.deepEqual(Object.keys(body.inputs).sort(), ["ci_profile", "dispatch_key", "generation", "head_sha", "issue_number", "node_id", "parent_branch", "pull_request", "stack_id"], "Actions receives only the explicit promotion contract, node identity included");
 		return new Response(null, { status: 204 });
 	}
 	if (url.includes("/actions/workflows/os-stack-promote.yml/runs?")) return Response.json({ workflow_runs: [{ id: 124, status: "completed", conclusion: "success", html_url: "https://github.com/callil/autonomous-live-chat/actions/runs/124", display_title: "App Harness promotion · dispatch-work-42", created_at: "2026-08-06T20:00:00Z" }] });
@@ -80,17 +81,19 @@ try {
 	assert.deepEqual(await capability.getCandidate({ branch: "app-harness-os/42/g1", pullRequestBase: "main" }), { number: 55, url: "https://github.com/callil/autonomous-live-chat/pull/55", headSha: "b".repeat(40), base: "main", state: "open" }, "the operator can reconcile an exact candidate branch without storing PR state elsewhere");
 	assert.equal(await capability.getCandidate({ branch: "app-harness-os/missing/g1", pullRequestBase: "main" }), null, "a missing candidate remains an observation rather than a synthetic state transition");
 	assert.deepEqual(await capability.observeCandidateValidation({ pullRequest: 55, headSha: "b".repeat(40) }), { runId: 122, status: "completed", conclusion: "success", url: "https://github.com/callil/autonomous-live-chat/actions/runs/122", createdAt: "2026-08-06T19:58:00Z" }, "the operator can observe immutable candidate validation by its deterministic title");
-	assert.deepEqual(await capability.observeCandidatePullRequest({ number: 55 }), { number: 55, state: "open", merged: false, mergeableState: "dirty" }, "the merge-watch recovery path can observe a conflicted candidate's live merge state");
-	assert.deepEqual(await capability.observeCandidatePullRequest({ number: 56 }), { number: 56, state: "open", merged: false, mergeableState: "unknown" }, "a lazily computed mergeability projects as unknown, never as evidence");
+	assert.deepEqual(await capability.observeCandidatePullRequest({ number: 55 }), { number: 55, state: "open", merged: false, mergeableState: "dirty", mergeCommitSha: null }, "the merge-watch recovery path can observe a conflicted candidate's live merge state");
+	assert.deepEqual(await capability.observeCandidatePullRequest({ number: 56 }), { number: 56, state: "open", merged: false, mergeableState: "unknown", mergeCommitSha: null }, "a lazily computed mergeability projects as unknown, never as evidence");
+	assert.deepEqual(await capability.observeCandidatePullRequest({ number: 57 }), { number: 57, state: "closed", merged: true, mergeableState: "unknown", mergeCommitSha: "c".repeat(40) }, "a merged candidate's observation carries the merge commit, so a lost merged webhook is reconcilable");
 	await assert.rejects(() => capability.observeCandidatePullRequest({ number: 0 }), /Invalid candidate pull request observation input/u, "the observation refuses an invalid pull request number");
-	assert.deepEqual(await capability.dispatchPromotion({ pullRequest: 42, stackId: "stack-42", generation: 1, issueNumber: 42, parentBranch: "main", headSha: "b".repeat(40), dispatchKey: "dispatch-work-42", ciProfile: "behavior" }), { dispatchKey: "dispatch-work-42", dispatched: true }, "the operator can request deterministic promotion through the private capability");
+	assert.deepEqual(await capability.dispatchPromotion({ pullRequest: 42, stackId: "stack-42", generation: 1, issueNumber: 42, nodeId: "root", parentBranch: "main", headSha: "b".repeat(40), dispatchKey: "dispatch-work-42", ciProfile: "behavior" }), { dispatchKey: "dispatch-work-42", dispatched: true }, "the operator can request deterministic promotion through the private capability");
 	assert.deepEqual(await capability.observeWorkflowRun({ runId: 123 }), { runId: 123, status: "completed", conclusion: "success", url: "https://github.com/callil/autonomous-live-chat/actions/runs/123" }, "the operator can observe trusted GitHub workflow state");
 	assert.deepEqual(await capability.findPromotionRun({ dispatchKey: "dispatch-work-42", createdAfter: "2026-08-06T19:59:00Z" }), { runId: 124, status: "completed", conclusion: "success", url: "https://github.com/callil/autonomous-live-chat/actions/runs/124", createdAt: "2026-08-06T20:00:00Z" }, "the operator can find a promotion by its deterministic display title");
 	assert.equal(await capability.findPromotionRun({ dispatchKey: "dispatch-missing" }), null, "an undispatched promotion remains absent rather than becoming local workflow state");
 	assert.equal(await capability.resolvePromotionDispatchKey({ runId: 902 }), "dispatch-work-42", "a promotion run's durable dispatch key is recoverable from its rendered REST display title");
 	assert.equal(await capability.resolvePromotionDispatchKey({ runId: 903 }), null, "a run whose title never rendered the promotion run-name yields no identity");
 	await assert.rejects(() => capability.resolvePromotionDispatchKey({ runId: 0 }), /Invalid workflow run identifier/u, "resolution refuses an invalid run identifier");
-	await assert.rejects(() => capability.dispatchPromotion({ pullRequest: 42, stackId: "stack-42", generation: 1, issueNumber: 42, parentBranch: "main", headSha: "b".repeat(40), dispatchKey: "not valid", ciProfile: "behavior" }), /Invalid promotion dispatch/u, "a request cannot make ambiguous workflow evidence");
+	await assert.rejects(() => capability.dispatchPromotion({ pullRequest: 42, stackId: "stack-42", generation: 1, issueNumber: 42, nodeId: "root", parentBranch: "main", headSha: "b".repeat(40), dispatchKey: "not valid", ciProfile: "behavior" }), /Invalid promotion dispatch/u, "a request cannot make ambiguous workflow evidence");
+	await assert.rejects(() => capability.dispatchPromotion({ pullRequest: 42, stackId: "stack-42", generation: 1, issueNumber: 42, nodeId: "not a node!", parentBranch: "main", headSha: "b".repeat(40), dispatchKey: "dispatch-work-42", ciProfile: "behavior" }), /Invalid promotion dispatch/u, "an invalid node identity cannot reach the trusted workflow");
 	assert.deepEqual(await capability.createRunnerToken({ repository: env.ALLOWED_REPOSITORY, jobId: "job-1", generation: 1 }), { token: "installation-token", expiresAt: "2099-01-01T00:00:00Z" }, "the runner receives only a short-lived repository token");
 	await assert.rejects(() => capability.createRunnerToken({ repository: "other/repo", jobId: "job-1", generation: 1 }), /outside the installed repository scope/u, "the capability refuses another repository");
 } finally {

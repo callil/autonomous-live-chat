@@ -17,6 +17,8 @@ export type StageContext = {
 	issueNumber: number;
 	candidatePr: number;
 	candidateHeadSha: string;
+	/** The room-stack branch order beneath this item, from the ledger snapshot; loop-supplied runner input, never model-typed. */
+	expectedOrder?: string[];
 	facts?: Record<string, Record<string, unknown> | undefined>;
 };
 

@@ -64,6 +64,19 @@ function safeCallback(value) {
 // The ledger-declared CI profile rides the provenance markers so the trusted
 // gate can grant content/visual candidates the scoped validation fast path.
 const CI_PROFILES = new Set(["visual", "content", "behavior", "data", "infrastructure"]);
+/** A sibling parent inside the room stack is always a canonical node branch. */
+const STACK_PARENT = /^app-harness-os\/\d+\/g\d+$/u;
+/** Bounded, well above IMPLEMENT_SLOTS: the room stack can never grow this deep. */
+const EXPECTED_ORDER_MAX = 16;
+
+// The exact branch order beneath this node in the room's shared stack, from
+// the ledger's own record. Absent means empty (the root case).
+function safeExpectedOrder(value) {
+	if (value === undefined) return [];
+	if (!Array.isArray(value) || value.length > EXPECTED_ORDER_MAX) return null;
+	const order = value.map(safeBranch);
+	return order.every((entry) => entry !== null) ? order : null;
+}
 
 function safeRequest(input) {
 	const job = input?.job;
@@ -72,8 +85,17 @@ function safeRequest(input) {
 	const candidate = input.candidate;
 	const branch = safeBranch(candidate?.stack?.branch);
 	const parentBranch = safeBranch(candidate?.stack?.parentBranch);
-	if (candidate?.change?.kind !== "repository-task" || typeof candidate.change.request !== "string" || !candidate.change.request.trim() || !CI_PROFILES.has(candidate.change.ciProfile) || typeof candidate?.stack?.stackId !== "string" || !EVENT_ID.test(candidate.stack.stackId) || candidate.stack.nodeId !== "root" || !branch || !parentBranch || parentBranch !== "main" || candidate.stack.pullRequestBase !== "main" || !Number.isInteger(candidate.stack.issueNumber) || candidate.stack.issueNumber < 1 || typeof candidate.stack.parentBaseSha !== "string" || !SHA.test(candidate.stack.parentBaseSha) || branch !== `app-harness-os/${candidate.stack.issueNumber}/g${job.generation}`) return null;
-	return { ...input, job, candidate: { ...candidate, change: { ...candidate.change, request: candidate.change.request.trim() }, stack: { ...candidate.stack, branch, parentBranch } }, callback: safeCallback(input.callback) };
+	const expectedOrder = safeExpectedOrder(candidate?.stack?.expectedOrder);
+	if (candidate?.change?.kind !== "repository-task" || typeof candidate.change.request !== "string" || !candidate.change.request.trim() || !CI_PROFILES.has(candidate.change.ciProfile) || typeof candidate?.stack?.stackId !== "string" || !EVENT_ID.test(candidate.stack.stackId) || typeof candidate.stack.nodeId !== "string" || !EVENT_ID.test(candidate.stack.nodeId) || !branch || !parentBranch || !expectedOrder || !Number.isInteger(candidate.stack.issueNumber) || candidate.stack.issueNumber < 1 || typeof candidate.stack.parentBaseSha !== "string" || !SHA.test(candidate.stack.parentBaseSha) || branch !== `app-harness-os/${candidate.stack.issueNumber}/g${job.generation}`) return null;
+	// A root node stacks on main with nothing beneath it; a dependent node
+	// stacks on a canonical sibling, targets that parent, and knows the exact
+	// branch order below (ending at the parent itself).
+	if (parentBranch === "main") {
+		if (candidate.stack.pullRequestBase !== "main" || expectedOrder.length !== 0) return null;
+	} else if (!STACK_PARENT.test(parentBranch) || candidate.stack.pullRequestBase !== parentBranch || expectedOrder.at(-1) !== parentBranch) {
+		return null;
+	}
+	return { ...input, job, candidate: { ...candidate, change: { ...candidate.change, request: candidate.change.request.trim() }, stack: { ...candidate.stack, branch, parentBranch, expectedOrder } }, callback: safeCallback(input.callback) };
 }
 
 // Every step budget in milliseconds. Any single step can block forever — a
@@ -233,13 +255,35 @@ async function findAndAnnotatePullRequest(request, headSha) {
 	}
 }
 
-function oneNodeStackView(stdout, branch) {
+/** The top branch name of a `gh stack view --json` output, or null when the view is not a main-based stack. */
+function stackViewTop(stdout) {
 	try {
 		const view = JSON.parse(stdout);
-		if (!view || view.trunk !== "main" || view.currentBranch !== branch || !Array.isArray(view.branches) || view.branches.length !== 1) return null;
-		const [node] = view.branches;
-		if (!node || node.name !== branch || typeof node.base !== "string" || !SHA.test(node.base) || node.needsRebase !== false) return null;
-		return { trunk: "main", branch: node.name, baseSha: node.base.toLowerCase() };
+		if (!view || view.trunk !== "main" || !Array.isArray(view.branches)) return null;
+		const top = view.branches.at(-1);
+		return top && typeof top.name === "string" ? top.name : null;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Verify the submitted stack's exact topology for this node: trunk main, the
+ * branches are exactly the ledger-expected order with this node on top, and
+ * this node's own base is the parent's pinned head with no rebase pending.
+ * Lower nodes' needsRebase is deliberately ignored — after main moves, the
+ * cascade owns their rebasing, not this run.
+ */
+function stackNodeTopology(stdout, stack) {
+	try {
+		const view = JSON.parse(stdout);
+		if (!view || view.trunk !== "main" || view.currentBranch !== stack.branch || !Array.isArray(view.branches)) return null;
+		const expected = [...stack.expectedOrder, stack.branch];
+		if (view.branches.length !== expected.length || view.branches.some((node, index) => node?.name !== expected[index])) return null;
+		const own = view.branches.at(-1);
+		if (typeof own.base !== "string" || !SHA.test(own.base) || own.needsRebase !== false) return null;
+		if (own.base.toLowerCase() !== stack.parentBaseSha.toLowerCase()) return null;
+		return { trunk: "main", branch: own.name, baseSha: own.base.toLowerCase() };
 	} catch {
 		return null;
 	}
@@ -266,10 +310,23 @@ function classifyGhStackFailure(result, fallback) {
 	return GH_STACK_EXIT_CLASSIFICATIONS.get(result.exitCode) ?? fallback;
 }
 
-async function submitOneNodeStack(request, expectedHead) {
-	const { branch } = request.candidate.stack;
-	const initialized = await run("gh", ["stack", "init", "--base", "main", branch], { cwd: request.checkoutDirectory, timeoutMs: GH_STACK_TIMEOUT_MS });
-	if (!initialized.success) return { classification: classifyGhStackFailure(initialized, "stack-initialization-failed") };
+async function submitStackNode(request, expectedHead) {
+	const { branch, parentBranch, parentBaseSha } = request.candidate.stack;
+	if (parentBranch === "main") {
+		// Root case, unchanged: this node opens the room's stack epoch.
+		const initialized = await run("gh", ["stack", "init", "--base", "main", branch], { cwd: request.checkoutDirectory, timeoutMs: GH_STACK_TIMEOUT_MS });
+		if (!initialized.success) return { classification: classifyGhStackFailure(initialized, "stack-initialization-failed") };
+	} else {
+		// Append case, pre-submit re-verify: the parent's remote head must
+		// still be the pinned revision this node was planned against. A parent
+		// restacked mid-run is a needs-restack (parent-head-moved), caught
+		// here before anything is pushed. This complements the clone-time
+		// parent-base check, which works verbatim for sibling parents because
+		// the runner clones the parent branch itself.
+		const parentHead = await run("git", ["-C", request.checkoutDirectory, "ls-remote", "origin", `refs/heads/${parentBranch}`], { timeoutMs: GIT_TIMEOUT_MS });
+		if (!parentHead.success) return { classification: classifyGitTransportFailure(parentHead.stderr) };
+		if (parentHead.stdout.trim().split(/\s+/u)[0] !== parentBaseSha) return { restack: "parent-head-moved" };
+	}
 	const submitted = await run("gh", ["stack", "submit", "--auto", "--open"], { cwd: request.checkoutDirectory, timeoutMs: GH_STACK_TIMEOUT_MS });
 	if (!submitted.success) return { classification: classifyGhStackFailure(submitted, "stack-submission-failed") };
 	const [head, pushed, view] = await Promise.all([
@@ -280,7 +337,7 @@ async function submitOneNodeStack(request, expectedHead) {
 	if (!head.success || head.stdout.trim() !== expectedHead) return { classification: "stack-head-changed" };
 	if (!pushed.success || pushed.stdout.trim().split(/\s+/u)[0] !== expectedHead) return { classification: "stack-head-not-pushed" };
 	if (!view.success) return { classification: classifyGhStackFailure(view, "stack-view-failed") };
-	const topology = oneNodeStackView(view.stdout, branch);
+	const topology = stackNodeTopology(view.stdout, request.candidate.stack);
 	return topology ? { topology } : { classification: "stack-topology-invalid" };
 }
 
@@ -408,13 +465,30 @@ async function main() {
 	if (!request.candidate) return artifact(request, "checked-out", { baseSha, headSha: baseSha });
 	if (request.candidate.stack.parentBaseSha && request.candidate.stack.parentBaseSha !== baseSha) return artifact(request, "needs-restack", { baseSha, classification: "parent-base-sha-mismatch", stack: { id: request.candidate.stack.stackId, nodeId: request.candidate.stack.nodeId, branch: request.candidate.stack.branch, parentBranch: request.candidate.stack.parentBranch } });
 
-	const remote = await run("git", ["-C", request.checkoutDirectory, "ls-remote", "--heads", "origin", `refs/heads/${request.candidate.stack.branch}`], { timeoutMs: GIT_TIMEOUT_MS });
-	if (!remote.success) return artifact(request, "candidate-failed", { classification: classifyGitTransportFailure(remote.stderr), ...stderrTail(remote) });
-	const remoteSha = remote.stdout.trim().split(/\s+/u)[0];
-	const checkout = SHA.test(remoteSha)
-		? await run("git", ["-C", request.checkoutDirectory, "fetch", "origin", `refs/heads/${request.candidate.stack.branch}:refs/remotes/origin/${request.candidate.stack.branch}`], { timeoutMs: GIT_TIMEOUT_MS }).then(async (fetchResult) => fetchResult.success ? run("git", ["-C", request.checkoutDirectory, "checkout", "-B", request.candidate.stack.branch, `refs/remotes/origin/${request.candidate.stack.branch}`], { timeoutMs: GIT_TIMEOUT_MS }) : fetchResult)
-		: await run("git", ["-C", request.checkoutDirectory, "checkout", "-b", request.candidate.stack.branch], { timeoutMs: GIT_TIMEOUT_MS });
-	if (!checkout.success) return artifact(request, "candidate-failed", { classification: "candidate-branch-failed" });
+	if (request.candidate.stack.parentBranch === "main") {
+		const remote = await run("git", ["-C", request.checkoutDirectory, "ls-remote", "--heads", "origin", `refs/heads/${request.candidate.stack.branch}`], { timeoutMs: GIT_TIMEOUT_MS });
+		if (!remote.success) return artifact(request, "candidate-failed", { classification: classifyGitTransportFailure(remote.stderr), ...stderrTail(remote) });
+		const remoteSha = remote.stdout.trim().split(/\s+/u)[0];
+		const checkout = SHA.test(remoteSha)
+			? await run("git", ["-C", request.checkoutDirectory, "fetch", "origin", `refs/heads/${request.candidate.stack.branch}:refs/remotes/origin/${request.candidate.stack.branch}`], { timeoutMs: GIT_TIMEOUT_MS }).then(async (fetchResult) => fetchResult.success ? run("git", ["-C", request.checkoutDirectory, "checkout", "-B", request.candidate.stack.branch, `refs/remotes/origin/${request.candidate.stack.branch}`], { timeoutMs: GIT_TIMEOUT_MS }) : fetchResult)
+			: await run("git", ["-C", request.checkoutDirectory, "checkout", "-b", request.candidate.stack.branch], { timeoutMs: GIT_TIMEOUT_MS });
+		if (!checkout.success) return artifact(request, "candidate-failed", { classification: "candidate-branch-failed" });
+	} else {
+		// Append case: this fresh clone has no local stack tracking, so adopt
+		// the server-side stack by its top branch (`gh stack checkout`), assert
+		// that top is the ledger-recorded parent — a stale ledger tip is a
+		// terminal stack-tip-diverged restack, never an improvised base — and
+		// add this node's branch at the parent's HEAD.
+		const adopted = await run("gh", ["stack", "checkout", request.candidate.stack.parentBranch], { cwd: request.checkoutDirectory, timeoutMs: GH_STACK_TIMEOUT_MS });
+		if (!adopted.success) return artifact(request, "candidate-failed", { classification: classifyGhStackFailure(adopted, "stack-adopt-failed"), ...stderrTail(adopted) });
+		const adoptedView = await run("gh", ["stack", "view", "--json"], { cwd: request.checkoutDirectory, timeoutMs: GH_STACK_TIMEOUT_MS });
+		if (!adoptedView.success) return artifact(request, "candidate-failed", { classification: classifyGhStackFailure(adoptedView, "stack-view-failed") });
+		if (stackViewTop(adoptedView.stdout) !== request.candidate.stack.parentBranch) {
+			return artifact(request, "needs-restack", { baseSha, classification: "stack-tip-diverged", stack: { id: request.candidate.stack.stackId, nodeId: request.candidate.stack.nodeId, branch: request.candidate.stack.branch, parentBranch: request.candidate.stack.parentBranch } });
+		}
+		const added = await run("gh", ["stack", "add", request.candidate.stack.branch], { cwd: request.checkoutDirectory, timeoutMs: GH_STACK_TIMEOUT_MS });
+		if (!added.success) return artifact(request, "candidate-failed", { classification: classifyGhStackFailure(added, "stack-add-failed"), ...stderrTail(added) });
+	}
 	appendProgress("branch-ready");
 
 	postHeartbeat("agent-started");
@@ -454,7 +528,10 @@ async function main() {
 	if (!localTests.success) return artifact(request, "candidate-failed", { classification: localTests.stderr === "step-timeout" ? "local-tests-timeout" : "local-tests-failed", agent, ...stderrTail(localTests) });
 	postHeartbeat("local-tests-passed");
 
-	const submitted = await submitOneNodeStack(request, headSha);
+	const submitted = await submitStackNode(request, headSha);
+	// A parent restacked mid-run is a needs-restack, not a candidate failure:
+	// the operator replans this node onto the current tip, one generation.
+	if ("restack" in submitted) return artifact(request, "needs-restack", { baseSha, classification: submitted.restack, stack: { id: request.candidate.stack.stackId, nodeId: request.candidate.stack.nodeId, branch: request.candidate.stack.branch, parentBranch: request.candidate.stack.parentBranch }, agent });
 	if ("classification" in submitted) return artifact(request, "candidate-failed", { classification: submitted.classification, agent });
 	postHeartbeat("pushed");
 	const pullRequest = await findAndAnnotatePullRequest(request, headSha);

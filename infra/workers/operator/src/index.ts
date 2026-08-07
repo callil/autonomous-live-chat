@@ -37,6 +37,8 @@ type TurnState = {
 	issueNumber: number;
 	candidatePr: number;
 	candidateHeadSha: string;
+	/** The room-stack branch order beneath this item, from the ledger snapshot; the loop supplies it to the runner, never the model. */
+	stackExpectedOrder: string[];
 	/** Snapshot facts, injected into evidence-bearing commands. */
 	snapshotFacts?: Record<string, Record<string, unknown> | undefined>;
 	messages: ModelMessage[];
@@ -58,6 +60,8 @@ type Snapshot = {
 	artifacts?: { issue?: { number?: number } };
 	/** The applied promote action's durable dispatch key, exposed while promoting. */
 	promotionDispatch?: { dispatchKey?: string; dispatchedAt?: number };
+	/** The item's merge-train coordinates; expectedOrder is loop-owned runner input. */
+	stack?: { position?: number; size?: number; expectedOrder?: unknown };
 	facts?: Record<string, Record<string, unknown> | undefined>;
 };
 
@@ -177,6 +181,7 @@ export class OperatorTurn extends DurableObject<Env> {
 			issueNumber: Number.isSafeInteger(snapshot.artifacts?.issue?.number) ? snapshot.artifacts!.issue!.number! : 0,
 			candidatePr: Number.isSafeInteger((snapshot.artifacts as { candidate?: { pullRequestNumber?: unknown } } | undefined)?.candidate?.pullRequestNumber) ? (snapshot.artifacts as { candidate: { pullRequestNumber: number } }).candidate.pullRequestNumber : 0,
 			candidateHeadSha: typeof (snapshot.artifacts as { candidate?: { headSha?: unknown } } | undefined)?.candidate?.headSha === "string" ? (snapshot.artifacts as { candidate: { headSha: string } }).candidate.headSha : "",
+			stackExpectedOrder: safeExpectedOrder(snapshot.stack?.expectedOrder),
 			snapshotFacts: snapshot.facts ?? undefined,
 			messages: [
 				{ role: "system", content: SYSTEM_PROMPT },
@@ -341,6 +346,9 @@ export class OperatorTurn extends DurableObject<Env> {
 				issueNumber: turn.issueNumber,
 				candidatePr: turn.candidatePr,
 				candidateHeadSha: turn.candidateHeadSha,
+				// The merge-train order beneath this item, from the snapshot:
+				// mechanical runner input the model must never retype.
+				expectedOrder: turn.stackExpectedOrder,
 				facts: turn.snapshotFacts,
 			});
 			return this.stageAndExecute(turn, command);
@@ -446,6 +454,13 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
 		promise,
 		new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`${label} exceeded its ${ms}ms budget.`)), ms)),
 	]);
+}
+
+/** The snapshot's merge-train order beneath this item: canonical branch names only, bounded, or empty. */
+function safeExpectedOrder(value: unknown): string[] {
+	if (!Array.isArray(value) || value.length > 16) return [];
+	const order = value.filter((branch): branch is string => typeof branch === "string" && /^app-harness-os\/\d+\/g\d+$/u.test(branch));
+	return order.length === value.length ? order : [];
 }
 
 function parseSnapshot(state: string): Snapshot {

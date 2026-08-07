@@ -15,7 +15,7 @@ export const SYSTEM_PROMPT =
 	+ "Order: classification -> issue -> plan -> implementation -> candidate -> validating -> promotion -> deployed -> completed. "
 	+ "One tool per step; advance while the ledger accepts; on rejected, correct once or stop. "
 	+ "Results arrive by push: never poll getCandidate. stageCandidate from a pull-request-opened State.facts.runnerResult; on failure or implementationProblem, stageImplementation again or replan. "
-	+ "Stage from pushed State.facts. On validation success stageState validating, then stagePromotion: the trusted promotion dispatch is the single merge path — candidates never merge on their own. When facts.merged and a success facts.mainDeploy arrive, stageState deployed with both as artifacts, then completed. "
+	+ "Stage from pushed State.facts. On validation success stageState validating, then stagePromotion: the trusted promotion dispatch is the single merge path — candidates never merge on their own. Only the bottom merge-train item promotes: on a mergeTrainHold fact reply WAITING with your position; the ledger pokes when the item below merges. When facts.merged and a success facts.mainDeploy arrive, stageState deployed with both as artifacts, then completed. "
 	+ "On a mergeTimeoutProblem, stagePromotion if no promotion is recorded; otherwise observeCandidatePullRequest: if mergeableState is dirty the candidate is conflicted — restack immediately (stagePlan next generation, fresh baseSha); if merged, keep waiting for facts. "
 	+ "On validation or promotion failure, or phase retryable (the failed run was already cleared), restack: stagePlan with the next generation and a fresh getMainSha baseSha; never wait for a cleared run. "
 	+ "Observe only when the phase needs an answer and no fact is present. "
@@ -181,7 +181,9 @@ export function commandFor(name, args, ctx) {
 			message: args.message,
 		};
 		case "stageIssue": return { kind: "create-issue", title: args.title, body: args.body, classification: args.classification };
-		case "stageImplementation": return { kind: "implement", runId: ctx.minted };
+		// The merge-train order beneath this node rides from the snapshot
+		// through the loop context: mechanical runner input, never model-typed.
+		case "stageImplementation": return { kind: "implement", runId: ctx.minted, ...(Array.isArray(ctx.expectedOrder) && ctx.expectedOrder.length ? { expectedOrder: ctx.expectedOrder } : {}) };
 		case "stageCandidate": return { kind: "record-candidate", runId: ctx.activeRunId, branch: ctx.planBranch, headSha: args.headSha, pullRequestNumber: args.pullRequestNumber, pullRequestUrl: args.pullRequestUrl, message: args.message };
 		case "stagePromotion": {
 			// Candidate identity is the ledger's fact and the dispatch key is a

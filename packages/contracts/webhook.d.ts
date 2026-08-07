@@ -11,7 +11,9 @@ export type GithubWebhookFact =
 	| { kind: "promotion"; runId: number; url: string; conclusion: string | null; createdAt: string; dispatchKey: string }
 	| { kind: "main-deploy"; runId: number; url: string; conclusion: string | null; createdAt: string; headSha: string }
 	| { kind: "candidate"; number: number; url: string; headSha: string; branch: string }
-	| { kind: "merged"; number: number; url: string; headSha: string; branch: string; mergeCommitSha: string };
+	| { kind: "merged"; number: number; url: string; headSha: string; branch: string; mergeCommitSha: string }
+	/** GitHub's native-stack membership signal (`stacked` action): join, move, or the post-merge retarget to the stack's base. */
+	| { kind: "stack"; number: number; branch: string; headSha: string; base: string; position: number; size: number };
 
 /**
  * What extraction alone can prove from one delivery: a promotion run whose
@@ -28,6 +30,7 @@ export type GithubFactRecord = {
 	mainDeploy?: { runId: number; url: string; conclusion: string | null; createdAt: string; headSha: string; at: number };
 	candidate?: { number: number; url: string; headSha: string; branch: string; at: number };
 	merged?: { number: number; url: string; headSha: string; branch: string; mergeCommitSha: string; at: number };
+	stack?: { number: number; branch: string; headSha: string; base: string; position: number; size: number; at: number };
 };
 
 export type GithubFactWorkItemView = {

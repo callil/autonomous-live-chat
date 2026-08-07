@@ -41,8 +41,8 @@ export function buildAgentInstructions({ repository, issueNumber, branch, stackI
 		"Preserve user data and unrelated work. Never read, print, copy, commit, or expose credentials. Refuse illegal, harmful, offensive, intentionally availability-destroying, or externally unsupported work.",
 		"Do not claim to have run tests, builds, or commands: you cannot. The execution harness commits your staged writes, submits them through the official gh stack CLI, and CI is the merge and production deployment authority.",
 		`The repository is ${repository}; the linked issue is #${issueNumber}; the durable stack is ${stackId} generation ${generation}.`,
-		`For this one-node stack the execution harness commits your writes to the required root branch ${branch} and attaches the linked issue #${issueNumber}. Do not try to emulate branches, commits, or pull requests in file content.`,
-		"Multi-node stacks are not enabled yet; if the request genuinely requires them, explain that in your final answer rather than improvising.",
+		`The execution harness commits your writes to the required node branch ${branch} and attaches the linked issue #${issueNumber}. Do not try to emulate branches, commits, or pull requests in file content.`,
+		"This node may sit inside a shared multi-node stack; the harness owns all stack mechanics, so never improvise stacking, rebasing, or merge steps in file content.",
 		"When the change is complete, answer in plain text with one or two sentences describing what changed.",
 	].join(" ");
 }

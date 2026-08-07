@@ -40,6 +40,10 @@ function normalizeNode(value) {
 		headSha: safeSha(value.headSha),
 		parentBranch,
 		parentBaseSha: safeSha(value.parentBaseSha),
+		// The retarget marker survives normalization but never appears until
+		// GitHub actually retargets the node, so records written before this
+		// field existed normalize byte-identically.
+		...(value.retargeted === true ? { retargeted: true } : {}),
 	};
 }
 
@@ -213,9 +217,43 @@ export function popBottomNode(stack, workItemId, mergeCommitSha) {
 	return { popped: true, stack: { ...current, baseSha: sha, order, tip: top ? { branch: top.branch, headSha: top.headSha } : null } };
 }
 
+/**
+ * Mark a node retargeted: after the node below merged, GitHub retargeted this
+ * survivor's pull request to the stack's base without rebasing it. Only the
+ * marker changes — tip, branches, head shas, and the recorded parent stay
+ * untouched, because the survivor's unchanged provenance is exactly what the
+ * gate's ancestor-of-main rule verifies.
+ */
+export function markNodeRetargeted(stack, workItemId) {
+	const current = normalizeRoomStack(stack);
+	const index = current.order.findIndex((entry) => entry.workItemId === workItemId);
+	if (index === -1 || current.order[index].retargeted === true) return { marked: false, stack: current };
+	const order = current.order.map((entry, at) => (at === index ? { ...entry, retargeted: true } : entry));
+	return { marked: true, stack: { ...current, order } };
+}
+
 /** Whether the item's node was marked stale by a truncation below it. */
 export function isStaleStackNode(stack, workItemId) {
 	return normalizeRoomStack(stack).stale.some((entry) => entry.workItemId === workItemId);
+}
+
+/**
+ * The item's coordinates in the room's merge train, or null when the item
+ * holds no node. `expectedOrder` is the exact branch order beneath the node —
+ * the topology the runner asserts against the server-side stack — and
+ * `position` is 1-based from the bottom, so position 1 is the only node that
+ * may promote.
+ */
+export function stackNodeContext(stack, workItemId) {
+	const current = normalizeRoomStack(stack);
+	const index = current.order.findIndex((entry) => entry.workItemId === workItemId);
+	if (index === -1) return null;
+	return {
+		position: index + 1,
+		size: current.order.length,
+		expectedOrder: current.order.slice(0, index).map((entry) => entry.branch),
+		retargeted: current.order[index].retargeted === true,
+	};
 }
 
 /**
