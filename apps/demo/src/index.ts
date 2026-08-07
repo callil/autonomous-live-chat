@@ -173,7 +173,10 @@ const TERMINAL_PHASES = new Set<LedgerPhase>(["completed", "needs_review", "reje
 const OPERATOR_ID = "cloudflare-os";
 const OPERATOR_EMAIL = "callil.capuozzo@gmail.com";
 // Cloudflare OS freezes ambient capabilities when a chat is first created.
-// This permanent key replaces the pre-APP_HARNESS operator chat exactly once.
+// The legacy gadget also retained a user binding named APP_HARNESS, so both
+// permanent identities move once to a clean workspace owned by the new ambient
+// operator Gatekeeper.
+const OPERATOR_GADGET_KEY = "callil-autonomous-live-chat-v2";
 const OPERATOR_CHAT_KEY = "operator-v2";
 const GITHUB_REPOSITORY = "callil/autonomous-live-chat";
 const PRODUCTION_DEPLOYMENT_HOST = "autonomous-live-chat.coda-a.workers.dev";
@@ -743,7 +746,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 			try {
 				const result = await (this.env.OS_WORKSPACE as OsWorkspaceGateway).submitExternalMessage({
 					callerEmail: OPERATOR_EMAIL,
-					gadgetKey: "callil-autonomous-live-chat",
+					gadgetKey: OPERATOR_GADGET_KEY,
 					chatKey: OPERATOR_CHAT_KEY,
 					messageKey: `ledger-event:${inFlight.id}:v${inFlight.version}:t${inFlight.turn}`,
 					prompt: `App Harness ledger work item ${inFlight.workItemId} changed to revision ${inFlight.version}. Read the authoritative APP_HARNESS ledger and its staged/applied actions, reconcile any existing artifact before retrying, and produce only the next missing artifact. The production origin is https://${PRODUCTION_DEPLOYMENT_HOST}. Continue until blocked or complete.`,

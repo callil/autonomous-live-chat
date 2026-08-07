@@ -3,7 +3,8 @@ import { spawn } from "node:child_process";
 const RESPONSE_ID = /^[A-Za-z0-9_-]{1,120}$/u;
 const TOOL_NAME = /^[A-Za-z0-9_.:-]{1,80}$/u;
 const MODEL = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}$/u;
-const NANOCODEX_MODEL = "gpt-5.6-luna";
+// NanoCodex v0.3.0 is compiled against this one Responses model.
+const NANOCODEX_MODEL = "gpt-5.6-sol";
 const MAX_LINE_BYTES = 1_048_576;
 
 function emit(value) {

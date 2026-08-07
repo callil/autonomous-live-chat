@@ -12,7 +12,6 @@ type Env = {
 	ALLOWED_REPOSITORY: string;
 	NATIVE_GIT_ENABLED: string;
 	OPENAI_API_KEY: string;
-	MODEL_ID?: string;
 	SANDBOX_CLOUDFLARE_ACCOUNT_ID?: string;
 };
 
@@ -218,7 +217,7 @@ export class NativeGitRunner extends WorkerEntrypoint<Env> {
 		if (!job || (input.candidate !== undefined && !candidate)) throw new Error("Native Git job is outside the runner contract.");
 		if (candidate && !isOneNodeStack(candidate, job.generation)) throw new Error("Native Git runner currently accepts only the durable one-node root stack plan.");
 		const ids = await runIds(job);
-		const model = this.env.MODEL_ID || NANOCODEX_DEFAULT_MODEL;
+		const model = NANOCODEX_DEFAULT_MODEL;
 		if (this.env.NATIVE_GIT_ENABLED !== "true" || !this.env.OPENAI_API_KEY) return { jobId: job.jobId, runId: ids.runId, state: "credential-bridge-required" };
 
 		const sandbox = getSandbox(this.env.Sandbox, ids.sandboxId, { enableDefaultSession: false });
@@ -244,7 +243,6 @@ export class NativeGitRunner extends WorkerEntrypoint<Env> {
 		const env: Record<string, string> = {
 			...gitAuthorizationEnv(token),
 			OPENAI_API_KEY: this.env.OPENAI_API_KEY,
-			OPENAI_MODEL: model,
 			GH_TOKEN: token,
 			GITHUB_TOKEN: token,
 			GH_REPO: job.repository,
@@ -279,7 +277,7 @@ export class NativeGitRunner extends WorkerEntrypoint<Env> {
 			if (!process) return { jobId: job.jobId, runId: ids.runId, state: "runner-unavailable", classification: "sandbox-process-missing" };
 			if (!TERMINAL_PROCESS_STATUSES.has(process.status)) return { jobId: job.jobId, runId: ids.runId, state: "running" };
 			const logs = await process.getLogs();
-			const artifact = parseTerminalArtifact(logs.stdout, job, this.env.MODEL_ID || NANOCODEX_DEFAULT_MODEL);
+			const artifact = parseTerminalArtifact(logs.stdout, job, NANOCODEX_DEFAULT_MODEL);
 			return artifact ? { ...artifact, runId: ids.runId } : { jobId: job.jobId, runId: ids.runId, state: "candidate-failed", classification: "nanocodex-output-invalid" };
 		} catch (error) {
 			return { jobId: job.jobId, runId: ids.runId, state: "runner-unavailable", classification: classifySandboxFailure(error) };
