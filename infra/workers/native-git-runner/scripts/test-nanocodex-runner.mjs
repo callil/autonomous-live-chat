@@ -135,7 +135,8 @@ assert.match(jobEntrypointSource, /nanocodex-deadline-exceeded/u);
 // The proven root cause of the wedged runs: stdout.write to a pipe is async, so
 // a fire-and-forget emit followed by process.exit destroyed the artifact.
 assert.match(jobEntrypointSource, /function emit\(value\) \{\n\treturn new Promise/u, "emit resolves on the write callback");
-assert.match(jobEntrypointSource, /await Promise\.race\(\[\n\t\temit\(\{ jobId: "unknown", state: "candidate-failed", classification: "nanocodex-deadline-exceeded" \}\)/u, "the watchdog awaits its artifact, capped, before exiting");
+assert.match(jobEntrypointSource, /await Promise\.race\(\[\n\t\temit\(deadline\)\.then\(\(\) => postCallback\(deadline\)\)/u, "the watchdog awaits its artifact and pushes the terminal fact, capped, before exiting");
+assert.match(jobEntrypointSource, /classification: "nanocodex-deadline-exceeded"/u, "a deadline-exceeded run is classified as such");
 assert.match(jobEntrypointSource, /await emit\(result\)/u);
 assert.doesNotMatch(jobEntrypointSource, /\n\temit\(/u, "no emit is fire-and-forget");
 assert.match(jobEntrypointSource, /const liveChildren = new Set\(\)/u);
