@@ -142,7 +142,7 @@ type OsWorkspaceGateway = {
 		prompt: string;
 		gadgetTitle: string;
 		chatGatewayRpcTarget: RpcTarget;
-	}): Promise<{ idempotencyKey: string }>;
+	}): Promise<{ accepted: true; chatPath: string } | { accepted: false; message: string }>;
 };
 
 type RuntimeEnv = Omit<Env, "OS_WORKSPACE"> & { OS_WORKSPACE: unknown };
@@ -698,26 +698,31 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		}
 		const wakes = due.toSorted((left, right) => left[1].availableAt - right[1].availableAt).slice(0, WAKE_BATCH_SIZE);
 		for (const [key, wake] of wakes) {
+			const responseTarget = await this.ctx.restore({ type: "operator-note", workItemId: wake.workItemId });
 			try {
-				await (this.env.OS_WORKSPACE as OsWorkspaceGateway).submitExternalMessage({
+				const result = await (this.env.OS_WORKSPACE as OsWorkspaceGateway).submitExternalMessage({
 					callerEmail: OPERATOR_EMAIL,
 					gadgetKey: "callil-autonomous-live-chat",
 					chatKey: "operator-main",
-					messageKey: `ledger-event:${wake.id}`,
+					messageKey: `ledger-event:${wake.id}:v${wake.version}`,
 					prompt: `App Harness ledger work item ${wake.workItemId} changed to revision ${wake.version}. Read the authoritative APP_HARNESS ledger and its staged/applied actions, reconcile any existing artifact before retrying, and produce only the next missing artifact. The production origin is https://${PRODUCTION_DEPLOYMENT_HOST}. Continue until blocked or complete.`,
 					gadgetTitle: "App Harness operator",
-					chatGatewayRpcTarget: new OperatorNoteTarget(this, wake.workItemId),
+					chatGatewayRpcTarget: responseTarget,
 				});
+				if (!result.accepted) throw new Error(`Cloudflare OS rejected the durable wake: ${result.message}`);
 				await this.ctx.storage.transaction(async (txn) => {
 					const current = await txn.get<WakeRecord>(key);
 					if (current?.version === wake.version) await txn.delete(key);
 				});
-			} catch {
+			} catch (error) {
+				console.error("Failed to deliver the durable ledger wake to Cloudflare OS.", { workItemId: wake.workItemId, version: wake.version, error });
 				const attempts = wake.attempts + 1;
 				await this.ctx.storage.transaction(async (txn) => {
 					const current = await txn.get<WakeRecord>(key);
 					if (current?.version === wake.version) await txn.put(key, { ...wake, attempts, availableAt: now + Math.min(WAKE_RETRY_BASE_MS * 2 ** Math.min(attempts, 8), 5 * 60_000) });
 				});
+			} finally {
+				responseTarget[Symbol.dispose]();
 			}
 		}
 	}
