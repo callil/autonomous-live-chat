@@ -789,6 +789,28 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		return parked;
 	}
 
+	/** Maintenance: delete parked/rejected items and every trace of them. */
+	async purgeReviewWorkItems(): Promise<number> {
+		let purged = 0;
+		for await (const page of this.storagePages<StoredWorkItem>(WORK_ITEM_PREFIX)) {
+			for (const item of page.values()) {
+				if (item.phase !== "needs_review" && item.phase !== "rejected") continue;
+				const keys = [
+					this.workItemKey(item.id),
+					`${EXTERNAL_FACT_PREFIX}${item.id}`,
+					`${POKE_COUNT_PREFIX}${item.id}`,
+					...(item.sequence ? [this.orderKey(WORK_ITEM_ORDER_PREFIX, item.sequence, item.id)] : []),
+				];
+				for (let sequence = 1; sequence <= item.eventSequence; sequence += 1) keys.push(this.eventKey(item.id, sequence));
+				for (const batch of storageDeleteBatches(keys)) await this.ctx.storage.delete(batch);
+				purged += 1;
+			}
+		}
+		const remaining = await this.getWorkItemPage();
+		this.broadcast({ type: "harness:work-items", workItems: await this.projectWorkItems(remaining.records), hasMore: remaining.hasMore, beforeSequence: remaining.beforeSequence, total: remaining.records.length });
+		return purged;
+	}
+
 	private pokeOperator(item: StoredWorkItem): void {
 		if (TERMINAL_PHASES.has(item.phase) || this.env.OPERATOR_PAUSED === "true") return;
 		this.ctx.waitUntil((async () => {
@@ -1402,6 +1424,14 @@ function roomName(pathname: string): string | null {
 export default {
 	async fetch(request, env): Promise<Response> {
 		const pathname = new URL(request.url).pathname;
+		if (pathname === "/api/admin/purge-terminal") {
+			// Prototype maintenance lever: delete parked and rejected items
+			// outright (completed ones stay - they are the record of shipped
+			// work; the durable evidence lives on GitHub either way).
+			if (request.method !== "POST") return new Response("Method not allowed", { status: 405 });
+			const purged = await env.CHAT_ROOM.getByName("main").purgeReviewWorkItems();
+			return Response.json({ purged });
+		}
 		if (pathname === "/api/admin/park-stale") {
 			// Prototype maintenance lever: park every non-terminal work item at or
 			// below the given sequence so abandoned work stops consuming runs.
