@@ -69,7 +69,10 @@ async function request<T>(
 		},
 		body: JSON.stringify(body),
 	}));
-	if (!response.ok) throw new Error(`GitHub App identity bridge rejected the operation (${response.status}).`);
+	if (!response.ok) {
+		const detail = (await response.text()).trim().slice(0, 240);
+		throw new Error(`GitHub App identity bridge rejected the operation (${response.status}${detail ? `: ${detail}` : ""}).`);
+	}
 	return response.json<T>();
 }
 

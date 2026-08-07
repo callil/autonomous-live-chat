@@ -48,6 +48,9 @@ globalThis.fetch = async (input, init = {}) => {
 	calls.push({ url, method, body: init.body });
 	if (url.includes("/access_tokens")) return Response.json({ token: "installation-token" });
 	if (url.includes("/search/issues")) return Response.json(url.includes("event-markdown") || url.includes("event-long") ? { items: [] } : { items: [{ number: 42, html_url: "https://github.com/callil/autonomous-live-chat/issues/42" }] });
+	if (url === `${env.PRODUCTION_ORIGIN}/`) return new Response("live");
+	if (url.endsWith("/issues/42/comments?per_page=100")) return Response.json([{ id: 900, body: "Previous status\n\n<!-- app-harness-event:event-close -->" }]);
+	if (url.endsWith("/issues/comments/900") && method === "PATCH") return Response.json({ id: 900 });
 	if (url.endsWith("/issues") && method === "POST") {
 		const body = JSON.parse(init.body);
 		if (body.body.includes("oversized-full-representation")) return new Response("unprocessable", { status: 422 });
@@ -76,6 +79,9 @@ try {
 	const labelPatch = calls.findLast((call) => call.url.endsWith("/issues/42") && call.method === "PATCH");
 	assert.deepEqual(JSON.parse(labelPatch.body).labels, ["human-label", "app-harness", "triage", "change-visual", "scope-localized", "risk-low", "surface-ui", "reversible-yes", "execution-eligible", "ci-visual"], "classification labels converge while unrelated labels remain");
 	assert.equal((await request("/v1/issues/42/classification", { eventId: "event-2", classification: "triage", modelClassification: { changeType: "arbitrary", scope: "localized", risk: "low", affectedSurface: "ui", reversible: true, executionEligibility: "eligible", ciProfile: "visual" } })).status, 404, "model classification cannot inject arbitrary label values");
+	const closed = await request("/v1/issues/42/close-after-deployment", { eventId: "event-close", body: "Completed and deployed.", deploymentUrl: env.PRODUCTION_ORIGIN });
+	assert.deepEqual(await closed.json(), { issueNumber: 42, state: "closed", deploymentUrl: `${env.PRODUCTION_ORIGIN}/` }, "the GitHub App projects verified completion and closes the issue");
+	assert.match(JSON.parse(calls.find((call) => call.url.endsWith("/issues/comments/900") && call.method === "PATCH").body).body, /Verified reachable deployment/u);
 } finally {
 	globalThis.fetch = originalFetch;
 }

@@ -171,6 +171,11 @@ function json(value: unknown, status = 200): Response {
 	return new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" } });
 }
 
+function upstreamFailure(stage: string, response: Response): Response {
+	console.error("GitHub App identity bridge upstream rejection", { stage, status: response.status });
+	return new Response(`GitHub write unavailable at ${stage} (upstream ${response.status})`, { status: 503 });
+}
+
 function validIssueNumber(value: string | undefined): number | null {
 	if (!value || !/^[1-9]\d{0,8}$/u.test(value)) return null;
 	const number = Number(value);
@@ -348,12 +353,13 @@ async function handleIssueBridge(request: Request, env: Env, url: URL): Promise<
 		const body = readText(input.body);
 		if (!deploymentUrl || !body) return new Response("Not found", { status: 404 });
 		const live = await fetch(deploymentUrl, { method: "GET", redirect: "follow", headers: { "user-agent": "app-harness-os-git-proxy-verifier" } });
-		if (!live.ok) return new Response("Deployment verification unavailable", { status: 503 });
+		if (!live.ok) return upstreamFailure("deployment-verification", live);
+		await live.body?.cancel();
 		const token = await installationToken(env);
 		const comment = await withDurableReferenceFallback(eventId, `${body}\n\nVerified reachable deployment: ${deploymentUrl}`, (representation) => upsertStatusComment(env, token, issueNumber, eventId, representation));
-		if (!comment.ok) return new Response("GitHub write unavailable", { status: 503 });
+		if (!comment.ok) return upstreamFailure("completion-comment", comment);
 		const close = await fetch(`https://api.github.com/repos/${env.ALLOWED_REPOSITORY}/issues/${issueNumber}`, { method: "PATCH", headers: githubHeaders(token), body: JSON.stringify({ state: "closed" }) });
-		return close.ok ? json({ issueNumber, state: "closed", deploymentUrl }) : new Response("GitHub write unavailable", { status: 503 });
+		return close.ok ? json({ issueNumber, state: "closed", deploymentUrl }) : upstreamFailure("issue-close", close);
 	}
 	return new Response("Not found", { status: 404 });
 }

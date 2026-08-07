@@ -319,6 +319,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 			this.ctx.waitUntil(Promise.allSettled([
 				this.backfillExternalHandoffs(),
 				this.reconcileClosedGitHubIssues(),
+				this.reconcileCompletedGithubClosures(),
 				this.recoverAutoRestackStops(),
 				this.recoverSynchronousRunnerLeases(),
 				this.recoverDurablePollTokenStops(),
@@ -1203,6 +1204,54 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		});
 		await this.ctx.storage.put(this.outboxKey(effect.id), effect);
 		await this.ctx.storage.setAlarm(now + 25);
+	}
+
+	/**
+	 * Completion is authoritative in the durable stack ledger, while GitHub is
+	 * a public projection of that state. Recreate a deterministic close effect
+	 * after a Worker restart when the projection previously exhausted its
+	 * transient retries. A delivered effect is never replayed.
+	 */
+	private async reconcileCompletedGithubClosures(): Promise<void> {
+		let queued = false;
+		for await (const workItem of this.workItems()) {
+			if (workItem.phase !== "completed" || !workItem.workflowId || !workItem.githubIssue) continue;
+			const [workflow, job, ledger] = await Promise.all([
+				this.getWorkflow(workItem.workflowId),
+				this.ctx.storage.get<CoordinatorJob>(this.jobKey(workItem.workflowId)),
+				this.ctx.storage.get<StackLedger>(this.ledgerKey(workItem.id)),
+			]);
+			const deploymentUrl = ledger?.status === "completed" && ledger.deployment.stage === "deployed"
+				? ledger.deployment.deploymentUrl
+				: null;
+			if (!workflow || !job || !ledger || !deploymentUrl) continue;
+			const runId = ledger.promotion.runId ?? `generation-${ledger.generation}`;
+			const effectId = this.effectId(job.id, "github-close", `completion-${runId}`);
+			const message = [...workflow.activity].reverse().find((entry) => entry.phase === "completed")?.message
+				?? "Cloudflare OS completed the verified deployment.";
+			const now = Date.now();
+			const effect = createCoordinatorEffect({
+				id: effectId,
+				jobId: job.id,
+				workItemId: workItem.id,
+				kind: "github-close",
+				payload: {
+					issueNumber: workItem.githubIssue.number,
+					body: formatGithubStatus(workItem, message, deploymentUrl),
+					deploymentUrl,
+				},
+				now,
+				blocking: false,
+			});
+			const inserted = await this.ctx.storage.transaction(async (txn) => {
+				const current = await txn.get<CoordinatorEffect>(this.outboxKey(effectId));
+				if (current && current.state !== "failed") return false;
+				await txn.put(this.outboxKey(effectId), effect);
+				return true;
+			});
+			queued ||= inserted;
+		}
+		if (queued) await this.scheduleCoordinatorAlarm();
 	}
 
 	/**
