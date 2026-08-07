@@ -15,7 +15,6 @@
         { "path": "src/operator-gatekeeper.ts", "sha256": "5c1603092228b55fea7bfd11747c89a586e4254ca1a6811063efd2a04040ed30" },
         { "path": "src/types.ts", "sha256": "35412a88a3ecf7685bd0e4040c87ece2ffd38ffb3189e9b8cd9abb45b604b428" },
         { "path": "tsconfig.json", "sha256": "bbe0bffb8d694925b20c3713dbcb5619df5f2ba480f4f93106e10a08e7d7304f" },
-        { "path": "worker-configuration.d.ts", "sha256": "7f22509b5cab0a48afd5f483c39a430e29a3d772358b2d0d8b9e23c65045b7e8" },
         { "path": "wrangler.jsonc", "sha256": "2dc207d2e0eed18d1a15383d676d20b4e3a9e59c4eec696a59e11bd4d6202e73" }
       ],
       "review": {
@@ -64,6 +63,23 @@
           "Only the deployment-owned app_harness ambient Gatekeeper receives the autonomous demo rule.",
           "The Gatekeeper must still mark each command autoApprovable, preserving Cloudflare OS's two-signal approval design.",
           "The user who owns the workspace remains recorded as the authority behind every automatically applied action."
+        ]
+      }
+    },
+    {
+      "id": "workshop-app-harness-forced-provisioning-v1",
+      "kind": "text-replacement",
+      "destination": "packages/workshop-backend/src/provisioning-policy.ts",
+      "baseCommit": "0eaec6c5e8fc6b3298ea1aa73bf5c3e47b923c7f",
+      "expectedSha256": "c5fe44ad2f6a5c6e285803a3b579b7f7a8512f85dd2668a3e70bb52c53330ac0",
+      "search": "export function ambientGatekeeperMode(config: AdminConfig, vendorId: string): AmbientGatekeeperMode {\n  return config.ambientGatekeeperModes?.[vendorId.toLowerCase()] ?? DEFAULT_AMBIENT_GATEKEEPER_MODE;\n}",
+      "replace": "export function ambientGatekeeperMode(config: AdminConfig, vendorId: string): AmbientGatekeeperMode {\n  if (vendorId.toLowerCase() === \"app_harness\") return \"enabled\";\n  return config.ambientGatekeeperModes?.[vendorId.toLowerCase()] ?? DEFAULT_AMBIENT_GATEKEEPER_MODE;\n}",
+      "expectedMatches": 1,
+      "review": {
+        "status": "ready-for-maintainer-review",
+        "securityInvariants": [
+          "Only the deployment-owned app_harness vendor is forced into every demo workspace.",
+          "All other ambient vendors retain Cloudflare OS's stored administrator policy and optional default."
         ]
       }
     }
