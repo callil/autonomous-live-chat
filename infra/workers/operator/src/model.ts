@@ -17,6 +17,13 @@ export type ModelEnv = {
 	MAX_TOKENS_PER_TURN: string;
 };
 
+/**
+ * Every model call carries its own deadline: a hung provider request must not
+ * outlive the turn. The loop also checks, before each call, that a call this
+ * long still fits inside the turn's outer envelope.
+ */
+export const MODEL_CALL_TIMEOUT_MS = 45_000;
+
 export class ModelError extends Error {
 	constructor(readonly status: number, detail: string) {
 		super(`Model call failed (${status}): ${detail}`);
@@ -48,12 +55,11 @@ export async function callModel(env: ModelEnv, messages: ModelMessage[], tools: 
 		const raw = await env.AI.run(env.MODEL_ID, { messages, tools: tools.map((entry) => entry.function), max_tokens: Number(env.MAX_TOKENS_PER_TURN) }, { gateway: { id: "default" } });
 		return normalizeWorkersAi(raw);
 	}
-	// A hung provider request must not outlive the turn: the DO's alarm can
-	// re-drive the loop but cannot cancel an in-flight fetch, so the request
-	// carries its own deadline.
+	// The DO's alarm can re-drive the loop but cannot cancel an in-flight
+	// fetch, so the request carries its own deadline.
 	const response = await fetch(`${env.MODEL_BASE_URL}/chat/completions`, {
 		method: "POST",
-		signal: AbortSignal.timeout(45_000),
+		signal: AbortSignal.timeout(MODEL_CALL_TIMEOUT_MS),
 		headers: {
 			"content-type": "application/json",
 			// With gateway-stored provider keys the direct credential is optional.

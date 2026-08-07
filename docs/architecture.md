@@ -16,25 +16,25 @@ The current demo uses a small framework-free browser client, so it does not cons
 ```mermaid
 flowchart LR
     User["User targets the live app"] --> Room["Demo Durable Object ledger"]
-    Room -- "structured wake" --> Gateway["Operator Worker gateway"]
+    Room -- "fire-and-forget poke" --> Gateway["Operator Worker gateway"]
     Gateway --> Turn["Per-item OperatorTurn Durable Object"]
-    Turn -- "typed ledger RPC" --> Room
+    Turn -- "snapshot read + typed ledger RPC" --> Room
     Turn --> GitHub["Private GitHub App capability"]
     GitHub --> Issue["Issue + public status"]
     Turn --> Runner["Disposable Cloudflare Sandbox job"]
     Runner --> GitHub
     GitHub --> Git["Short-lived repository credential"]
-    Runner -- "completion callback" --> Room
+    Runner -- "completion + live progress callbacks" --> Room
     Runner --> Stack["PR or dependent PR stack"]
     Stack --> CI["Profile-aware CI"]
     CI --> Promote["Serialized promotion + deploy"]
 ```
 
-The Durable Object is the workflow ledger and realtime broadcaster. It persists bounded work-item and stack state, schedules resumable delivery, and never treats an agent message as proof that GitHub or deployment succeeded.
+The Durable Object is the workflow ledger and realtime broadcaster. It records truth and emits events: whenever it persists a state change relevant to a live work item — a submission, a pushed external fact, a phase transition from an operator action — it fires one fire-and-forget poke at the operator worker. There are no work-item leases, no wake records, no delivery attempts, and no paced redelivery loop: the per-item `OperatorTurn` Durable Object is already serialized, and the ledger's phase guards plus semantic idempotency keys are the correctness guarantee for whatever it stages. The ledger keeps exactly one alarm: a slow five-minute sweep that recovers interrupted action executions and re-pokes every live item, so a lost poke costs minutes, never the item. A lifetime budget of 200 pokes per item parks a non-converging item to `needs_review`.
 
-The operator is a plain Cloudflare Worker (`infra/workers/operator`). The demo delivers one structured wake per eligible work item over a private service binding; the `OperatorGateway` entrypoint routes it to one `OperatorTurn` Durable Object per work item, which runs a single bounded model turn — a compact system prompt, strict constrained-decoding tool schemas, and hard tool-call, token, and wall-clock budgets. Every write goes through the ledger's stage/begin/execute/complete action protocol, so an interrupted turn replays the identical command instead of double-executing. Its private capabilities are service bindings back to the demo's `LedgerService`, to the Sandbox coding runner, and to the GitHub App bridge.
+The operator is a plain Cloudflare Worker (`infra/workers/operator`). The `OperatorGateway` entrypoint routes each poke to one `OperatorTurn` Durable Object per work item, which owns its own lifecycle: it reads a fresh authoritative ledger snapshot at the start of every turn, then runs one bounded model loop — a compact system prompt, strict constrained-decoding tool schemas, hard tool-call and token caps, and adaptive time budgeting: each model call (45s) and tool call (30s observation, 120s stage) carries its own timeout, and the loop only starts a call that still fits inside a generous ten-minute turn envelope. A poke that arrives mid-turn marks the object; the finished turn starts the next one with a fresh snapshot. A turn that ends `WAITING` re-drives itself with its own 60-second alarm — no ledger involvement. Every write goes through the ledger's stage/begin/execute/complete action protocol, so an interrupted turn replays the identical command instead of double-executing. Its private capabilities are service bindings back to the demo's `LedgerService`, to the Sandbox coding runner, and to the GitHub App bridge.
 
-The Sandbox coding process is disposable; it reports completion through a job-bound callback that lands in the ledger as a typed runner fact and wakes the operator. Durable records and independently verifiable Git artifacts make retries safe when a model, container, Worker, GitHub Actions, or upstream API is interrupted.
+The Sandbox coding process is disposable and observable live: while the coding agent runs, its JSONL events stream to the ledger callback in small bounded batches (ten events or five seconds, whichever first). The ledger keeps a rolling last-30 tail under the item's `runnerProgress` fact, the public activity feed gets a human line only on step transitions (cloned, agent started, agent done, pushed), and the operator snapshot embeds a bounded tail so the model sees what the agent last did. The terminal artifact arrives through the same job-bound callback, lands as a typed runner fact, and pokes the operator. Durable records and independently verifiable Git artifacts make retries safe when a model, container, Worker, GitHub Actions, or upstream API is interrupted.
 
 ## GitHub identity
 

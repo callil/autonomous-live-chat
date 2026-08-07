@@ -1,5 +1,4 @@
-export type LedgerPhase = "submitted" | "claimed" | "classified" | "delegated" | "implementing" | "candidate" | "validating" | "promoting" | "deployed" | "completed" | "retryable" | "needs_review" | "rejected";
-export type LedgerLease = { id: string; operatorId: string; expiresAt: number };
+export type LedgerPhase = "submitted" | "classified" | "delegated" | "implementing" | "candidate" | "validating" | "promoting" | "deployed" | "completed" | "retryable" | "needs_review" | "rejected";
 export type LedgerClassification = {
 	decision: "eligible" | "needs_review" | "rejected";
 	changeType: "visual" | "content" | "data" | "behavior" | "infrastructure";
@@ -20,8 +19,6 @@ export type LedgerWorkItem = {
 	submissionId?: string;
 	phase: LedgerPhase;
 	version: number;
-	lease: LedgerLease | null;
-	resumeAt: number | null;
 	classification: LedgerClassification | null;
 	plan: LedgerPlan | null;
 	activeImplementation: null | { key: string; runId: string; attempt: number; startedAt: number };
@@ -33,12 +30,9 @@ export type LedgerWorkItem = {
 export const LEDGER_PHASES: readonly LedgerPhase[];
 export const TERMINAL_LEDGER_PHASES: ReadonlySet<LedgerPhase>;
 export function createLedgerWorkItem(input: { id: string; room: string; request: unknown; target?: unknown; submissionId?: string; now: number }): LedgerWorkItem;
-export function claimLedgerWorkItem(item: LedgerWorkItem, input: { operatorId: string; leaseId: string; now: number; leaseMs: number }): { disposition: "terminal" | "deferred" | "busy" | "claimed" | "renewed"; item: LedgerWorkItem };
-export function releaseLedgerWorkItem(item: LedgerWorkItem, input: { operatorId: string; leaseId: string; now: number }): LedgerWorkItem;
-export function deferLedgerWorkItem(item: LedgerWorkItem, input: { operatorId: string; leaseId: string; now: number; delayMs: number }): LedgerWorkItem;
-export function recordLedgerClassification(item: LedgerWorkItem, input: { operatorId: string; leaseId: string; classification: LedgerClassification; now: number }): LedgerWorkItem;
-export function recordLedgerPlan(item: LedgerWorkItem, input: { operatorId: string; leaseId: string; plan: LedgerPlan; now: number }): LedgerWorkItem;
+export function recordLedgerClassification(item: LedgerWorkItem, input: { classification: LedgerClassification; now: number }): LedgerWorkItem;
+export function recordLedgerPlan(item: LedgerWorkItem, input: { plan: LedgerPlan; now: number }): LedgerWorkItem;
 export function implementationKey(item: LedgerWorkItem): string;
-export function startLedgerImplementation(item: LedgerWorkItem, input: { operatorId: string; leaseId: string; runId: string; now: number }): { disposition: "started" | "resume" | "artifact-exists"; item: LedgerWorkItem };
-export function recordLedgerCandidate(item: LedgerWorkItem, input: { operatorId: string; leaseId: string; runId: string; branch: string; headSha: string; pullRequestNumber: number; pullRequestUrl: string; now: number }): LedgerWorkItem;
-export function recordLedgerExternalState(item: LedgerWorkItem, input: { operatorId: string; leaseId: string; phase: Extract<LedgerPhase, "validating" | "promoting" | "deployed" | "completed" | "retryable" | "needs_review" | "rejected">; artifacts?: Record<string, unknown>; now: number }): LedgerWorkItem;
+export function startLedgerImplementation(item: LedgerWorkItem, input: { runId: string; now: number }): { disposition: "started" | "resume" | "artifact-exists"; item: LedgerWorkItem };
+export function recordLedgerCandidate(item: LedgerWorkItem, input: { runId: string; branch: string; headSha: string; pullRequestNumber: number; pullRequestUrl: string; now: number }): LedgerWorkItem;
+export function recordLedgerExternalState(item: LedgerWorkItem, input: { phase: Extract<LedgerPhase, "validating" | "promoting" | "deployed" | "completed" | "retryable" | "needs_review" | "rejected">; artifacts?: Record<string, unknown>; now: number }): LedgerWorkItem;

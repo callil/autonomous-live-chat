@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
 import {
-	claimLedgerWorkItem,
 	createLedgerWorkItem,
-	deferLedgerWorkItem,
 	implementationKey,
+	LEDGER_PHASES,
 	recordLedgerCandidate,
 	recordLedgerClassification,
 	recordLedgerExternalState,
@@ -13,17 +12,23 @@ import {
 
 const SHA = "1".repeat(40);
 const base = createLedgerWorkItem({ id: "work-1", room: "main", request: "Update the heading", now: 1 });
-const claimed = claimLedgerWorkItem(base, { operatorId: "cloudflare-os", leaseId: "lease-1", now: 2, leaseMs: 1_000 }).item;
-const classified = recordLedgerClassification(claimed, {
-	operatorId: "cloudflare-os",
-	leaseId: "lease-1",
+
+// Leases are gone: the per-item OperatorTurn Durable Object is the concurrency
+// guarantee, so a work item carries no lease and no claim/defer machinery.
+assert.equal(base.phase, "submitted");
+assert.ok(!("lease" in base), "a work item carries no lease field");
+assert.ok(!("resumeAt" in base), "a work item carries no defer/resume field");
+assert.ok(!LEDGER_PHASES.includes("claimed"), "the claimed phase died with the lease machinery");
+
+const classified = recordLedgerClassification(base, {
 	classification: { decision: "eligible", changeType: "content", scope: "localized", risk: "low", affectedSurface: "copy", reversible: true, executionEligibility: "eligible", ciProfile: "content" },
 	now: 3,
 });
+assert.equal(classified.phase, "classified");
+assert.throws(() => recordLedgerClassification(classified, { classification: classified.classification, now: 4 }), /Only submitted work/u, "classification applies exactly once, straight from submitted");
+
 const classifiedWithIssue = { ...classified, artifacts: { issue: { number: 1, url: "https://github.com/callil/autonomous-live-chat/issues/1" } } };
 const planned = recordLedgerPlan(classifiedWithIssue, {
-	operatorId: "cloudflare-os",
-	leaseId: "lease-1",
 	plan: {
 		revision: 1,
 		baseSha: SHA,
@@ -42,14 +47,12 @@ const planned = recordLedgerPlan(classifiedWithIssue, {
 });
 assert.equal(implementationKey(planned), `work-1:p1:g1:${SHA}`);
 
-const started = startLedgerImplementation(planned, { operatorId: "cloudflare-os", leaseId: "lease-1", runId: "run-1", now: 5 });
+const started = startLedgerImplementation(planned, { runId: "run-1", now: 5 });
 assert.equal(started.disposition, "started");
-const duplicate = startLedgerImplementation(started.item, { operatorId: "cloudflare-os", leaseId: "lease-1", runId: "run-2", now: 6 });
-assert.equal(duplicate.disposition, "resume", "the same accepted plan must resume instead of spawning duplicate NanoCodex work");
+const duplicate = startLedgerImplementation(started.item, { runId: "run-2", now: 6 });
+assert.equal(duplicate.disposition, "resume", "the same accepted plan must resume instead of spawning duplicate coding-agent work");
 
 const candidate = recordLedgerCandidate(started.item, {
-	operatorId: "cloudflare-os",
-	leaseId: "lease-1",
 	runId: "run-1",
 	branch: "app-harness-os/1/g1",
 	headSha: "2".repeat(40),
@@ -57,39 +60,45 @@ const candidate = recordLedgerCandidate(started.item, {
 	pullRequestUrl: "https://github.com/callil/autonomous-live-chat/pull/1",
 	now: 7,
 });
-const artifactReuse = startLedgerImplementation(candidate, { operatorId: "cloudflare-os", leaseId: "lease-1", runId: "run-3", now: 8 });
+const artifactReuse = startLedgerImplementation(candidate, { runId: "run-3", now: 8 });
 assert.equal(artifactReuse.disposition, "artifact-exists", "a persisted candidate must be reused instead of rebuilt");
 
 assert.throws(() => recordLedgerPlan(started.item, {
-	operatorId: "cloudflare-os",
-	leaseId: "lease-1",
 	plan: planned.plan,
 	now: 7,
 }), /Only classified work/, "an active implementation must not be replanned out from under a running inner agent");
 
 const validating = recordLedgerExternalState(candidate, {
-	operatorId: "cloudflare-os",
-	leaseId: "lease-1",
 	phase: "validating",
 	now: 8,
 });
 assert.throws(() => recordLedgerExternalState(validating, {
-	operatorId: "cloudflare-os",
-	leaseId: "lease-1",
 	phase: "completed",
 	now: 9,
 }), /Only a deployed candidate can complete/, "completion cannot skip immutable candidate validation and deployment");
 
-const competing = claimLedgerWorkItem(planned, { operatorId: "other", leaseId: "lease-2", now: 5, leaseMs: 1_000 });
-assert.equal(competing.disposition, "busy");
+// A candidate whose validation failed remains replannable: the restack path
+// stays open without any lease or claim ceremony.
+const restacked = recordLedgerPlan(validating, {
+	plan: { ...planned.plan, revision: 2, generation: 2, branch: "app-harness-os/1/g2" },
+	now: 10,
+});
+assert.equal(restacked.phase, "delegated");
+assert.equal(restacked.artifacts.candidate, undefined, "a restack clears the stale candidate lineage");
 
-const deferred = deferLedgerWorkItem(planned, { operatorId: "cloudflare-os", leaseId: "lease-1", now: 5, delayMs: 100 });
-assert.equal(claimLedgerWorkItem(deferred, { operatorId: "cloudflare-os", leaseId: "lease-2", now: 50, leaseMs: 1_000 }).disposition, "deferred");
-// Defer keeps the lease: a competing claim after the backoff is still busy
-// until the original lease itself expires, and the surviving lease means the
-// resumed turn acts immediately instead of re-claiming first.
-assert.equal(deferred.lease?.id, "lease-1", "the deferring operator keeps ownership through the backoff");
-assert.equal(claimLedgerWorkItem(deferred, { operatorId: "cloudflare-os", leaseId: "lease-2", now: 105, leaseMs: 1_000 }).disposition, "busy");
-assert.equal(claimLedgerWorkItem(deferred, { operatorId: "cloudflare-os", leaseId: "lease-2", now: 5 + 1_001, leaseMs: 1_000 }).disposition, "claimed");
+// The failed-run path must never wedge: a failed runner result acknowledged as
+// retryable clears the dead generation's activeImplementation outright, and
+// the very next legal step is a revised plan for the next generation.
+const failedRun = startLedgerImplementation(planned, { runId: "run-9", now: 11 });
+assert.equal(failedRun.item.activeImplementation?.runId, "run-9");
+const retryable = recordLedgerExternalState(failedRun.item, { phase: "retryable", now: 12 });
+assert.equal(retryable.phase, "retryable");
+assert.equal(retryable.activeImplementation, null, "retryable clears the failed generation's active implementation");
+const replanned = recordLedgerPlan(retryable, {
+	plan: { ...planned.plan, revision: 2, generation: 2, branch: "app-harness-os/1/g2" },
+	now: 13,
+});
+assert.equal(replanned.phase, "delegated", "a retryable item restacks directly into a new delegated plan");
+assert.equal(replanned.plan.generation, 2);
 
 console.log("ledger contract: ok");
