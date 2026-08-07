@@ -771,6 +771,24 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 	 * is recovered by the next event or the periodic sweep, and a bounded
 	 * lifetime poke budget parks a non-converging item for review.
 	 */
+	/** Maintenance: terminally park every live item at or below a sequence. */
+	async parkStaleWorkItems(beforeSequence: number): Promise<number> {
+		let parked = 0;
+		for await (const page of this.storagePages<StoredWorkItem>(WORK_ITEM_PREFIX)) {
+			for (const item of page.values()) {
+				if (TERMINAL_PHASES.has(item.phase) || (item.sequence ?? 0) > beforeSequence) continue;
+				try {
+					const current = await this.loadWorkItem(item.id);
+					if (!current || TERMINAL_PHASES.has(current.phase)) continue;
+					const next = { ...current, phase: "needs_review" as const, version: current.version + 1, activeImplementation: null, updatedAt: Date.now() };
+					await this.persistTransition(current.version, next, "Parked by maintenance: superseded by newer platform fixes; ledger and artifacts intact.", "system");
+					parked += 1;
+				} catch { /* raced with its own transition; the next sweep settles it */ }
+			}
+		}
+		return parked;
+	}
+
 	private pokeOperator(item: StoredWorkItem): void {
 		if (TERMINAL_PHASES.has(item.phase) || this.env.OPERATOR_PAUSED === "true") return;
 		this.ctx.waitUntil((async () => {
@@ -1384,6 +1402,16 @@ function roomName(pathname: string): string | null {
 export default {
 	async fetch(request, env): Promise<Response> {
 		const pathname = new URL(request.url).pathname;
+		if (pathname === "/api/admin/park-stale") {
+			// Prototype maintenance lever: park every non-terminal work item at or
+			// below the given sequence so abandoned work stops consuming runs.
+			if (request.method !== "POST") return new Response("Method not allowed", { status: 405 });
+			let body: { beforeSequence?: unknown };
+			try { body = JSON.parse(await request.text()) as typeof body; } catch { return new Response("Invalid JSON", { status: 400 }); }
+			if (!Number.isSafeInteger(body.beforeSequence)) return new Response("beforeSequence required", { status: 400 });
+			const parked = await env.CHAT_ROOM.getByName("main").parkStaleWorkItems(body.beforeSequence as number);
+			return Response.json({ parked });
+		}
 		if (pathname === "/api/runner/complete") {
 			// The isolated runner reports its terminal artifact by push. The
 			// per-run ledger identifier inside the payload is the bearer
