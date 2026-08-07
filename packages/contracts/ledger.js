@@ -132,6 +132,15 @@ export function recordLedgerClassification(item, { operatorId, leaseId, classifi
 	if (item.phase !== "claimed") throw new Error("Only claimed work can be classified.");
 	if (!classification || typeof classification !== "object") throw new Error("Classification is required.");
 	if (!['eligible', 'needs_review', 'rejected'].includes(classification.decision)) throw new Error("Classification decision is invalid.");
+	if (!['visual', 'content', 'data', 'behavior', 'infrastructure'].includes(classification.changeType)) throw new Error("Classification change type is invalid.");
+	if (!['localized', 'bounded', 'broad'].includes(classification.scope)) throw new Error("Classification scope is invalid.");
+	if (!['low', 'medium', 'high'].includes(classification.risk)) throw new Error("Classification risk is invalid.");
+	if (!['ui', 'copy', 'data', 'behavior', 'infrastructure'].includes(classification.affectedSurface)) throw new Error("Classification affected surface is invalid.");
+	if (typeof classification.reversible !== "boolean") throw new Error("Classification reversibility is invalid.");
+	if (!['eligible', 'needs_review'].includes(classification.executionEligibility)) throw new Error("Classification execution eligibility is invalid.");
+	if (!['visual', 'content', 'behavior', 'data', 'infrastructure'].includes(classification.ciProfile)) throw new Error("Classification CI profile is invalid.");
+	if (classification.decision === 'eligible' && classification.executionEligibility !== 'eligible') throw new Error("Eligible classification must be execution eligible.");
+	if (classification.decision !== 'eligible' && classification.executionEligibility === 'eligible') throw new Error("Blocked classification cannot be execution eligible.");
 	const phase = classification.decision === "eligible" ? "classified" : classification.decision;
 	return next(item, phase, at, { classification, lease: phase === "classified" ? item.lease : null });
 }
@@ -141,6 +150,8 @@ export function recordLedgerPlan(item, { operatorId, leaseId, plan, now }) {
 	requireLease(item, { operatorId, leaseId }, at);
 	if (item.phase !== "classified") throw new Error("Only classified work can receive a plan.");
 	if (!plan || typeof plan !== "object") throw new Error("Plan is required.");
+	const issue = item.artifacts?.issue;
+	if (!issue || !Number.isSafeInteger(issue.number) || issue.number < 1) throw new Error("A plan requires the existing GitHub issue artifact.");
 	const normalized = {
 		revision: positiveInteger(plan.revision, "Plan revision"),
 		baseSha: sha(plan.baseSha, "Plan base"),
@@ -156,6 +167,7 @@ export function recordLedgerPlan(item, { operatorId, leaseId, plan, now }) {
 		ciProfile: identifier(plan.ciProfile, "CI profile"),
 	};
 	if (normalized.pullRequestBase !== normalized.parentBranch) throw new Error("The pull request base must be the stack parent branch.");
+	if (normalized.issueNumber !== issue.number) throw new Error("The plan issue must match the durable GitHub issue artifact.");
 	if (normalized.parentBranch !== "main" && normalized.parentBaseSha === null) throw new Error("A dependent stack node requires its parent's immutable head SHA.");
 	return next(item, "delegated", at, {
 		plan: normalized,

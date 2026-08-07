@@ -15,7 +15,7 @@ import type {
 	VendorDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
 import type { AppHarnessLedger, GitHubRepository, NativeGitRunner } from "./operator-gatekeeper.contract";
-import type { LedgerWorkItem, OperatorCommand, OperatorSession, StagedActionResult } from "./types";
+import type { ClassificationInput, LedgerClassification, LedgerWorkItem, OperatorCommand, OperatorSession, StagedActionResult } from "./types";
 
 const ICON = {
 	url: "data:image/svg+xml," + encodeURIComponent("<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 256 256' fill='none' stroke='currentColor' stroke-width='18'><path d='M48 44h160v168H48z'/><path d='M78 92h100M78 128h100M78 164h64'/><path d='m181 178 17 17 34-42'/></svg>"),
@@ -61,7 +61,19 @@ type StagedActionResult = { actionId: number; workItemId: string; state: "queued
 type Common = { workItemId: string; expectedVersion: number; leaseId: string };
 type ClaimInput = { workItemId: string; expectedVersion: number; leaseId: string; leaseMs: number };
 type ReleaseInput = Common;
-type ClassificationInput = Common & { classification: Record<string, unknown>; message: string };
+type LedgerClassification = {
+  decision: "eligible" | "needs_review" | "rejected";
+  changeType: "visual" | "content" | "data" | "behavior" | "infrastructure";
+  scope: "localized" | "bounded" | "broad";
+  risk: "low" | "medium" | "high";
+  affectedSurface: "ui" | "copy" | "data" | "behavior" | "infrastructure";
+  reversible: boolean;
+  executionEligibility: "eligible" | "needs_review";
+  ciProfile: "visual" | "content" | "behavior" | "data" | "infrastructure";
+};
+// These fields are flat so Cloudflare OS never has to guess an opaque nested
+// Cap'n Web union. The runtime validates the same values shown here.
+type ClassificationInput = Common & LedgerClassification & { message: string };
 type PlanInput = Common & { plan: LedgerPlan; message: string };
 type IssueInput = Common & { title: string; body: string; classification: "triage" | "agent" | "needs-review" | "rejected" | "deployed" };
 // runId is the ledger's stable logical implementation identifier. Reuse it for CandidateInput; inspectImplementation uses the distinct process runId returned by stageImplementation's action receipt.
@@ -152,7 +164,7 @@ export class AppHarnessOperatorSession extends RpcTarget implements OperatorSess
 
 	stageClaim(input: Parameters<OperatorSession["stageClaim"]>[0]) { return this.stage(input.workItemId, input.expectedVersion, { kind: "claim", leaseId: input.leaseId, leaseMs: input.leaseMs }); }
 	stageRelease(input: Parameters<OperatorSession["stageRelease"]>[0]) { return this.stage(input.workItemId, input.expectedVersion, { kind: "release", leaseId: input.leaseId }); }
-	stageClassification(input: Parameters<OperatorSession["stageClassification"]>[0]) { return this.stage(input.workItemId, input.expectedVersion, { kind: "classify", leaseId: input.leaseId, classification: input.classification, message: input.message }); }
+	stageClassification(input: Parameters<OperatorSession["stageClassification"]>[0]) { return this.stage(input.workItemId, input.expectedVersion, { kind: "classify", leaseId: input.leaseId, classification: classificationFromInput(input), message: input.message }); }
 	stagePlan(input: Parameters<OperatorSession["stagePlan"]>[0]) { return this.stage(input.workItemId, input.expectedVersion, { kind: "plan", leaseId: input.leaseId, plan: input.plan, message: input.message }); }
 	stageIssue(input: Parameters<OperatorSession["stageIssue"]>[0]) { return this.stage(input.workItemId, input.expectedVersion, { kind: "create-issue", leaseId: input.leaseId, title: input.title, body: input.body, classification: input.classification }); }
 	stageImplementation(input: Parameters<OperatorSession["stageImplementation"]>[0]) { return this.stage(input.workItemId, input.expectedVersion, { kind: "implement", leaseId: input.leaseId, runId: input.runId }); }
@@ -249,14 +261,23 @@ export class AppHarnessOperatorGatekeeper extends DurableObject<Cloudflare.Env> 
 		switch (command.kind) {
 			case "claim": return workItemReceipt(await this.ledger().claim({ workItemId: workItem.id, leaseId: command.leaseId, leaseMs: command.leaseMs }));
 			case "release": return workItemReceipt(await this.ledger().release({ workItemId: workItem.id, leaseId: command.leaseId }));
-			case "classify": return workItemReceipt(await this.ledger().recordClassification({ workItemId: workItem.id, leaseId: command.leaseId, classification: command.classification, message: command.message }));
+			case "classify": {
+				if (workItem.artifacts.issue !== undefined) {
+					const issueNumber = issueNumberFrom(workItem);
+					await this.github().updateClassification({ issueNumber, classification: githubClassificationForDecision(command.classification.decision), modelClassification: asModelClassification(command.classification) });
+					await this.github().postStatus({ issueNumber, eventId: `${workItem.id}-accepted`, body: command.classification.decision === "eligible" ? "### Accepted\n\nCloudflare OS classified this request and admitted it to the autonomous repository workflow." : `### ${statusHeading(command.classification.decision)}\n\n${command.message}` });
+				}
+				return workItemReceipt(await this.ledger().recordClassification({ workItemId: workItem.id, leaseId: command.leaseId, classification: command.classification, message: command.message }));
+			}
 			case "plan": {
-				const recorded = await this.ledger().recordPlan({ workItemId: workItem.id, leaseId: command.leaseId, plan: command.plan, message: command.message });
-				await this.postIssueStatus(recorded, "planned", command.message);
-				return workItemReceipt(recorded);
+				await this.postIssueStatus(workItem, "planned", command.message);
+				return workItemReceipt(await this.ledger().recordPlan({ workItemId: workItem.id, leaseId: command.leaseId, plan: command.plan, message: command.message }));
 			}
 			case "create-issue": {
 				const issue = await this.github().createIssue({ eventId: workItem.id, title: command.title, body: command.body, classification: asGitHubClassification(command.classification) });
+				if (!workItem.classification) throw new Error("A GitHub issue command requires the durable classification.");
+				await this.github().updateClassification({ issueNumber: issue.issueNumber, classification: "agent", modelClassification: asModelClassification(workItem.classification) });
+				await this.github().postStatus({ issueNumber: issue.issueNumber, eventId: `${workItem.id}-accepted`, body: "### Accepted\n\nCloudflare OS classified this request and admitted it to the autonomous repository workflow." });
 				const recorded = await this.ledger().recordArtifacts({
 					workItemId: workItem.id,
 					leaseId: command.leaseId,
@@ -264,15 +285,9 @@ export class AppHarnessOperatorGatekeeper extends DurableObject<Cloudflare.Env> 
 					message: issue.existing ? `Reconciled existing GitHub issue #${issue.issueNumber}.` : `Created GitHub issue #${issue.issueNumber}.`,
 					source: "github",
 				});
-				if (recorded.classification) {
-					await this.github().updateClassification({ issueNumber: issue.issueNumber, classification: "agent", modelClassification: asModelClassification(recorded.classification) });
-				}
-				await this.github().postStatus({ issueNumber: issue.issueNumber, eventId: `${workItem.id}-accepted`, body: "### Accepted\n\nCloudflare OS classified this request and admitted it to the autonomous repository workflow." });
 				return { issue: { number: issue.issueNumber, url: issue.issueUrl }, ledger: workItemReceipt(recorded) };
 			}
 			case "implement": {
-				const started = await this.ledger().startImplementation({ workItemId: workItem.id, leaseId: command.leaseId, runId: command.runId });
-				if (started.disposition !== "started" && started.disposition !== "resume") return { disposition: started.disposition, ledger: workItemReceipt(started.item) };
 				if (!workItem.plan || typeof workItem.request !== "string" || !workItem.request.trim()) throw new Error("An implementation command requires a durable plan and non-empty request.");
 				const runner = await this.runner().startRun({
 					jobId: workItem.id,
@@ -291,13 +306,13 @@ export class AppHarnessOperatorGatekeeper extends DurableObject<Cloudflare.Env> 
 						},
 					},
 				});
-				await this.postIssueStatus(started.item, "implementation", "### Building\n\nNanoCodex is editing the repository in an isolated Cloudflare Sandbox run.");
+				await this.postIssueStatus(workItem, "implementation", "### Building\n\nNanoCodex is editing the repository in an isolated Cloudflare Sandbox run.");
+				const started = await this.ledger().startImplementation({ workItemId: workItem.id, leaseId: command.leaseId, runId: command.runId });
 				return { disposition: started.disposition, implementationRunId: command.runId, ledger: workItemReceipt(started.item), runner };
 			}
 			case "record-candidate": {
-				const recorded = await this.ledger().recordCandidate({ workItemId: workItem.id, leaseId: command.leaseId, runId: command.runId, branch: command.branch, headSha: command.headSha, pullRequestNumber: command.pullRequestNumber, pullRequestUrl: command.pullRequestUrl, message: command.message });
-				await this.postIssueStatus(recorded, "candidate", `### Pull request ready\n\n[PR #${command.pullRequestNumber}](${command.pullRequestUrl}) is the root node of this request's one-node stack. Candidate CI is running against immutable head \`${command.headSha}\`.`);
-				return workItemReceipt(recorded);
+				await this.postIssueStatus(workItem, "candidate", `### Pull request ready\n\n[PR #${command.pullRequestNumber}](${command.pullRequestUrl}) is the root node of this request's one-node stack. Candidate CI is running against immutable head \`${command.headSha}\`.`);
+				return workItemReceipt(await this.ledger().recordCandidate({ workItemId: workItem.id, leaseId: command.leaseId, runId: command.runId, branch: command.branch, headSha: command.headSha, pullRequestNumber: command.pullRequestNumber, pullRequestUrl: command.pullRequestUrl, message: command.message }));
 			}
 			case "promote": {
 				if (!workItem.plan) throw new Error("A promotion command requires the durable stack plan.");
@@ -319,10 +334,10 @@ export class AppHarnessOperatorGatekeeper extends DurableObject<Cloudflare.Env> 
 					const issueNumber = issueNumberFrom(workItem);
 					const deploymentUrl = deploymentUrlFrom(workItem, command.artifacts);
 					await this.github().closeAfterDeployment({ issueNumber, eventId: `${workItem.id}-completed`, body: command.message, deploymentUrl });
+				} else {
+					await this.postIssueStatus(workItem, command.phase, `### ${statusHeading(command.phase)}\n\n${command.message}`);
 				}
-				const recorded = await this.ledger().recordExternalState({ workItemId: workItem.id, leaseId: command.leaseId, phase: command.phase, artifacts: command.artifacts, message: command.message, source: command.source });
-				if (command.phase !== "completed") await this.postIssueStatus(recorded, command.phase, `### ${statusHeading(command.phase)}\n\n${command.message}`);
-				return workItemReceipt(recorded);
+				return workItemReceipt(await this.ledger().recordExternalState({ workItemId: workItem.id, leaseId: command.leaseId, phase: command.phase, artifacts: command.artifacts, message: command.message, source: command.source }));
 			}
 			case "defer": return workItemReceipt(await this.ledger().defer({ workItemId: workItem.id, leaseId: command.leaseId, delayMs: command.delayMs, message: command.message }));
 		}
@@ -339,9 +354,38 @@ function workItemReceipt(item: LedgerWorkItem): { workItemId: string; version: n
 	return { workItemId: item.id, version: item.version, phase: item.phase };
 }
 
+function classificationFromInput(input: ClassificationInput): LedgerClassification {
+	const classification = {
+		decision: input.decision,
+		changeType: input.changeType,
+		scope: input.scope,
+		risk: input.risk,
+		affectedSurface: input.affectedSurface,
+		reversible: input.reversible,
+		executionEligibility: input.executionEligibility,
+		ciProfile: input.ciProfile,
+	};
+	if (!["eligible", "needs_review", "rejected"].includes(classification.decision)) throw new Error("Classification decision must be eligible, needs_review, or rejected.");
+	if (!["visual", "content", "data", "behavior", "infrastructure"].includes(classification.changeType)) throw new Error("Classification changeType is invalid.");
+	if (!["localized", "bounded", "broad"].includes(classification.scope)) throw new Error("Classification scope is invalid.");
+	if (!["low", "medium", "high"].includes(classification.risk)) throw new Error("Classification risk is invalid.");
+	if (!["ui", "copy", "data", "behavior", "infrastructure"].includes(classification.affectedSurface)) throw new Error("Classification affectedSurface is invalid.");
+	if (typeof classification.reversible !== "boolean") throw new Error("Classification reversible must be boolean.");
+	if (!["eligible", "needs_review"].includes(classification.executionEligibility)) throw new Error("Classification executionEligibility is invalid.");
+	if (!["visual", "content", "behavior", "data", "infrastructure"].includes(classification.ciProfile)) throw new Error("Classification ciProfile is invalid.");
+	if (classification.decision === "eligible" && classification.executionEligibility !== "eligible") throw new Error("Eligible classification must be execution eligible.");
+	if (classification.decision !== "eligible" && classification.executionEligibility === "eligible") throw new Error("A blocked classification cannot be execution eligible.");
+	return classification as LedgerClassification;
+}
+
 function asGitHubClassification(value: string): "triage" | "agent" | "needs-review" | "rejected" | "deployed" {
 	if (["triage", "agent", "needs-review", "rejected", "deployed"].includes(value)) return value as "triage" | "agent" | "needs-review" | "rejected" | "deployed";
 	throw new Error("The staged GitHub issue classification is invalid.");
+}
+
+function githubClassificationForDecision(value: LedgerClassification["decision"]): "agent" | "needs-review" | "rejected" {
+	if (value === "eligible") return "agent";
+	return value === "needs_review" ? "needs-review" : "rejected";
 }
 
 function asCiProfile(value: string): "visual" | "content" | "behavior" | "data" | "infrastructure" {

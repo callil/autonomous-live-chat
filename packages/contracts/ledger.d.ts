@@ -1,6 +1,15 @@
 export type LedgerPhase = "submitted" | "claimed" | "classified" | "delegated" | "implementing" | "candidate" | "validating" | "promoting" | "deployed" | "completed" | "retryable" | "needs_review" | "rejected";
 export type LedgerLease = { id: string; operatorId: string; expiresAt: number };
-export type LedgerClassification = { decision: "eligible" | "needs_review" | "rejected"; [key: string]: unknown };
+export type LedgerClassification = {
+	decision: "eligible" | "needs_review" | "rejected";
+	changeType: "visual" | "content" | "data" | "behavior" | "infrastructure";
+	scope: "localized" | "bounded" | "broad";
+	risk: "low" | "medium" | "high";
+	affectedSurface: "ui" | "copy" | "data" | "behavior" | "infrastructure";
+	reversible: boolean;
+	executionEligibility: "eligible" | "needs_review";
+	ciProfile: "visual" | "content" | "behavior" | "data" | "infrastructure";
+};
 export type LedgerPlan = { revision: number; baseSha: string; stackId: string; generation: number; nodeId: string; branch: string; parentBranch: string; parentBaseSha: string | null; pullRequestBase: string; issueNumber: number; summary: unknown; ciProfile: string };
 export type LedgerWorkItem = {
 	schemaVersion: 1;

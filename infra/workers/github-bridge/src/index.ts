@@ -245,6 +245,19 @@ export class GitHubCapability {
 	}
 
 	private async findIssueByMarker(token: string, eventId: string): Promise<{ number: number; htmlUrl: string } | null> {
+		const marker = eventMarker(eventId);
+		// Repository issue listing is read-after-write and therefore safe for an
+		// immediate retry. GitHub's search index is asynchronous and previously
+		// allowed several issues with the same durable marker to be created within
+		// seconds of one another.
+		const listed = await fetch(`https://api.github.com/repos/${this.env.ALLOWED_REPOSITORY}/issues?state=all&sort=created&direction=desc&per_page=100`, { headers: githubHeaders(token) });
+		if (!listed.ok) throw new Error(`GitHub issue listing failed (${listed.status}).`);
+		const recent = await listed.json() as Array<{ number?: unknown; html_url?: unknown; body?: unknown; pull_request?: unknown }>;
+		const direct = recent.find((issue) => issue.pull_request === undefined && typeof issue.body === "string" && issue.body.includes(marker));
+		if (typeof direct?.number === "number" && typeof direct.html_url === "string") return { number: direct.number, htmlUrl: direct.html_url };
+
+		// Search remains a bounded fallback for older issues outside the recent
+		// page, never the correctness mechanism for a just-created side effect.
 		const query = new URLSearchParams({ q: `repo:${this.env.ALLOWED_REPOSITORY} is:issue in:body "${eventMarker(eventId)}"`, per_page: "2" });
 		const response = await fetch(`https://api.github.com/search/issues?${query}`, { headers: githubHeaders(token) });
 		if (!response.ok) throw new Error(`GitHub issue search failed (${response.status}).`);

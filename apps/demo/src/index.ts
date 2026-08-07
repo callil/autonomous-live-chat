@@ -24,6 +24,8 @@ import {
 	type LedgerPlan,
 	type LedgerWorkItem,
 } from "@app-harness/contracts/ledger";
+import { assertOperatorCommandAllowed, operatorActionEffectKey, operatorCommandEffectSatisfied } from "@app-harness/contracts/operator";
+import { beginOperatorWakeDelivery, queueOperatorWakeRecord, settleOperatorWakeRecord } from "@app-harness/contracts/wake";
 
 type ChatMessage = {
 	id: string;
@@ -103,7 +105,7 @@ type ClientEvent =
 	| { type: "harness:annotations:clear" };
 
 type RecordPage<T> = { records: T[]; hasMore: boolean; beforeSequence?: number };
-type WakeRecord = { id: string; workItemId: string; version: number; turn: number; state: "pending" | "in_flight"; attempts: number; availableAt: number };
+type WakeRecord = { id: string; workItemId: string; version: number; turn: number; state: "pending" | "in_flight"; attempts: number; availableAt: number; nextVersion?: number };
 type StorageTransactionLike = DurableObjectTransaction;
 type OperatorCommand =
 	| { kind: "claim"; leaseId: string; leaseMs: number }
@@ -145,7 +147,7 @@ type OsWorkspaceGateway = {
 	}): Promise<{ accepted: true; chatPath: string } | { accepted: false; message: string }>;
 };
 
-type RuntimeEnv = Omit<Env, "OS_WORKSPACE"> & { OS_WORKSPACE: unknown };
+type RuntimeEnv = Omit<Env, "OS_WORKSPACE"> & { OS_WORKSPACE: unknown; OPERATOR_PAUSED?: string };
 
 const MESSAGE_PREFIX = "message:";
 const ANNOTATION_PREFIX = "annotation:";
@@ -154,6 +156,7 @@ const EVENT_PREFIX = "ledger-event:";
 const WAKE_PREFIX = "ledger-wake:";
 const ACTION_PREFIX = "ledger-operator-action:";
 const ACTION_KEY_PREFIX = "ledger-operator-action-key:";
+const ACTION_ACTIVE_PREFIX = "ledger-operator-action-active:";
 const ACTION_COUNTER_KEY = "sequence:operator-action";
 const MESSAGE_ORDER_PREFIX = "message-order:";
 const ANNOTATION_ORDER_PREFIX = "annotation-order:";
@@ -165,8 +168,12 @@ const WORK_ITEM_SEQUENCE_KEY = "sequence:work-item";
 const LEDGER_MIGRATION_KEY = "migration:ledger-only:v1";
 const WAKE_BATCH_SIZE = 16;
 const WAKE_RETRY_BASE_MS = 1_000;
-const OPERATOR_TURN_RESPONSE_LEASE_MS = 2 * 60_000;
 const OPERATOR_LEASE_MAX_MS = 15 * 60_000;
+// Cloudflare OS permits only one undelivered external-message response per
+// persistent chat. Keep that turn as the barrier for the full operator lease;
+// normal progress resumes immediately from the response callback.
+const OPERATOR_TURN_RESPONSE_LEASE_MS = OPERATOR_LEASE_MAX_MS;
+const OPERATOR_TURN_DELIVERY_ATTEMPTS = 3;
 const ACTION_APPLY_LEASE_MS = 60_000;
 const READY_PHASES = new Set<LedgerPhase>(["submitted", "retryable"]);
 const TERMINAL_PHASES = new Set<LedgerPhase>(["completed", "needs_review", "rejected"]);
@@ -392,10 +399,8 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 
 	async stageOperatorAction(input: { workItemId: string; expectedVersion: number; command: OperatorCommand }): Promise<StoredOperatorAction> {
 		const workItem = await this.requireWorkItem(input.workItemId);
-		if (workItem.version !== input.expectedVersion) throw new Error("The operator action is based on a stale work-item revision.");
 		validateOperatorCommand(input.command);
-		this.requireActionLease(workItem, input.command, Date.now());
-		const key = await operatorActionIdempotencyKey(workItem.id, workItem.version, input.command);
+		const key = operatorActionEffectKey(workItem.id, input.command);
 		const existingId = await this.ctx.storage.get<number>(`${ACTION_KEY_PREFIX}${key}`);
 		if (existingId !== undefined) {
 			const existing = await this.ctx.storage.get<StoredOperatorAction>(`${ACTION_PREFIX}${existingId}`);
@@ -404,20 +409,29 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 				return existing;
 			}
 		}
+		if (workItem.version !== input.expectedVersion) throw new Error("The operator action is based on a stale work-item revision.");
+		this.requireActionLease(workItem, input.command, Date.now());
+		assertOperatorCommandAllowed(workItem, input.command, Date.now());
 		const action = await this.ctx.storage.transaction(async (txn) => {
 			const current = await txn.get<StoredWorkItem>(this.workItemKey(workItem.id));
 			if (!current || current.version !== input.expectedVersion) throw new Error("The operator action became stale before it could be staged.");
 			this.requireActionLease(current, input.command, Date.now());
+			assertOperatorCommandAllowed(current, input.command, Date.now());
 			const duplicateId = await txn.get<number>(`${ACTION_KEY_PREFIX}${key}`);
 			if (duplicateId !== undefined) {
 				const duplicate = await txn.get<StoredOperatorAction>(`${ACTION_PREFIX}${duplicateId}`);
 				if (duplicate) return duplicate;
 			}
+			const activeId = await txn.get<number>(`${ACTION_ACTIVE_PREFIX}${current.id}`);
+			if (activeId !== undefined) {
+				const active = await txn.get<StoredOperatorAction>(`${ACTION_PREFIX}${activeId}`);
+				if (active && !["applied", "rejected"].includes(active.status)) throw new Error(`Operator action ${active.id} must reconcile before another mutation can be staged.`);
+			}
 			const id = ((await txn.get<number>(ACTION_COUNTER_KEY)) ?? 0) + 1;
 			if (!Number.isSafeInteger(id)) throw new Error("Operator action counter is exhausted.");
 			const now = Date.now();
 			const action: StoredOperatorAction = { id, workItemId: current.id, expectedVersion: current.version, idempotencyKey: key, command: input.command, status: "staged", attempts: 0, createdAt: now, updatedAt: now };
-			await Promise.all([txn.put(ACTION_COUNTER_KEY, id), txn.put(`${ACTION_PREFIX}${id}`, action), txn.put(`${ACTION_KEY_PREFIX}${key}`, id), this.putWakeInTransaction(txn, current)]);
+			await Promise.all([txn.put(ACTION_COUNTER_KEY, id), txn.put(`${ACTION_PREFIX}${id}`, action), txn.put(`${ACTION_KEY_PREFIX}${key}`, id), txn.put(`${ACTION_ACTIVE_PREFIX}${current.id}`, id), this.putWakeInTransaction(txn, current)]);
 			return action;
 		});
 		await this.appendActionEvent(workItem.id, workItem.phase, `Cloudflare OS staged ${action.command.kind.replaceAll("-", " ")}.`);
@@ -448,11 +462,16 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 			if (!workItem) throw new Error("Operator action lost its work item.");
 			if (action.status === "applied") return { disposition: "applied" as const, action, workItem };
 			if (action.status === "rejected") return { disposition: "rejected" as const, action, workItem };
-			if (action.status === "needs_reconciliation") return { disposition: "stale" as const, action, workItem };
+			if (action.status === "needs_reconciliation" && operatorCommandEffectSatisfied(workItem, action.command)) {
+				const reconciled: StoredOperatorAction = { ...action, status: "applied", result: { reconciled: true, workItemVersion: workItem.version }, executionToken: undefined, leaseExpiresAt: undefined, updatedAt: Date.now() };
+				await Promise.all([txn.put(`${ACTION_PREFIX}${action.id}`, reconciled), txn.delete(this.actionWakeKey(action.id)), txn.delete(`${ACTION_ACTIVE_PREFIX}${action.workItemId}`)]);
+				return { disposition: "applied" as const, action: reconciled, workItem };
+			}
 			const now = Date.now();
 			if (action.status === "applying") return { disposition: (action.leaseExpiresAt ?? 0) > now ? "busy" as const : "stale" as const, action, workItem };
 			if (workItem.version !== action.expectedVersion) return { disposition: "stale" as const, action, workItem };
 			try { this.requireActionLease(workItem, action.command, now); } catch { return { disposition: "stale" as const, action, workItem }; }
+			try { assertOperatorCommandAllowed(workItem, action.command, now); } catch { return { disposition: "stale" as const, action, workItem }; }
 			const executionToken = crypto.randomUUID();
 			const applying: StoredOperatorAction = { ...action, status: "applying", attempts: action.attempts + 1, executionToken, leaseExpiresAt: now + ACTION_APPLY_LEASE_MS, updatedAt: now };
 			await Promise.all([
@@ -480,7 +499,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 			const completed: StoredOperatorAction = { ...action, status: "applied", result: input.result, executionToken: undefined, leaseExpiresAt: undefined, updatedAt: Date.now() };
 			if (!fitsDurableRecord(`${ACTION_PREFIX}${action.id}`, completed)) throw new Error("Operator action result exceeds one durable record.");
 			const workItem = await txn.get<StoredWorkItem>(this.workItemKey(action.workItemId));
-			await Promise.all([txn.put(`${ACTION_PREFIX}${action.id}`, completed), txn.delete(this.actionWakeKey(action.id)), ...(workItem && !TERMINAL_PHASES.has(workItem.phase) ? [this.putWakeInTransaction(txn, workItem)] : [])]);
+			await Promise.all([txn.put(`${ACTION_PREFIX}${action.id}`, completed), txn.delete(this.actionWakeKey(action.id)), txn.delete(`${ACTION_ACTIVE_PREFIX}${action.workItemId}`), ...(workItem && !TERMINAL_PHASES.has(workItem.phase) ? [this.putWakeInTransaction(txn, workItem)] : [])]);
 			return completed;
 		});
 		if (completed.command.kind !== "defer") {
@@ -501,7 +520,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 			if (action.status !== "applying" || action.executionToken !== input.executionToken || (action.leaseExpiresAt ?? 0) <= Date.now()) throw new Error("Operator action rejection lost its execution lease.");
 			const rejected: StoredOperatorAction = { ...action, status: "rejected", executionToken: undefined, leaseExpiresAt: undefined, updatedAt: Date.now() };
 			const workItem = await txn.get<StoredWorkItem>(this.workItemKey(action.workItemId));
-			await Promise.all([txn.put(`${ACTION_PREFIX}${action.id}`, rejected), txn.delete(this.actionWakeKey(action.id)), ...(workItem && !TERMINAL_PHASES.has(workItem.phase) ? [this.putWakeInTransaction(txn, workItem)] : [])]);
+			await Promise.all([txn.put(`${ACTION_PREFIX}${action.id}`, rejected), txn.delete(this.actionWakeKey(action.id)), txn.delete(`${ACTION_ACTIVE_PREFIX}${action.workItemId}`), ...(workItem && !TERMINAL_PHASES.has(workItem.phase) ? [this.putWakeInTransaction(txn, workItem)] : [])]);
 			return rejected;
 		});
 		const workItem = await this.loadWorkItem(rejected.workItemId);
@@ -521,26 +540,28 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 			if (!current) return undefined;
 			const wakeKey = `${WAKE_PREFIX}${current.id}`;
 			const wake = await txn.get<WakeRecord>(wakeKey);
-			if (!wake || wake.version !== expectedVersion || (wake.turn ?? 1) !== turn) return undefined;
-			if (current.version !== expectedVersion || TERMINAL_PHASES.has(current.phase)) {
-				await txn.delete(wakeKey);
-				return undefined;
-			}
+			const settledWake = settleOperatorWakeRecord(wake, { currentVersion: current.version, expectedVersion, turn, terminal: TERMINAL_PHASES.has(current.phase), now: Date.now() });
+			if (settledWake === undefined) return undefined;
 			const noteKey = `ledger-operator-note:${current.id}:${key}`;
 			if (await txn.get(noteKey)) return undefined;
 			const at = Date.now();
 			const eventSequence = current.eventSequence + 1;
 			const event: LedgerEvent = { id: `${current.id}:${eventSequence}`, workItemId: current.id, sequence: eventSequence, phase: current.phase, message, source: "cloudflare-os", at };
 			const updated = { ...current, eventSequence, latestEvent: event, updatedAt: at };
-			const nextTurn = Math.max(1, turn) + 1;
-			const retryDelay = Math.min(WAKE_RETRY_BASE_MS * 2 ** Math.min(nextTurn, 8), 5 * 60_000);
-			await Promise.all([
+			const writes: Promise<unknown>[] = [
 				txn.put(noteKey, { workItemId: current.id, message, at }),
 				txn.put(this.workItemKey(updated.id), updated),
 				txn.put(this.eventKey(updated.id, eventSequence), event),
-				txn.put(wakeKey, { id: current.id, workItemId: current.id, version: current.version, turn: nextTurn, state: "pending", attempts: 0, availableAt: at + retryDelay } satisfies WakeRecord),
-				this.scheduleAlarmInTransaction(txn, at + retryDelay),
-			]);
+			];
+			if (settledWake === null) {
+				// A completed turn with no durable progress is a natural stop, not a
+				// reason to pay for the same prompt again. Any later state change will
+				// create a fresh wake.
+				writes.push(txn.delete(wakeKey));
+			} else {
+				writes.push(txn.put(wakeKey, settledWake), this.scheduleAlarmInTransaction(txn, settledWake.availableAt));
+			}
+			await Promise.all(writes);
 			return updated;
 		});
 		if (item) {
@@ -707,22 +728,23 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		if (TERMINAL_PHASES.has(item.phase)) return;
 		const key = `${WAKE_PREFIX}${item.id}`;
 		const now = Date.now();
-		const availableAt = now + Math.max(0, delayMs);
 		const existing = await txn.get<WakeRecord>(key);
-		const wake: WakeRecord = existing && existing.version === item.version
-			? { ...existing, turn: existing.turn ?? 1, state: existing.state ?? "pending", availableAt: (existing.state ?? "pending") === "in_flight" ? existing.availableAt : Math.min(existing.availableAt, availableAt) }
-			: { id: item.id, workItemId: item.id, version: item.version, turn: 1, state: "pending", attempts: 0, availableAt };
+		const wake = queueOperatorWakeRecord(existing, { id: item.id, workItemId: item.id, version: item.version, now, delayMs });
 		await txn.put(key, wake);
 		await this.scheduleAlarmInTransaction(txn, wake.availableAt);
 	}
 
 	private async scheduleAlarmInTransaction(txn: StorageTransactionLike, availableAt: number): Promise<void> {
+		if (this.env.OPERATOR_PAUSED === "true") return;
 		const target = Math.max(Date.now() + 25, availableAt);
 		const existing = await txn.getAlarm();
 		if (existing === null || target < existing) await txn.setAlarm(target);
 	}
 
 	private async deliverOperatorWakes(): Promise<void> {
+		// Durable emergency brake: preserve the ledger and pending wakes while
+		// preventing a misbehaving external operator from consuming more turns.
+		if (this.env.OPERATOR_PAUSED === "true") return;
 		const now = Date.now();
 		const due: Array<[string, WakeRecord]> = [];
 		for await (const page of this.storagePages<WakeRecord>(WAKE_PREFIX)) {
@@ -730,20 +752,37 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		}
 		const wakes = due.toSorted((left, right) => left[1].availableAt - right[1].availableAt).slice(0, WAKE_BATCH_SIZE);
 		for (const [key, wake] of wakes) {
-			const inFlight = await this.ctx.storage.transaction(async (txn) => {
-				const currentWake = await txn.get<WakeRecord>(key);
+			const reservation = await this.ctx.storage.transaction(async (txn) => {
+				let currentWake = await txn.get<WakeRecord>(key);
 				const currentItem = await txn.get<StoredWorkItem>(this.workItemKey(wake.workItemId));
 				if (!currentWake || currentWake.version !== wake.version || currentWake.availableAt > now) return undefined;
-				if (!currentItem || currentItem.version !== currentWake.version || TERMINAL_PHASES.has(currentItem.phase)) {
+				if (!currentItem) {
 					await txn.delete(key);
 					return undefined;
 				}
-				const marked: WakeRecord = { ...currentWake, turn: currentWake.turn ?? 1, state: "in_flight", availableAt: now + OPERATOR_TURN_RESPONSE_LEASE_MS };
+				if (currentWake.state === "in_flight" && currentWake.attempts >= OPERATOR_TURN_DELIVERY_ATTEMPTS) {
+					await txn.delete(key);
+					return { kind: "exhausted", item: currentItem } as const;
+				}
+				const marked = beginOperatorWakeDelivery(currentWake, { currentVersion: currentItem.version, terminal: TERMINAL_PHASES.has(currentItem.phase), now, responseLeaseMs: OPERATOR_TURN_RESPONSE_LEASE_MS });
+				if (!marked) {
+					await txn.delete(key);
+					return undefined;
+				}
 				await txn.put(key, marked);
 				await this.scheduleAlarmInTransaction(txn, marked.availableAt);
-				return marked;
+				return { kind: "deliver", wake: marked } as const;
 			});
-			if (!inFlight) continue;
+			if (!reservation) continue;
+			if (reservation.kind === "exhausted") {
+				const exhausted = reservation.item;
+				if (!TERMINAL_PHASES.has(exhausted.phase)) {
+					const parked = { ...exhausted, phase: "needs_review" as const, version: exhausted.version + 1, lease: null, activeImplementation: null, updatedAt: Date.now() };
+					await this.persistTransition(exhausted.version, parked, "Cloudflare OS did not return a completed turn after three durable delivery attempts. Work is parked for review without losing its ledger or artifacts.", "system");
+				}
+				continue;
+			}
+			const inFlight = reservation.wake;
 			const responseTarget = await this.ctx.restore({ type: "operator-note", workItemId: inFlight.workItemId, expectedVersion: inFlight.version, turn: inFlight.turn }) as RpcStub<OperatorNoteTarget>;
 			try {
 				const result = await (this.env.OS_WORKSPACE as OsWorkspaceGateway).submitExternalMessage({
@@ -758,10 +797,9 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 				if (!result.accepted) throw new Error(`Cloudflare OS rejected the durable wake: ${result.message}`);
 			} catch (error) {
 				console.error("Failed to deliver the durable ledger wake to Cloudflare OS.", { workItemId: inFlight.workItemId, version: inFlight.version, turn: inFlight.turn, error });
-				const attempts = inFlight.attempts + 1;
 				await this.ctx.storage.transaction(async (txn) => {
 					const current = await txn.get<WakeRecord>(key);
-					if (current?.version === inFlight.version && (current.turn ?? 1) === inFlight.turn) await txn.put(key, { ...inFlight, state: "pending", attempts, availableAt: now + Math.min(WAKE_RETRY_BASE_MS * 2 ** Math.min(attempts, 8), 5 * 60_000) });
+					if (current?.version === inFlight.version && (current.turn ?? 1) === inFlight.turn) await txn.put(key, { ...inFlight, state: "pending", availableAt: now + Math.min(WAKE_RETRY_BASE_MS * 2 ** Math.min(inFlight.attempts, 8), 5 * 60_000) });
 				});
 			} finally {
 				responseTarget[Symbol.dispose]();
@@ -770,6 +808,10 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 	}
 
 	private async scheduleWakeAlarm(): Promise<void> {
+		if (this.env.OPERATOR_PAUSED === "true") {
+			await this.ctx.storage.deleteAlarm();
+			return;
+		}
 		let availableAt: number | undefined;
 		for await (const page of this.storagePages<WakeRecord>(WAKE_PREFIX)) {
 			for (const wake of page.values()) availableAt = availableAt === undefined ? wake.availableAt : Math.min(availableAt, wake.availableAt);
@@ -994,12 +1036,6 @@ function normalizeOperatorNoteKey(value: unknown): string | undefined {
 	return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$/u.test(value) ? value : undefined;
 }
 
-async function operatorActionIdempotencyKey(workItemId: string, version: number, command: OperatorCommand): Promise<string> {
-	const bytes = new TextEncoder().encode(JSON.stringify(command));
-	const digest = await crypto.subtle.digest("SHA-256", bytes);
-	const hash = [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
-	return `${workItemId}:v${version}:${command.kind}:${hash}`;
-}
 
 function normalizeLedgerEventSource(value: unknown): LedgerEvent["source"] {
 	if (["user", "cloudflare-os", "github", "runner", "ci", "system"].includes(value as string)) return value as LedgerEvent["source"];

@@ -11,7 +11,15 @@
     "./ledger": {
       "types": "./ledger.d.ts",
       "import": "./ledger.js"
+    },
+    "./operator": {
+      "types": "./operator.d.ts",
+      "import": "./operator.js"
+    },
+    "./wake": {
+      "types": "./wake.d.ts",
+      "import": "./wake.js"
     }
   },
-  "files": ["index.js", "index.d.ts", "ledger.js", "ledger.d.ts"]
+  "files": ["index.js", "index.d.ts", "ledger.js", "ledger.d.ts", "operator.js", "operator.d.ts", "wake.js", "wake.d.ts"]
 }

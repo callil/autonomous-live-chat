@@ -38,6 +38,12 @@ Rotate a secret for suspected disclosure or planned lifecycle policy—not as a 
 
 External work uses idempotency IDs, durable leases, alarms, bounded retries, and truthful terminal states. Infrastructure interruption is retryable; a structured agent refusal, invalid output, failed check, unsafe migration, or unsupported external dependency moves to review.
 
+The Cloudflare OS gateway permits one unfinished external turn per persistent chat. An in-flight ledger wake therefore remains a barrier even when the agent's approved action advances the work-item revision. The response callback releases only the latest durable revision. A completed turn with no durable progress parks instead of recursively prompting itself; three missing response callbacks move the work item to review.
+
+`OPERATOR_PAUSED=true` is the durable emergency brake. It preserves work items, actions, and pending wakes, deletes the room alarm, and sends no model prompts. Redeploying with the flag disabled reconstructs the schedule from the ledger; pausing never requires deleting or rewriting work state.
+
+Operator effects use semantic identities such as `work-item:classification`, `work-item:issue`, and the plan/implementation/promotion identifiers. They are not keyed to a transient ledger revision. The ledger also refuses an out-of-order or concurrent mutation. GitHub issue reconciliation reads the repository's recent issue list before using asynchronous search, so search-index lag cannot create another issue for the same durable marker.
+
 Browser connections only read room snapshots and realtime updates. Opening or reconnecting the UI no longer initiates GitHub reconciliation; recovery begins on Durable Object initialization and alarms.
 
 ## Acceptance test

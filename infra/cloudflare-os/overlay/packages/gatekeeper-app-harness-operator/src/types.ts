@@ -12,7 +12,28 @@ export type LedgerWorkItem = {
 
 export type LedgerClassification = {
 	decision: "eligible" | "needs_review" | "rejected";
-	[key: string]: unknown;
+	changeType: "visual" | "content" | "data" | "behavior" | "infrastructure";
+	scope: "localized" | "bounded" | "broad";
+	risk: "low" | "medium" | "high";
+	affectedSurface: "ui" | "copy" | "data" | "behavior" | "infrastructure";
+	reversible: boolean;
+	executionEligibility: "eligible" | "needs_review";
+	ciProfile: "visual" | "content" | "behavior" | "data" | "infrastructure";
+};
+
+export type ClassificationInput = {
+	workItemId: string;
+	expectedVersion: number;
+	leaseId: string;
+	decision: string;
+	changeType: string;
+	scope: string;
+	risk: string;
+	affectedSurface: string;
+	reversible: boolean;
+	executionEligibility: string;
+	ciProfile: string;
+	message: string;
 };
 
 export type LedgerPlan = {
@@ -94,7 +115,7 @@ export type OperatorSession = {
 	inspectPromotionRun(input: { runId: number }): Promise<{ runId: number; status: string; conclusion: string | null; url: string }>;
 	stageClaim(input: { workItemId: string; expectedVersion: number; leaseId: string; leaseMs: number }): Promise<StagedActionResult>;
 	stageRelease(input: { workItemId: string; expectedVersion: number; leaseId: string }): Promise<StagedActionResult>;
-	stageClassification(input: { workItemId: string; expectedVersion: number; leaseId: string; classification: LedgerClassification; message: string }): Promise<StagedActionResult>;
+	stageClassification(input: ClassificationInput): Promise<StagedActionResult>;
 	stagePlan(input: { workItemId: string; expectedVersion: number; leaseId: string; plan: LedgerPlan; message: string }): Promise<StagedActionResult>;
 	stageIssue(input: { workItemId: string; expectedVersion: number; leaseId: string; title: string; body: string; classification: "triage" | "agent" | "needs-review" | "rejected" | "deployed" }): Promise<StagedActionResult>;
 	stageImplementation(input: { workItemId: string; expectedVersion: number; leaseId: string; runId: string }): Promise<StagedActionResult>;
