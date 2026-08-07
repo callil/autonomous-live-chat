@@ -258,7 +258,12 @@ export function recordLedgerExternalState(item, { operatorId, leaseId, phase, ar
 	// validation artifacts (for example the CI run reference) idempotently.
 	if (phase === "validating" && item.phase !== "candidate" && item.phase !== "validating") throw new Error("Only a candidate can enter validation.");
 	if (phase === "promoting" && item.phase !== "validating") throw new Error("Only a validated candidate can enter promotion.");
-	if (phase === "deployed" && item.phase !== "promoting") throw new Error("Only a promoted candidate can be deployed.");
+	// A deployed record straight from validating is legal when it carries the
+	// promotion run evidence: the operator observed the serialized promotion
+	// finish and reconciles both facts in one truthful record.
+	if (phase === "deployed" && item.phase !== "promoting" && !(item.phase === "validating" && typeof (artifacts.promotion?.url ?? item.artifacts.promotion?.url) === "string")) {
+		throw new Error("Recording deployed requires phase promoting, or the promotion run reference in artifacts.promotion.url.");
+	}
 	if (phase === "completed" && item.phase !== "deployed") throw new Error("Only a deployed candidate can complete.");
 	if (phase === "promoting" && typeof (artifacts.validation?.url ?? item.artifacts.validation?.url) !== "string") {
 		throw new Error("Promotion requires a validation artifact.");
