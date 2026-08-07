@@ -24,6 +24,16 @@ import {
 } from "@app-harness/contracts/ledger";
 import { assertOperatorCommandAllowed, operatorActionEffectKey, operatorCommandEffectSatisfied } from "@app-harness/contracts/operator";
 import { beginOperatorWakeDelivery, operatorWakeDeliveryExhausted, queueOperatorWakeRecord, settleOperatorWakeRecord } from "@app-harness/contracts/wake";
+import {
+	expiredGithubDeliveryMarker,
+	GITHUB_DELIVERY_MARKER_PREFIX,
+	githubDeliveryMarkerKey,
+	matchGithubFactToWorkItem,
+	mergeGithubFact,
+	normalizeGithubDeliveryId,
+	normalizeGithubWebhookFact,
+	type GithubWebhookFact,
+} from "@app-harness/contracts/webhook";
 
 type ChatMessage = {
 	id: string;
@@ -136,11 +146,16 @@ type OperatorGatewayTransport = {
 	submitWake(input: { workItemId: string; version: number; turn: number; wakeKey: string; state: string }): Promise<{ accepted: true } | { accepted: false; message: string }>;
 };
 
-/** External facts recorded by push (runner today, GitHub webhooks next). */
+/** External facts recorded by push (the runner and GitHub webhooks). */
 type ExternalFacts = {
 	runnerResult?: { runId: string; state: string; classification?: string; stderrTail?: string; headSha?: string; pullRequest?: { number: number; url: string }; at: number };
+	validation?: { runId: number; url: string; conclusion: string | null; createdAt: string; headSha: string; at: number };
+	promotion?: { runId: number; url: string; conclusion: string | null; createdAt: string; dispatchKey: string; at: number };
+	candidate?: { number: number; url: string; headSha: string; branch: string; at: number };
 };
-type ExternalFactInput = { source: "runner"; workItemId: string; runId: string; fact: NonNullable<ExternalFacts["runnerResult"]> };
+type ExternalFactInput =
+	| { source: "runner"; workItemId: string; runId: string; fact: NonNullable<ExternalFacts["runnerResult"]> }
+	| { source: "github"; deliveryId: string; fact: GithubWebhookFact };
 
 type RuntimeEnv = Omit<Env, "OPERATOR" | "OPERATOR_PAUSED"> & { OPERATOR: unknown; OPERATOR_PAUSED?: string };
 
@@ -595,6 +610,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 	async ingestExternalFact(input: unknown): Promise<{ accepted: boolean }> {
 		const parsed = normalizeExternalFactInput(input);
 		if (!parsed) return { accepted: false };
+		if (parsed.source === "github") return this.ingestGithubFact(parsed);
 		const merged = await this.ctx.storage.transaction(async (txn) => {
 			const item = await txn.get<StoredWorkItem>(this.workItemKey(parsed.workItemId));
 			if (!item || TERMINAL_PHASES.has(item.phase)) return undefined;
@@ -625,6 +641,65 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 			}
 		}
 		return { accepted: true };
+	}
+
+	/**
+	 * A pushed GitHub webhook fact. The transport dedupe key is the
+	 * X-GitHub-Delivery GUID (stable across redeliveries); matching uses only
+	 * immutable identities the ledger already recorded, and the merge is
+	 * monotonic, so a late or replayed delivery can never downgrade evidence.
+	 */
+	private async ingestGithubFact(parsed: Extract<ExternalFactInput, { source: "github" }>): Promise<{ accepted: boolean }> {
+		const live: StoredWorkItem[] = [];
+		for await (const page of this.storagePages<StoredWorkItem>(WORK_ITEM_PREFIX)) {
+			for (const item of page.values()) if (!TERMINAL_PHASES.has(item.phase)) live.push(item);
+		}
+		const promotions: Array<{ workItemId: string; dispatchKey: string }> = [];
+		if (parsed.fact.kind === "promotion") {
+			// The promote action's durable dispatchKey is the promotion identity.
+			for await (const page of this.storagePages<StoredOperatorAction>(ACTION_PREFIX)) {
+				for (const action of page.values()) if (action.command.kind === "promote") promotions.push({ workItemId: action.workItemId, dispatchKey: action.command.dispatchKey });
+			}
+		}
+		const workItemId = matchGithubFactToWorkItem(parsed.fact, live, promotions);
+		if (!workItemId) return { accepted: false };
+		const merged = await this.ctx.storage.transaction(async (txn) => {
+			if (await txn.get(githubDeliveryMarkerKey(parsed.deliveryId))) return { fresh: false };
+			const item = await txn.get<StoredWorkItem>(this.workItemKey(workItemId));
+			if (!item || TERMINAL_PHASES.has(item.phase)) return undefined;
+			const now = Date.now();
+			const key = `${EXTERNAL_FACT_PREFIX}${item.id}`;
+			const facts = mergeGithubFact(await txn.get<ExternalFacts>(key), parsed.fact, now);
+			await Promise.all([
+				txn.put(githubDeliveryMarkerKey(parsed.deliveryId), { at: now }),
+				...(facts ? [txn.put(key, facts), this.putWakeInTransaction(txn, item, 0)] : []),
+			]);
+			return { fresh: facts !== null };
+		});
+		if (!merged) return { accepted: false };
+		await this.pruneGithubDeliveryMarkers(Date.now());
+		if (!merged.fresh) return { accepted: true };
+		const current = await this.loadWorkItem(workItemId);
+		if (current) {
+			const message = githubFactMessage(parsed.fact);
+			if (current.resumeAt !== null && current.resumeAt !== undefined) {
+				// The pushed fact supersedes any defer that was waiting for it.
+				await this.persistTransition(current.version, { ...current, resumeAt: null, version: current.version + 1 }, message, "github");
+			} else {
+				await this.appendActionEvent(current.id, current.phase, message, "github");
+				await this.scheduleWakeAlarm();
+			}
+		}
+		return { accepted: true };
+	}
+
+	/** Delivery markers only absorb GitHub's bounded redelivery window. */
+	private async pruneGithubDeliveryMarkers(now: number): Promise<void> {
+		const expired: string[] = [];
+		for await (const page of this.storagePages<{ at?: number }>(GITHUB_DELIVERY_MARKER_PREFIX)) {
+			for (const [key, marker] of page) if (expiredGithubDeliveryMarker(marker, now)) expired.push(key);
+		}
+		for (const batch of storageDeleteBatches(expired)) await this.ctx.storage.delete(batch);
 	}
 
 	private requireActionLease(workItem: StoredWorkItem, command: OperatorCommand, now: number): void {
@@ -1134,6 +1209,16 @@ function operatorWakeState(item: StoredWorkItem | undefined, actions: StoredOper
 	// Pushed external facts ride the snapshot; only facts for the currently
 	// active implementation run are shown so a stale run cannot masquerade.
 	const runnerResult = facts?.runnerResult && item.activeImplementation && facts.runnerResult.runId === item.activeImplementation.runId ? facts.runnerResult : undefined;
+	// Pushed GitHub facts ride the same way, each gated by the immutable
+	// identity the ledger already owns so a stale generation cannot masquerade:
+	// validation by the recorded candidate head revision, promotion by a staged
+	// promote action's durable dispatchKey, candidate corroboration by the
+	// active plan branch while the item is still implementing.
+	const candidateArtifact = item.artifacts.candidate as { headSha?: unknown } | undefined;
+	const validation = facts?.validation && candidateArtifact?.headSha === facts.validation.headSha ? facts.validation : undefined;
+	const promotionFact = facts?.promotion;
+	const promotion = promotionFact && actions.some((action) => action.command.kind === "promote" && action.command.dispatchKey === promotionFact.dispatchKey) ? promotionFact : undefined;
+	const candidate = facts?.candidate && item.phase === "implementing" && item.plan && facts.candidate.branch === item.plan.branch ? facts.candidate : undefined;
 	// Surface a stalled implementation run as a fact: the disposable runner
 	// derives its own process identity, so a re-staged implement command with
 	// a fresh runId starts a clean isolated run instead of resuming a corpse.
@@ -1160,7 +1245,16 @@ function operatorWakeState(item: StoredWorkItem | undefined, actions: StoredOper
 		plan: item.plan,
 		...(planProblem ? { planProblem } : {}),
 		...(implementationProblem ? { implementationProblem } : {}),
-		...(runnerResult ? { facts: { runnerResult } } : {}),
+		...(runnerResult || validation || promotion || candidate
+			? {
+				facts: {
+					...(runnerResult ? { runnerResult } : {}),
+					...(candidate ? { candidate } : {}),
+					...(validation ? { validation } : {}),
+					...(promotion ? { promotion } : {}),
+				},
+			}
+			: {}),
 		activeImplementation: item.activeImplementation,
 		artifacts: item.artifacts,
 		actions: actions.slice(-OPERATOR_STATE_ACTION_LIMIT).map((action) => ({
@@ -1193,6 +1287,13 @@ function normalizeOperatorNoteKey(value: unknown): string | undefined {
 function normalizeExternalFactInput(value: unknown): ExternalFactInput | null {
 	if (!value || typeof value !== "object") return null;
 	const raw = value as Record<string, unknown>;
+	if (raw.source === "github") {
+		// The bridge already verified the webhook signature and repository
+		// gate; the ledger still re-validates the fact shape at its boundary.
+		const deliveryId = normalizeGithubDeliveryId(raw.deliveryId);
+		const fact = normalizeGithubWebhookFact(raw.fact);
+		return deliveryId && fact ? { source: "github", deliveryId, fact } : null;
+	}
 	if (raw.source !== "runner") return null;
 	if (typeof raw.workItemId !== "string" || !isUuid(raw.workItemId)) return null;
 	if (typeof raw.runId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$/u.test(raw.runId)) return null;
@@ -1213,6 +1314,12 @@ function normalizeExternalFactInput(value: unknown): ExternalFactInput | null {
 		}
 	}
 	return { source: "runner", workItemId: raw.workItemId, runId: raw.runId, fact };
+}
+
+function githubFactMessage(fact: GithubWebhookFact): string {
+	if (fact.kind === "validation") return `GitHub reported the candidate validation run finished: ${fact.conclusion ?? "unknown"}.`;
+	if (fact.kind === "promotion") return `GitHub reported the promotion run finished: ${fact.conclusion ?? "unknown"}.`;
+	return `GitHub reported candidate pull request #${fact.number} opened.`;
 }
 
 
