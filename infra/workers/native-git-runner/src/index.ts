@@ -37,6 +37,10 @@ const BRANCH = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,159}$/u;
 const SHA = /^[0-9a-f]{40}$/iu;
 const RUNNER_IMAGE_REVISION = "nc031-async010";
 const NANOCODEX_EXECUTION_TIMEOUT_MS = 720_000;
+// The Worker's own backstop, past every in-container watchdog. If a process is
+// still non-terminal this long after it started, the container-side deadlines
+// have all failed to fire and the run is wedged for good.
+const RUNNER_DEADLINE_GRACE_MS = 120_000;
 const SANDBOX_CLEANUP_TIMEOUT_MS = 5_000;
 const TERMINAL_PROCESS_STATUSES = new Set(["completed", "failed", "killed", "error"]);
 const TERMINAL_RUN_STATES = new Set(["checked-out", "needs-restack", "checkout-failed", "candidate-failed", "pull-request-opened"]);
@@ -59,6 +63,23 @@ async function runIds(job: SafeJob): Promise<RunIds> {
 		checkoutDirectory: `/workspace/${stable}-repository`,
 		requestPath: `/tmp/${stable}-request.json`,
 	};
+}
+
+function startedMarkerPath(ids: RunIds): string {
+	return `${ids.requestPath}.started`;
+}
+
+/**
+ * Age of the run in milliseconds, derived from the marker startRun persisted.
+ * Returns null when the marker is missing or unparseable so a missing marker
+ * can never be mistaken for an infinitely old run.
+ */
+async function runAgeMs(session: { readFile(path: string): Promise<{ success: boolean; content?: string }> }, ids: RunIds): Promise<number | null> {
+	const marker = await session.readFile(startedMarkerPath(ids)).catch(() => null);
+	if (!marker?.success || typeof marker.content !== "string") return null;
+	const startedAt = Date.parse(marker.content.trim());
+	if (!Number.isFinite(startedAt)) return null;
+	return Math.max(0, Date.now() - startedAt);
 }
 
 function safeJob(input: NativeGitJob, env: Env): SafeJob | null {
@@ -237,6 +258,10 @@ export class NativeGitRunner extends WorkerEntrypoint<Env> {
 		const request = { job, candidate, model, runId: ids.runId, checkoutDirectory: ids.checkoutDirectory, instructions };
 		const write = await session.writeFile(ids.requestPath, JSON.stringify(request));
 		if (!write.success) return { jobId: job.jobId, runId: ids.runId, state: "runner-unavailable", classification: "runner-input-write-failed" };
+		// Persist the start marker so inspectRun can derive run age. A failed
+		// write is not fatal: it only costs the Worker-side backstop, and the
+		// in-container watchdogs still bound the run.
+		await session.writeFile(startedMarkerPath(ids), new Date().toISOString()).catch(() => null);
 		const env: Record<string, string> = {
 			...gitAuthorizationEnv(token),
 			OPENAI_API_KEY: this.env.OPENAI_API_KEY,
@@ -272,7 +297,17 @@ export class NativeGitRunner extends WorkerEntrypoint<Env> {
 			const session = await sandbox.getSession(ids.sessionId);
 			const process = await session.getProcess(ids.runId);
 			if (!process) return { jobId: job.jobId, runId: ids.runId, state: "runner-unavailable", classification: "sandbox-process-missing" };
-			if (!TERMINAL_PROCESS_STATUSES.has(process.status)) return { jobId: job.jobId, runId: ids.runId, state: "running" };
+			if (!TERMINAL_PROCESS_STATUSES.has(process.status)) {
+				// Backstop: past this age every in-container watchdog has failed to
+				// fire, so the run is wedged. Kill it and report the truth rather than
+				// reporting "running" forever. SIGKILL and this branch are both
+				// idempotent: a repeat inspection kills an already-dead process
+				// harmlessly and returns the same terminal answer.
+				const age = await runAgeMs(session, ids);
+				if (age === null || age <= NANOCODEX_EXECUTION_TIMEOUT_MS + RUNNER_DEADLINE_GRACE_MS) return { jobId: job.jobId, runId: ids.runId, state: "running" };
+				await process.kill("SIGKILL").catch(() => null);
+				return { jobId: job.jobId, runId: ids.runId, state: "candidate-failed", classification: "runner-deadline-enforced" };
+			}
 			const logs = await process.getLogs();
 			const artifact = parseTerminalArtifact(logs.stdout, job, NANOCODEX_DEFAULT_MODEL);
 			return artifact ? { ...artifact, runId: ids.runId } : { jobId: job.jobId, runId: ids.runId, state: "candidate-failed", classification: "nanocodex-output-invalid" };

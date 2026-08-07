@@ -74,6 +74,14 @@ assert.match(source, /parseTerminalArtifact/u);
 assert.match(source, /sandbox\.getSession\(ids\.sessionId\)/u);
 assert.ok(`ah-nc031-async010-${"x".repeat(32)}`.length <= 63, "derived Cloudflare Sandbox identities stay within the platform limit");
 assert.match(source, /NANOCODEX_EXECUTION_TIMEOUT_MS = 720_000/u, "agent execution stays below Cloudflare's 15-minute alarm limit");
+assert.match(source, /RUNNER_DEADLINE_GRACE_MS = 120_000/u, "the Worker backstop sits past every in-container watchdog");
+assert.match(source, /function startedMarkerPath/u, "startRun persists a start marker so run age is derivable");
+assert.match(source, /\$\{ids\.requestPath\}\.started/u);
+assert.match(source, /session\.writeFile\(startedMarkerPath\(ids\)/u);
+assert.match(source, /async function runAgeMs/u);
+assert.match(source, /NANOCODEX_EXECUTION_TIMEOUT_MS \+ RUNNER_DEADLINE_GRACE_MS/u, "inspectRun enforces the deadline from the persisted start marker");
+assert.match(source, /process\.kill\("SIGKILL"\)/u, "a wedged run is actively killed rather than reported as running forever");
+assert.match(source, /classification: "runner-deadline-enforced"/u);
 for (const obsolete of ["DOC_AGENT_TOOLS", "safeDocumentationPatch", "runDocumentationAgent", "add -- README.md docs"]) assert.doesNotMatch(source, new RegExp(obsolete.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"));
 assert.match(dockerfile, new RegExp(`NANOCODEX_VERSION=${NANOCODEX_VERSION}`, "u"));
 assert.match(dockerfile, /GH_VERSION=2\.97\.0/u);
@@ -98,6 +106,40 @@ assert.match(jobEntrypointSource, /candidate-working-tree-dirty/u);
 assert.match(jobEntrypointSource, /stack-head-not-pushed/u);
 assert.doesNotMatch(jobEntrypointSource, /console\.log/u, "the background process emits only its bounded terminal artifact");
 
+// Every blocking step in the container carries its own budget; the run can no
+// longer depend on the SDK-side process timeout to break a wedge.
+assert.match(jobEntrypointSource, /CLONE_TIMEOUT_MS = 180_000/u);
+assert.match(jobEntrypointSource, /GIT_TIMEOUT_MS = 60_000/u);
+assert.match(jobEntrypointSource, /AGENT_TIMEOUT_MS = 540_000/u);
+assert.match(jobEntrypointSource, /GH_STACK_TIMEOUT_MS = 120_000/u);
+assert.match(jobEntrypointSource, /GITHUB_FETCH_TIMEOUT_MS = 30_000/u);
+assert.match(jobEntrypointSource, /RUN_DEADLINE_MS = 650_000/u);
+assert.match(jobEntrypointSource, /options\.timeoutMs/u, "run() honours a per-step budget");
+assert.match(jobEntrypointSource, /child\.kill\("SIGTERM"\)/u);
+assert.match(jobEntrypointSource, /child\.kill\("SIGKILL"\)/u, "a child that ignores SIGTERM is escalated");
+assert.match(jobEntrypointSource, /exitCode: 124, stdout, stderr: "step-timeout"/u);
+assert.match(jobEntrypointSource, /AbortSignal\.timeout\(GITHUB_FETCH_TIMEOUT_MS\)/gu, "every GitHub fetch is bounded");
+assert.match(jobEntrypointSource, /timeoutMs: CLONE_TIMEOUT_MS/u);
+assert.match(jobEntrypointSource, /timeoutMs: AGENT_TIMEOUT_MS/u);
+assert.match(jobEntrypointSource, /timeoutMs: GH_STACK_TIMEOUT_MS/u);
+// The watchdog must hold the event loop open: an unref'd timer is exactly how
+// earlier runs wedged in "running" without ever emitting the deadline artifact.
+assert.match(jobEntrypointSource, /const watchdog = setInterval\(/u);
+assert.doesNotMatch(jobEntrypointSource, /\.unref\(\)|unref\?\.\(\)/u, "the run deadline must not be unref'd");
+assert.match(jobEntrypointSource, /clearInterval\(watchdog\)/gu, "the watchdog is cleared before the final artifact is emitted");
+assert.match(jobEntrypointSource, /nanocodex-deadline-exceeded/u);
+
+// The agent process bounds itself, caps buffering, and detects a silent stall.
+assert.match(entrypointSource, /NANOCODEX_TIMEOUT_MS = 520_000/u);
+assert.match(entrypointSource, /NANOCODEX_INACTIVITY_MS = 120_000/u);
+assert.match(entrypointSource, /MAX_ACCUMULATED_STDOUT_BYTES = 2_097_152/u, "a chatty agent cannot backpressure-deadlock its own stdout");
+assert.match(entrypointSource, /"nanocodex-stalled"/u);
+assert.match(entrypointSource, /"nanocodex-timeout"/u);
+assert.match(entrypointSource, /child\.kill\("SIGTERM"\)/u);
+assert.match(entrypointSource, /child\.kill\("SIGKILL"\)/u);
+assert.match(entrypointSource, /const watchdog = setInterval\(/u);
+assert.doesNotMatch(entrypointSource, /\.unref\(\)|unref\?\.\(\)/u, "the agent budget must not be unref'd");
+
 const directory = await mkdtemp(join(tmpdir(), "nanocodex-contract-"));
 const mock = join(directory, "nanocodex");
 await writeFile(mock, `#!/usr/bin/env node
@@ -121,5 +163,32 @@ assert.equal(code, 0);
 const summary = JSON.parse(stdout);
 assert.deepEqual(summary, { ok: true, model: NANOCODEX_DEFAULT_MODEL, responseIds: ["resp_safe"], tools: ["terminal.exec"] });
 assert.doesNotMatch(stdout, /SECRET_/u);
+
+// The stall watchdog is exercised for real, not just grepped: a binary that
+// emits one line and then hangs forever must be killed and reported truthfully.
+const stallMock = join(directory, "nanocodex-stall");
+await writeFile(stallMock, `#!/usr/bin/env node
+process.stdout.write(JSON.stringify({type:"tool.call",payload:{tool:"terminal.exec"}})+"\\n");
+setInterval(() => {}, 1000);
+`);
+await chmod(stallMock, 0o755);
+
+const stalled = spawn(process.execPath, [entrypoint.pathname], {
+	env: {
+		...process.env,
+		NANOCODEX_BINARY: stallMock,
+		NANOCODEX_INACTIVITY_MS_OVERRIDE: "300",
+		NANOCODEX_WATCHDOG_INTERVAL_MS_OVERRIDE: "50",
+	},
+	stdio: ["pipe", "pipe", "pipe"],
+});
+let stalledStdout = "";
+stalled.stdout.on("data", (chunk) => { stalledStdout += chunk; });
+stalled.stdin.end(JSON.stringify({ prompt: "Implement task", instructions, cwd: "/workspace/repository", model: NANOCODEX_DEFAULT_MODEL }));
+const stalledCode = await new Promise((resolve) => stalled.once("close", resolve));
+assert.equal(stalledCode, 1, "a stalled NanoCodex run exits non-zero");
+const stalledSummary = JSON.parse(stalledStdout);
+assert.equal(stalledSummary.ok, false);
+assert.equal(stalledSummary.classification, "nanocodex-stalled", "an agent that stops emitting JSONL is classified as stalled");
 
 console.log("NanoCodex Sandbox runner contracts passed");
