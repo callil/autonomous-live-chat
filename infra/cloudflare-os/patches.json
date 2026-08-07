@@ -15,7 +15,7 @@
         { "path": "src/operator-gatekeeper.ts", "sha256": "5c1603092228b55fea7bfd11747c89a586e4254ca1a6811063efd2a04040ed30" },
         { "path": "src/types.ts", "sha256": "35412a88a3ecf7685bd0e4040c87ece2ffd38ffb3189e9b8cd9abb45b604b428" },
         { "path": "tsconfig.json", "sha256": "bbe0bffb8d694925b20c3713dbcb5619df5f2ba480f4f93106e10a08e7d7304f" },
-        { "path": "wrangler.jsonc", "sha256": "60023d69391b4a62d5ad8367b03c4551c417936b521fd4f488e023b04c84e194" }
+        { "path": "wrangler.jsonc", "sha256": "d806fa45be9998a4f4e90ea4a55c292a6bf0f0578407deb4b9ddacec468ec81e" }
       ],
       "review": {
         "status": "ready-for-maintainer-review",

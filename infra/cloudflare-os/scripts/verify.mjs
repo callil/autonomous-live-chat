@@ -61,6 +61,7 @@ if (externalAmbientPatch?.kind !== "text-replacement" || !externalAmbientPatch.r
   fail("external-message workspaces must provision ambient singleton capabilities before freezing chat bindings.");
 }
 const gatekeeperWrangler = JSON.parse(await readFile(path.join(root, "overlay/packages/gatekeeper-app-harness-operator/wrangler.jsonc"), "utf8"));
+if (!gatekeeperWrangler.compatibility_flags?.includes("allow_irrevocable_stub_storage")) fail("The operator Gatekeeper must permit its auto-provisioned account capability to be stored by Cloudflare OS.");
 for (const binding of ["LEDGER", "RUNNER", "GITHUB"]) {
   if (!gatekeeperWrangler.services?.some((service) => service.binding === binding)) fail(`Gatekeeper overlay must bind ${binding} as a private service.`);
 }
