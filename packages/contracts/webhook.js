@@ -33,6 +33,18 @@ export function expiredGithubDeliveryMarker(marker, now) {
 	return !marker || typeof marker.at !== "number" || marker.at + GITHUB_DELIVERY_RETENTION_MS <= now;
 }
 
+/**
+ * Parse the durable dispatch key out of a promotion run's rendered run-name.
+ * Returns null when the title is not the deterministic promotion name — which
+ * includes GitHub's known failure to render the run-name interpolation into
+ * webhook payloads' display_title even for runs whose UI title renders fine.
+ */
+export function parsePromotionDispatchKey(displayTitle) {
+	if (typeof displayTitle !== "string" || !displayTitle.startsWith(GITHUB_PROMOTION_RUN_PREFIX)) return null;
+	const dispatchKey = displayTitle.slice(GITHUB_PROMOTION_RUN_PREFIX.length);
+	return IDENTIFIER.test(dispatchKey) ? dispatchKey : null;
+}
+
 function githubHtmlUrl(value) {
 	if (typeof value !== "string") return null;
 	let url;
@@ -78,12 +90,16 @@ export function extractGithubWebhookFact({ event, payload }) {
 		}
 		if (run.path.startsWith(GITHUB_PROMOTION_WORKFLOW_PATH)) {
 			// The promotion run-name is a deterministic function of the durable
-			// dispatch key, so the display title is the promotion identity.
+			// dispatch key, but GitHub does not reliably render the run-name
+			// interpolation into the webhook payload's display_title (the same
+			// unreliability that moved candidate validation to head_sha matching).
+			// The payload carries no other promotion identity — no inputs, and
+			// head_sha is main's tip at dispatch, which the ledger never recorded —
+			// so an unparsed title yields a fact with dispatchKey null that the
+			// bridge must resolve by re-reading the run (whose title is rendered by
+			// completion time) before it may cross the ledger boundary.
 			if (run.event !== "workflow_dispatch") return null;
-			if (typeof run.display_title !== "string" || !run.display_title.startsWith(GITHUB_PROMOTION_RUN_PREFIX)) return null;
-			const dispatchKey = run.display_title.slice(GITHUB_PROMOTION_RUN_PREFIX.length);
-			if (!IDENTIFIER.test(dispatchKey)) return null;
-			return { kind: "promotion", ...base, dispatchKey };
+			return { kind: "promotion", ...base, dispatchKey: parsePromotionDispatchKey(run.display_title) };
 		}
 		if (run.path.startsWith(GITHUB_MAIN_DEPLOY_WORKFLOW_PATH)) {
 			// The auto-merge fast lane's deploy leg: a completed main deploy is
@@ -130,6 +146,8 @@ export function normalizeGithubWebhookFact(value) {
 		const base = workflowRunBase({ id: value.runId, html_url: value.url, conclusion: value.conclusion, created_at: value.createdAt });
 		if (!base) return null;
 		if (value.kind === "promotion") {
+			// A promotion fact without its durable dispatch key has no ledger
+			// identity: the bridge resolves the key before this boundary or drops.
 			return typeof value.dispatchKey === "string" && IDENTIFIER.test(value.dispatchKey) ? { kind: "promotion", ...base, dispatchKey: value.dispatchKey } : null;
 		}
 		return typeof value.headSha === "string" && SHA.test(value.headSha) ? { kind: value.kind, ...base, headSha: value.headSha } : null;

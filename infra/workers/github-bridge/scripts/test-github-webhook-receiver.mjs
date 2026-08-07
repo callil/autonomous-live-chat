@@ -34,7 +34,7 @@ function makeEnv(ledgerBehavior) {
 	};
 }
 
-function deliver(env, { event, payload, delivery = DELIVERY, signature }) {
+function deliver(env, { event, payload, delivery = DELIVERY, signature, resolveDispatchKey }) {
 	const body = JSON.stringify(payload);
 	return handleGithubWebhook(new Request("https://app-harness-os-git-proxy.coda-a.workers.dev/github/webhook", {
 		method: "POST",
@@ -44,7 +44,7 @@ function deliver(env, { event, payload, delivery = DELIVERY, signature }) {
 			"X-Hub-Signature-256": signature ?? sign(body),
 		},
 		body,
-	}), env);
+	}), env, resolveDispatchKey);
 }
 
 const repository = { full_name: "callil/autonomous-live-chat" };
@@ -110,6 +110,40 @@ assert.equal(await verifyGithubWebhookSignature(undefined, body, sign(body)), fa
 	assert.equal(calls[0].fact.kind, "promotion");
 	assert.equal(calls[0].fact.dispatchKey, "dispatch-work-42", "the promotion fact carries the durable dispatch key parsed from the deterministic run-name");
 }
+
+// ---- promotion identity recovery: an unrendered payload title is resolved by
+// re-reading the run through the App capability before the fact crosses the
+// ledger boundary; an unresolvable identity drops visibly instead of silently
+// losing successful-promotion evidence.
+{
+	const unrenderedPromotionPayload = {
+		action: "completed",
+		repository,
+		workflow_run: { id: 902, html_url: RUN_URL, conclusion: "success", created_at: "2026-08-06T21:00:00Z", event: "workflow_dispatch", path: ".github/workflows/os-stack-promote.yml", display_title: "Promote App Harness OS candidate" },
+	};
+	{
+		const { env, calls } = makeEnv();
+		const resolved = [];
+		const response = await deliver(env, {
+			event: "workflow_run",
+			payload: unrenderedPromotionPayload,
+			resolveDispatchKey: async (runId) => { resolved.push(runId); return "dispatch-work-42"; },
+		});
+		assert.equal(response.status, 200, "a resolved promotion identity ingests normally");
+		assert.deepEqual(resolved, [902], "the resolver re-reads exactly the delivered run");
+		assert.equal(calls[0].fact.dispatchKey, "dispatch-work-42", "the ledger receives the recovered durable dispatch key");
+	}
+	{
+		const { env, calls } = makeEnv();
+		assert.equal((await deliver(env, { event: "workflow_run", payload: unrenderedPromotionPayload, resolveDispatchKey: async () => null })).status, 204, "an unresolvable promotion identity is dropped");
+		assert.equal(calls.length, 0, "a promotion fact without its durable dispatch key never reaches the ledger");
+	}
+	{
+		const { env, calls } = makeEnv();
+		assert.equal((await deliver(env, { event: "workflow_run", payload: unrenderedPromotionPayload, resolveDispatchKey: async () => { throw new Error("api down"); } })).status, 204, "a failed resolution drops rather than crashing the receiver");
+		assert.equal(calls.length, 0);
+	}
+}
 {
 	const { env, calls } = makeEnv();
 	const pullPayload = { action: "opened", repository, pull_request: { number: 55, html_url: "https://github.com/callil/autonomous-live-chat/pull/55", head: { ref: "app-harness-os/42/g1", sha: SHA_A } } };
@@ -131,6 +165,7 @@ assert.equal(await verifyGithubWebhookSignature(undefined, body, sign(body)), fa
 const entrypoint = await readFile(new URL("../src/entrypoint.ts", import.meta.url), "utf8");
 assert.match(entrypoint, /\/github\/webhook/u, "the default fetch routes the webhook path");
 assert.match(entrypoint, /handleGithubWebhook/u, "the route delegates to the tested receiver");
+assert.match(entrypoint, /new GitHubCapability\(env\)\.resolvePromotionDispatchKey\(\{ runId \}\)/u, "production injects the App capability's promotion dispatch-key resolver");
 const wrangler = await readFile(new URL("../wrangler.jsonc", import.meta.url), "utf8");
 assert.match(wrangler, /"binding": "LEDGER", "service": "autonomous-live-chat", "entrypoint": "LedgerService"/u, "the bridge binds the ledger over a private service binding");
 

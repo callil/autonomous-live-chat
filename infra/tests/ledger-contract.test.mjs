@@ -126,6 +126,28 @@ const promotionDeployed = recordLedgerExternalState(validating, {
 });
 assert.equal(promotionDeployed.phase, "deployed", "the promotion lane remains a legal deployment path");
 
+// ---- promotion lane end to end: promoting, then deployed from the observed
+// successful promotion run (webhook-pushed or loop-observed), then completed ----
+const VALIDATION_RUN = { runId: 60, url: "https://github.com/callil/autonomous-live-chat/actions/runs/60", conclusion: "success" };
+const PROMOTION_RUN = { runId: 70, url: "https://github.com/callil/autonomous-live-chat/actions/runs/70", conclusion: "success", createdAt: "2026-08-06T21:00:00Z", dispatchKey: "dispatch-work-1" };
+const promoting = recordLedgerExternalState(validating, { phase: "promoting", artifacts: { validation: VALIDATION_RUN }, now: 9 });
+assert.equal(promoting.phase, "promoting", "a validated candidate enters promotion with its validation evidence");
+assert.throws(() => recordLedgerExternalState(promoting, {
+	phase: "deployed",
+	artifacts: { deploymentUrl: DEPLOY_URL },
+	now: 10,
+}), /success conclusion/u, "phase promoting alone is intent: deployed still requires the promotion run's own success conclusion");
+const promotionLaneDeployed = recordLedgerExternalState(promoting, {
+	phase: "deployed",
+	artifacts: { deploymentUrl: DEPLOY_URL, promotion: PROMOTION_RUN },
+	now: 10,
+});
+assert.equal(promotionLaneDeployed.phase, "deployed", "the successful promotion run fact records deployed from promoting");
+assert.deepEqual(promotionLaneDeployed.artifacts.promotion, PROMOTION_RUN, "the promotion evidence — including its durable dispatch key — persists on the item");
+const promotionLaneCompleted = recordLedgerExternalState(promotionLaneDeployed, { phase: "completed", now: 11 });
+assert.equal(promotionLaneCompleted.phase, "completed", "the promotion lane completes through deployed like every other item");
+assert.equal(recordLedgerExternalState(promoting, { phase: "retryable", now: 10 }).phase, "retryable", "a failed promotion run can still clear the item to retryable for a restack");
+
 // A candidate whose validation failed remains replannable: the restack path
 // stays open without any lease or claim ceremony.
 const restacked = recordLedgerPlan(validating, {

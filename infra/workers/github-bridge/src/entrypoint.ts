@@ -31,7 +31,10 @@ export default {
 	async fetch(request: Request, env: GitHubBridgeEnv): Promise<Response> {
 		if (new URL(request.url).pathname === "/github/webhook") {
 			if (request.method !== "POST") return new Response("Method not allowed", { status: 405 });
-			return handleGithubWebhook(request, env);
+			// The App capability resolver recovers a promotion run's durable
+			// dispatch key when the webhook payload's display_title never
+			// rendered the deterministic run-name.
+			return handleGithubWebhook(request, env, (runId) => new GitHubCapability(env).resolvePromotionDispatchKey({ runId }));
 		}
 		return new Response("Not found", { status: 404 });
 	},

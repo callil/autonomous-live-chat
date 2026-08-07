@@ -9,6 +9,7 @@ import {
 	mergeGithubFact,
 	normalizeGithubDeliveryId,
 	normalizeGithubWebhookFact,
+	parsePromotionDispatchKey,
 } from "../../packages/contracts/webhook.js";
 
 const SHA_A = "a".repeat(40);
@@ -44,11 +45,19 @@ const promotion = extractGithubWebhookFact({
 	payload: { action: "completed", workflow_run: candidateRun({ path: ".github/workflows/os-stack-promote.yml", event: "workflow_dispatch", display_title: "App Harness promotion · dispatch-work-42" }) },
 });
 assert.deepEqual(promotion, { kind: "promotion", runId: 900, url: RUN_URL, conclusion: "success", createdAt: "2026-08-06T20:00:00Z", dispatchKey: "dispatch-work-42" }, "the deterministic run-name yields the durable dispatch key");
-assert.equal(
+// GitHub does not reliably render the run-name interpolation into the webhook
+// payload's display_title: extraction keeps the completed promotion run as a
+// fact with dispatchKey null so the bridge can recover the identity by
+// re-reading the run instead of dropping the evidence on the floor.
+assert.deepEqual(
 	extractGithubWebhookFact({ event: "workflow_run", payload: { action: "completed", workflow_run: candidateRun({ path: ".github/workflows/os-stack-promote.yml", event: "workflow_dispatch", display_title: "Unrelated dispatch" }) } }),
-	null,
-	"a promotion run without the deterministic title has no durable identity",
+	{ kind: "promotion", runId: 900, url: RUN_URL, conclusion: "success", createdAt: "2026-08-06T20:00:00Z", dispatchKey: null },
+	"a promotion run whose payload title did not render keeps the run evidence with a null identity for bridge-side resolution",
 );
+assert.equal(parsePromotionDispatchKey("App Harness promotion · dispatch-work-42"), "dispatch-work-42", "the parse helper recovers the durable dispatch key from a rendered run-name");
+assert.equal(parsePromotionDispatchKey("Promote App Harness OS candidate"), null, "an unrendered workflow-name title yields no identity");
+assert.equal(parsePromotionDispatchKey("App Harness promotion · bad key"), null, "a malformed dispatch key never becomes an identity");
+assert.equal(parsePromotionDispatchKey(undefined), null, "a missing title yields no identity");
 
 const candidate = extractGithubWebhookFact({
 	event: "pull_request",
@@ -96,6 +105,7 @@ for (const fact of [validation, promotion, candidate, merged, mainDeploy]) {
 }
 assert.equal(normalizeGithubWebhookFact({ kind: "validation", runId: 900, url: RUN_URL, conclusion: "success", createdAt: "2026-08-06T20:00:00Z", headSha: "short" }), null);
 assert.equal(normalizeGithubWebhookFact({ kind: "promotion", runId: 900, url: RUN_URL, conclusion: "success", createdAt: "2026-08-06T20:00:00Z", dispatchKey: "bad key" }), null);
+assert.equal(normalizeGithubWebhookFact({ kind: "promotion", runId: 900, url: RUN_URL, conclusion: "success", createdAt: "2026-08-06T20:00:00Z", dispatchKey: null }), null, "an unresolved promotion identity dies at the ledger boundary: the bridge must resolve or drop");
 assert.equal(normalizeGithubWebhookFact({ kind: "main-deploy", runId: 900, url: RUN_URL, conclusion: "success", createdAt: "2026-08-06T20:00:00Z", headSha: "short" }), null);
 assert.equal(normalizeGithubWebhookFact({ ...merged, mergeCommitSha: "short" }), null, "a merged fact without a full merge commit dies at the boundary");
 assert.equal(normalizeGithubWebhookFact({ kind: "elsewhere" }), null);

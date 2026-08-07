@@ -28,6 +28,8 @@ type TurnState = {
 	workItemId: string;
 	/** Advancing expectedVersion for staging, refreshed from each receipt. */
 	version: number;
+	/** Ledger phase at snapshot time; guards the promoting-phase mechanics. */
+	phase: string;
 	activeRunId: string;
 	/** The runner's own process identifier, absorbed from the implement receipt. */
 	runnerRunId?: string;
@@ -50,9 +52,13 @@ type TurnState = {
 
 type Snapshot = {
 	version?: number;
+	phase?: string;
 	activeImplementation?: { runId?: string } | null;
 	plan?: { branch?: string } | null;
 	artifacts?: { issue?: { number?: number } };
+	/** The applied promote action's durable dispatch key, exposed while promoting. */
+	promotionDispatch?: { dispatchKey?: string; dispatchedAt?: number };
+	facts?: Record<string, Record<string, unknown> | undefined>;
 };
 
 // Adaptive turn budgeting: the outer envelope is generous because nothing
@@ -150,12 +156,13 @@ export class OperatorTurn extends DurableObject<Env> {
 		const turn: TurnState = {
 			workItemId,
 			version: snapshot.version ?? ledgerSnapshot.version,
+			phase: typeof snapshot.phase === "string" ? snapshot.phase : "",
 			activeRunId: snapshot.activeImplementation?.runId ?? "",
 			planBranch: snapshot.plan?.branch ?? "",
 			issueNumber: Number.isSafeInteger(snapshot.artifacts?.issue?.number) ? snapshot.artifacts!.issue!.number! : 0,
 			candidatePr: Number.isSafeInteger((snapshot.artifacts as { candidate?: { pullRequestNumber?: unknown } } | undefined)?.candidate?.pullRequestNumber) ? (snapshot.artifacts as { candidate: { pullRequestNumber: number } }).candidate.pullRequestNumber : 0,
 			candidateHeadSha: typeof (snapshot.artifacts as { candidate?: { headSha?: unknown } } | undefined)?.candidate?.headSha === "string" ? (snapshot.artifacts as { candidate: { headSha: string } }).candidate.headSha : "",
-			snapshotFacts: (snapshot as { facts?: Record<string, Record<string, unknown> | undefined> }).facts ?? undefined,
+			snapshotFacts: snapshot.facts ?? undefined,
 			messages: [
 				{ role: "system", content: SYSTEM_PROMPT },
 				{ role: "user", content: `State: ${ledgerSnapshot.state}` },
@@ -166,11 +173,40 @@ export class OperatorTurn extends DurableObject<Env> {
 			status: "running",
 			calls: [],
 		};
+		await this.observePromotionIfBlind(turn, snapshot);
 		// Durable before any model call, so a restart resumes instead of
 		// restarting; the alarm is both the driver and the crash backstop.
 		await this.ctx.storage.put("turn", turn);
 		await this.ctx.storage.setAlarm(Date.now() + TURN_ALARM_BACKSTOP_MS);
 		await this.drive(turn);
+	}
+
+	/**
+	 * Promoting-phase self-rescue, loop-owned by doctrine: when the snapshot
+	 * shows phase promoting with no pushed promotion fact (the webhook fact can
+	 * be lost to GitHub's unreliable display_title rendering), the LOOP observes
+	 * the promotion run through the GITHUB binding — once per turn, bounded —
+	 * and injects the concluded run into the snapshot facts. The model's next
+	 * action is then simply stageState with loop-injected evidence; commandFor
+	 * already overrides artifacts from ctx.facts.
+	 */
+	private async observePromotionIfBlind(turn: TurnState, snapshot: Snapshot): Promise<void> {
+		const dispatchKey = snapshot.promotionDispatch?.dispatchKey;
+		if (turn.phase !== "promoting" || turn.snapshotFacts?.promotion || typeof dispatchKey !== "string" || !dispatchKey) return;
+		let run: { runId: number; status: string; conclusion: string | null; url: string; createdAt: string } | null;
+		try {
+			run = await withTimeout(this.env.GITHUB.findPromotionRun({ dispatchKey }), OBSERVATION_TIMEOUT_MS, "findPromotionRun");
+		} catch (error) {
+			// An unobservable run is not a lost item: the next wake retries.
+			console.error("The loop could not observe the promotion run.", { workItemId: turn.workItemId, error });
+			return;
+		}
+		if (!run || run.conclusion === null) return;
+		turn.snapshotFacts = { ...(turn.snapshotFacts ?? {}), promotion: { runId: run.runId, url: run.url, conclusion: run.conclusion, createdAt: run.createdAt, dispatchKey, at: Date.now() } };
+		turn.messages.push({
+			role: "user",
+			content: `Loop observation: the promotion run for this item concluded ${run.conclusion} (${run.url}). This evidence is now State.facts.promotion. On success, stageState deployed; on failure, stageState retryable and restack.`,
+		});
 	}
 
 	private async drive(turn: TurnState): Promise<void> {
@@ -261,6 +297,12 @@ export class OperatorTurn extends DurableObject<Env> {
 					}
 				}
 			}
+			// Reject-with-teaching, loop-side: an item already promoting must never
+			// re-dispatch. The data error names the productive next step instead of
+			// letting the ledger's phase guard reject the same mistake every turn.
+			if (name === "stagePromotion" && turn.phase === "promoting") {
+				return { error: "This item is already promoting — do not dispatch promotion again. When State.facts.promotion carries a success conclusion, stageState deployed with that evidence; on a failure conclusion stageState retryable and restack; otherwise reply WAITING." };
+			}
 			const command = commandFor(name, args, {
 				minted,
 				activeRunId: turn.activeRunId,
@@ -323,9 +365,11 @@ export class OperatorTurn extends DurableObject<Env> {
 
 	/** Keep the loop-owned staging facts current as receipts arrive. */
 	private absorbReceipt(turn: TurnState, command: { kind: string; runId?: string }, result: unknown): void {
-		const receipt = result as { version?: unknown; ledger?: { version?: unknown } };
+		const receipt = result as { version?: unknown; phase?: unknown; ledger?: { version?: unknown; phase?: unknown } };
 		const version = Number.isSafeInteger(receipt?.version) ? receipt.version as number : Number.isSafeInteger(receipt?.ledger?.version) ? receipt.ledger!.version as number : undefined;
 		if (version !== undefined) turn.version = version;
+		const phase = typeof receipt?.phase === "string" ? receipt.phase : typeof receipt?.ledger?.phase === "string" ? receipt.ledger.phase : undefined;
+		if (phase !== undefined) turn.phase = phase;
 		if (command.kind === "implement" && typeof command.runId === "string") turn.activeRunId = command.runId;
 		const runner = (result as { runner?: { runId?: unknown } })?.runner;
 		if (runner && typeof runner.runId === "string") turn.runnerRunId = runner.runId;
