@@ -147,7 +147,7 @@ type OsWorkspaceGateway = {
 	}): Promise<{ accepted: true; chatPath: string } | { accepted: false; message: string }>;
 };
 
-type RuntimeEnv = Omit<Env, "OS_WORKSPACE"> & { OS_WORKSPACE: unknown; OPERATOR_PAUSED?: string };
+type RuntimeEnv = Omit<Env, "OS_WORKSPACE" | "OPERATOR_PAUSED"> & { OS_WORKSPACE: unknown; OPERATOR_PAUSED?: string };
 
 const MESSAGE_PREFIX = "message:";
 const ANNOTATION_PREFIX = "annotation:";
