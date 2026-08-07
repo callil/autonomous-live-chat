@@ -84,7 +84,7 @@ export function AppHarness({ children, onRequest, onOpenActivity, activityCount 
         <header><strong>App Harness</strong><button type="button" aria-label="Close App Harness" data-app-harness-id="close-authoring" data-app-harness-label="Close App Harness" onClick={() => setOpen(false)}>×</button></header>
         {!target ? <div className="ah-actions">
           <button type="button" aria-pressed={targeting} data-app-harness-id="target-control" data-app-harness-label="Target control" title="Hold Shift to target a parent container" onClick={() => setTargeting((value) => !value)}><CrosshairIcon />Target an element</button>
-          {onOpenActivity && <button type="button" data-app-harness-id="activity-control" data-app-harness-label="Activity control" onClick={onOpenActivity}>Activity{activityCount ? ` · ${activityCount}` : ""}</button>}
+          {onOpenActivity && <button className="ah-activity" type="button" aria-label={`Open activity (${activityCount})`} data-app-harness-id="activity-control" data-app-harness-label="Activity control" onClick={onOpenActivity}><i aria-hidden="true" /><span>{activityCount}</span></button>}
         </div> : <form aria-labelledby={composerId} onSubmit={submit}>
           <label id={composerId} htmlFor={`${composerId}-request`}>Target: {target.label ?? target.targetId}</label>
           <textarea id={`${composerId}-request`} autoFocus value={request} onChange={(event) => setRequest(event.target.value)} placeholder="Describe the change" />
