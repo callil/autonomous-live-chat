@@ -38,7 +38,16 @@ assert.match(SYSTEM_PROMPT, /classification -> issue -> plan -> implementation -
 assert.doesNotMatch(SYSTEM_PROMPT, /claim|lease|defer|stageRelease/iu, "no lease vocabulary survives the simplification");
 assert.match(SYSTEM_PROMPT, /never poll getCandidate/u, "candidate results arrive by push");
 assert.match(SYSTEM_PROMPT, /State\.facts\.runnerResult/u, "the prompt teaches the pushed runner fact");
-assert.match(SYSTEM_PROMPT, /State\.facts\.validation or State\.facts\.promotion is present, stage from it/u, "pushed GitHub facts are staged directly, never re-observed");
+assert.match(SYSTEM_PROMPT, /Stage from pushed State\.facts/u, "pushed GitHub facts are staged directly, never re-observed");
+// ---- auto-merge fast lane: wait for merge facts; promotion is the fallback ----
+assert.match(SYSTEM_PROMPT, /then WAIT: candidates auto-merge and deploy on their own/u, "after validating, the default is to wait for the fast lane, not dispatch promotion");
+assert.match(SYSTEM_PROMPT, /facts\.merged and a success facts\.mainDeploy arrive, stageState deployed with both as artifacts, then completed/u, "the merge and main-deploy facts together are the fast-lane deployed evidence");
+assert.match(SYSTEM_PROMPT, /stagePromotion is the fallback if no merged fact arrives after a long wait/u, "promotion dispatch is described as the fallback merge path");
+const stageStateArtifacts = TOOLS.find((entry) => entry.function.name === "stageState").function.parameters.properties.artifacts;
+assert.deepEqual(Object.keys(stageStateArtifacts.properties).toSorted(), ["mainDeploy", "merged", "promotion", "validation"], "stageState can carry every evidence artifact the deployed guard accepts");
+assert.deepEqual(stageStateArtifacts.properties.merged.required.toSorted(), ["branch", "headSha", "mergeCommitSha", "number", "url"]);
+assert.deepEqual(stageStateArtifacts.properties.mainDeploy.required.toSorted(), ["conclusion", "runId", "url"]);
+assert.match(TOOLS.find((entry) => entry.function.name === "stagePromotion").function.description, /^Fallback merge path/u, "the tool description itself teaches promotion as fallback");
 assert.match(SYSTEM_PROMPT, /only when the phase needs an answer and no fact is present/u, "observation tools are the fallback poll, not the data path");
 assert.match(SYSTEM_PROMPT, /PROGRESSED, WAITING, PARKED:<code>, or COMPLETE/u, "a waiting turn simply ends; the DO re-drives itself");
 
@@ -53,6 +62,14 @@ const plan = commandFor("stagePlan", { baseSha: "b".repeat(40), generation: 2, s
 assert.equal(plan.plan.nodeId, "root");
 assert.equal(plan.plan.parentBaseSha, plan.plan.baseSha, "the one-node plan pins its parent base to the plan base");
 assert.equal(plan.plan.issueNumber, 7, "the issue identity comes from the snapshot, not the model");
+const fastLaneArtifacts = {
+	validation: null,
+	promotion: null,
+	merged: { number: 12, url: "https://github.com/callil/autonomous-live-chat/pull/12", headSha: "a".repeat(40), mergeCommitSha: "c".repeat(40), branch: "app-harness-os/7/g1" },
+	mainDeploy: { url: "https://github.com/callil/autonomous-live-chat/actions/runs/77", runId: 77, conclusion: "success" },
+};
+const fastLaneDeployed = commandFor("stageState", { phase: "deployed", artifacts: fastLaneArtifacts, message: "Deployed by auto-merge.", source: "github" }, ctx);
+assert.deepEqual(fastLaneDeployed.artifacts, { merged: fastLaneArtifacts.merged, mainDeploy: fastLaneArtifacts.mainDeploy }, "the fast-lane evidence artifacts pass through stageState unmodified");
 assert.throws(() => commandFor("stageClaim", {}, ctx), /Unknown operator stage tool/u, "claim is unrepresentable");
 assert.throws(() => commandFor("stageDefer", { delayMs: 60_000, message: "wait" }, ctx), /Unknown operator stage tool/u, "defer is unrepresentable");
 assert.throws(() => commandFor("inventedMethod", {}, ctx), /Unknown operator stage tool/u);
@@ -114,6 +131,12 @@ assert.match(demoWorker, /const nextStep = item\.phase === "retryable"/u, "a ret
 assert.match(demoWorker, /Stage a revised plan \(revision \$\{item\.plan \? item\.plan\.revision \+ 1 : 1\}, next generation, fresh getMainSha baseSha\) to restack\./u, "the guidance carries the exact next revision");
 assert.match(SYSTEM_PROMPT, /phase retryable \(the failed run was already cleared\), restack/u, "the prompt teaches the retryable restack");
 assert.match(SYSTEM_PROMPT, /never wait for a cleared run/u, "the wedge — waiting on a dead generation — is named and forbidden");
+
+// ---- fast-lane facts: honest joins in the ledger and snapshot ----
+assert.match(demoWorker, /matchGithubFactToWorkItem\(parsed\.fact, live, promotions, merges\)/u, "main-deploy matching receives the per-item merge commits");
+assert.match(demoWorker, /facts\?\.merged\?\.mergeCommitSha/u, "the merge join key comes from each live item's recorded merged fact");
+assert.match(demoWorker, /facts\.mainDeploy\.headSha === merged\.mergeCommitSha/u, "the snapshot only ever shows a deploy of this item's own merge commit");
+assert.match(demoWorker, /candidateArtifact\?\.headSha === facts\.merged\.headSha/u, "the merged fact is gated by the recorded candidate's immutable head revision");
 
 // ---- user-visible source label: never "cloudflare os" ----
 assert.match(demoWorker, /source === "cloudflare-os" \? "operator" : source/u, "the stored enum stays for old records and maps to operator at projection time");

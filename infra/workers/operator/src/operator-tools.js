@@ -11,14 +11,15 @@ const EVENT_SOURCES = ["cloudflare-os", "github", "runner", "ci", "system"];
 const ISSUE_CLASSIFICATIONS = ["triage", "agent", "needs-review", "rejected", "deployed"];
 
 export const SYSTEM_PROMPT =
-	"You operate the App Harness ledger for one work item. State is authoritative; do not re-read. "
+	"You operate the App Harness ledger for one work item. State is authoritative. "
 	+ "Order: classification -> issue -> plan -> implementation -> candidate -> validating -> promotion -> deployed -> completed. "
 	+ "One tool per step; advance while the ledger accepts; on rejected, correct once or stop. "
-	+ "Results arrive by push: never poll getCandidate or re-stage implementation while implementing. stageCandidate from a pull-request-opened State.facts.runnerResult; on failure or implementationProblem, stageImplementation again or replan. "
-	+ "When State.facts.validation or State.facts.promotion is present, stage from it. On validation success stageState validating with its artifacts, then stagePromotion with a fresh dispatchKey; promotion success: stageState deployed, then completed. "
+	+ "Results arrive by push: never poll getCandidate. stageCandidate from a pull-request-opened State.facts.runnerResult; on failure or implementationProblem, stageImplementation again or replan. "
+	+ "Stage from pushed State.facts. On validation success stageState validating, then WAIT: candidates auto-merge and deploy on their own. When facts.merged and a success facts.mainDeploy arrive, stageState deployed with both as artifacts, then completed. "
+	+ "stagePromotion is the fallback if no merged fact arrives after a long wait. "
 	+ "On validation or promotion failure, or phase retryable (the failed run was already cleared), restack: stagePlan with the next generation and a fresh getMainSha baseSha; never wait for a cleared run. "
 	+ "Observe only when the phase needs an answer and no fact is present. "
-	+ "When nothing can advance until an external result arrives, reply WAITING. Reply exactly PROGRESSED, WAITING, PARKED:<code>, or COMPLETE.";
+	+ "Reply WAITING when only an external result can advance; reply exactly PROGRESSED, WAITING, PARKED:<code>, or COMPLETE.";
 
 function tool(name, description, properties) {
 	return {
@@ -82,7 +83,7 @@ export const TOOLS = [
 		pullRequestUrl: { type: "string" },
 		message: { type: "string" },
 	}),
-	tool("stagePromotion", "Dispatch the trusted promotion workflow for the validated candidate. The candidate identity and dispatch key are supplied by the loop.", {}),
+	tool("stagePromotion", "Fallback merge path: dispatch the trusted promotion workflow for a validated candidate that auto-merge did not land. The candidate identity and dispatch key are supplied by the loop.", {}),
 	tool("stageState", "Record an externally observed phase transition with its evidence.", {
 		phase: { type: "string", enum: EXTERNAL_PHASES },
 		artifacts: {
@@ -101,8 +102,20 @@ export const TOOLS = [
 					required: ["url", "runId"],
 					additionalProperties: false,
 				},
+				merged: {
+					type: ["object", "null"],
+					properties: { number: { type: "integer" }, url: { type: "string" }, headSha: { type: "string" }, mergeCommitSha: { type: "string" }, branch: { type: "string" } },
+					required: ["number", "url", "headSha", "mergeCommitSha", "branch"],
+					additionalProperties: false,
+				},
+				mainDeploy: {
+					type: ["object", "null"],
+					properties: { url: { type: "string" }, runId: { type: "integer" }, conclusion: { type: "string" } },
+					required: ["url", "runId", "conclusion"],
+					additionalProperties: false,
+				},
 			},
-			required: ["validation", "promotion"],
+			required: ["validation", "promotion", "merged", "mainDeploy"],
 			additionalProperties: false,
 		},
 		message: { type: "string" },
@@ -118,6 +131,8 @@ function stageArtifacts(value) {
 	const artifacts = {};
 	if (value.validation) artifacts.validation = value.validation;
 	if (value.promotion) artifacts.promotion = value.promotion;
+	if (value.merged) artifacts.merged = value.merged;
+	if (value.mainDeploy) artifacts.mainDeploy = value.mainDeploy;
 	return Object.keys(artifacts).length ? { artifacts } : {};
 }
 
