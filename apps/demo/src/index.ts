@@ -166,6 +166,7 @@ const MESSAGE_SEQUENCE_KEY = "sequence:message";
 const ANNOTATION_SEQUENCE_KEY = "sequence:annotation";
 const WORK_ITEM_SEQUENCE_KEY = "sequence:work-item";
 const LEDGER_MIGRATION_KEY = "migration:ledger-only:v1";
+const CLEAN_OPERATOR_STATE_KEY = "migration:clean-operator-state:v1";
 const WAKE_BATCH_SIZE = 16;
 const WAKE_RETRY_BASE_MS = 1_000;
 const OPERATOR_LEASE_MAX_MS = 15 * 60_000;
@@ -184,7 +185,7 @@ const OPERATOR_EMAIL = "callil.capuozzo@gmail.com";
 // live; experimental workspaces are never reused.
 const OPERATOR_GADGET_KEY = "app-harness-operator";
 const OPERATOR_CHAT_KEY = "ledger-operator";
-const OPERATOR_INSTRUCTION = "Operate the APP_HARNESS ledger. Read before acting. Reconcile existing effects. Stage only the next legal missing action. Never guess schemas or artifacts. If blocked or unchanged, park. Reply exactly PROGRESSED, PARKED:<code>, or COMPLETE.";
+const OPERATOR_INSTRUCTION = "Operate APP_HARNESS. Read getWorkItem({workItemId}) and listActions({workItemId}), then progress one step only: claim -> classification -> issue -> plan -> implementation -> candidate -> validating -> promotion -> deployed -> completed. Declared observations: getMainSha, inspectImplementation, getCandidate, observeCandidateValidation, findPromotionRun, inspectPromotionRun. Declared writes: stageClaim, stageClassification, stageIssue, stagePlan, stageImplementation, stageCandidate, stagePromotion, stageState, stageRelease, stageDefer. Reconcile existing effects first and use declared argument types only; never invent methods. stageRelease and stageDefer are parking exits: after either, stop. If blocked or unchanged, stop. Reply exactly PROGRESSED, PARKED:<code>, or COMPLETE.";
 const GITHUB_REPOSITORY = "callil/autonomous-live-chat";
 const PRODUCTION_DEPLOYMENT_HOST = "autonomous-live-chat.coda-a.workers.dev";
 
@@ -236,6 +237,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		super(ctx, env);
 		this.ctx.blockConcurrencyWhile(async () => {
 			await this.migrateToLedgerOnly();
+			await this.resetExperimentalOperatorState();
 			await this.scheduleWakeAlarm();
 		});
 	}
@@ -972,6 +974,27 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		}
 		await this.ctx.storage.delete(["messages", "harness-annotations", "harness-work-items", "workflow"]);
 		await this.ctx.storage.put(LEDGER_MIGRATION_KEY, true);
+	}
+
+	private async resetExperimentalOperatorState(): Promise<void> {
+		if (await this.ctx.storage.get<boolean>(CLEAN_OPERATOR_STATE_KEY)) return;
+		// Keep the Durable Object identity and monotonic action counter. Old
+		// Cloudflare OS approvals therefore cannot collide with a fresh action ID,
+		// while their deleted action records fail closed if delivered late.
+		const prefixes = [
+			MESSAGE_PREFIX, ANNOTATION_PREFIX, WORK_ITEM_PREFIX, EVENT_PREFIX, WAKE_PREFIX,
+			ACTION_PREFIX, ACTION_KEY_PREFIX, ACTION_ACTIVE_PREFIX,
+			MESSAGE_ORDER_PREFIX, ANNOTATION_ORDER_PREFIX, WORK_ITEM_ORDER_PREFIX,
+			SUBMISSION_INDEX_PREFIX, "ledger-operator-note:",
+		];
+		for (const prefix of prefixes) {
+			for await (const page of this.storagePages(prefix)) {
+				for (const batch of storageDeleteBatches([...page.keys()])) await this.ctx.storage.delete(batch);
+			}
+		}
+		await this.ctx.storage.delete([MESSAGE_SEQUENCE_KEY, ANNOTATION_SEQUENCE_KEY, WORK_ITEM_SEQUENCE_KEY]);
+		await this.ctx.storage.deleteAlarm();
+		await this.ctx.storage.put(CLEAN_OPERATOR_STATE_KEY, true);
 	}
 
 	private notice(socket: WebSocket, message: string): void { socket.send(JSON.stringify({ type: "workflow:notice", message })); }

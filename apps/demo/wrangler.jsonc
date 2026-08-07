@@ -54,7 +54,7 @@
 		"enabled": true
 	},
 	"vars": {
-		"OPERATOR_PAUSED": "false"
+		"OPERATOR_PAUSED": "true"
 	},
 	"upload_source_maps": true,
 	"compatibility_flags": [
