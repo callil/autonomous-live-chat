@@ -369,7 +369,8 @@ export class NativeGitRunner extends WorkerEntrypoint<Env> {
 		const logs = dead ? await dead.getLogs().catch(() => null) : null;
 		await dead?.kill("SIGKILL").catch(() => null);
 		// Reclaim the container slot immediately: a sandbox whose job cannot even
-		// boot will never produce an artifact, and max_instances is 2.
+		// boot will never produce an artifact, and the pool is bounded to the
+		// wrangler.jsonc max_instances (currently 8).
 		await destroySandboxSafely(sandbox, ids.sessionId).catch(() => undefined);
 		// The dead process's own words are the diagnosis: put them on the tail
 		// stream where an operator (human or agent) can actually read them.
@@ -406,9 +407,10 @@ export class NativeGitRunner extends WorkerEntrypoint<Env> {
 				const age = await runAgeMs(session, ids);
 				if (age === null || age <= AGENT_EXECUTION_TIMEOUT_MS + RUNNER_DEADLINE_GRACE_MS) return { jobId: job.jobId, runId: ids.runId, state: "running" };
 				await process.kill("SIGKILL").catch(() => null);
-				// Reclaim the container slot. wrangler.jsonc pins max_instances to 2
-				// and startProcess runs with autoCleanup: false, so two wedged
-				// sandboxes would otherwise exhaust runner capacity permanently. The
+				// Reclaim the container slot. wrangler.jsonc bounds the pool
+				// (max_instances, currently 8) and startProcess runs with
+				// autoCleanup: false, so wedged sandboxes would otherwise
+				// exhaust runner capacity permanently. The
 				// artifact was already read from a killed process, so destroying the
 				// sandbox here costs nothing and is safe to repeat.
 				await destroySandboxSafely(sandbox, ids.sessionId).catch(() => undefined);

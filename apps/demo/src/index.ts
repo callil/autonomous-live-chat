@@ -8,6 +8,17 @@ import {
 	utf8Bytes,
 } from "@app-harness/contracts";
 import {
+	clearCreditsExhausted,
+	grantImplementSlot,
+	IMPLEMENT_SLOTS,
+	implementQueuePosition,
+	isCreditsExhaustedClassification,
+	normalizeAdmissionState,
+	recordCreditsExhausted,
+	releaseImplementSlot,
+	type CreditsHealth,
+} from "@app-harness/contracts/admission";
+import {
 	createLedgerWorkItem,
 	recordLedgerCandidate as applyCandidate,
 	recordLedgerClassification as applyClassification,
@@ -137,6 +148,8 @@ type StoredOperatorAction = {
 
 type OperatorGatewayTransport = {
 	submitWake(input: { workItemId: string }): Promise<{ accepted: true } | { accepted: false; message: string }>;
+	/** One minimal model call: the recovery probe for a recorded credit outage. */
+	probeModel(): Promise<{ ok: boolean; status?: number }>;
 };
 
 /** External facts recorded by push (the runner and GitHub webhooks). */
@@ -168,6 +181,11 @@ const ACTION_KEY_PREFIX = "ledger-operator-action-key:";
 const ACTION_ACTIVE_PREFIX = "ledger-operator-action-active:";
 const ACTION_COUNTER_KEY = "sequence:operator-action";
 const POKE_COUNT_PREFIX = "ledger-poke-count:";
+// Merge-train admission: one plain counter+set record for the whole room.
+const ADMISSION_STATE_KEY = "ledger-implement-admission";
+// Room-level system facts: a model-credit outage is a visible, self-recovering
+// state, not a mystery of parked turns and silent retries.
+const SYSTEM_HEALTH_KEY = "system-health";
 const MESSAGE_ORDER_PREFIX = "message-order:";
 const ANNOTATION_ORDER_PREFIX = "annotation-order:";
 const WORK_ITEM_ORDER_PREFIX = "work-item-order:";
@@ -312,7 +330,10 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		if (!item) return null;
 		const actions = await this.listOperatorActions({ workItemId: item.id });
 		const facts = await this.ctx.storage.get<ExternalFacts>(`${EXTERNAL_FACT_PREFIX}${item.id}`);
-		return { state: operatorSnapshot(item, actions, facts), version: item.version, terminal: TERMINAL_PHASES.has(item.phase) };
+		// A queued item's snapshot names its honest queue position so the model
+		// replies WAITING instead of re-staging into the same teaching error.
+		const admission = normalizeAdmissionState(await this.ctx.storage.get(ADMISSION_STATE_KEY));
+		return { state: operatorSnapshot(item, actions, facts, implementQueuePosition(admission, item.id)), version: item.version, terminal: TERMINAL_PHASES.has(item.phase) };
 	}
 
 	async recordClassification(input: { workItemId: string; classification: LedgerClassification; message: string }): Promise<StoredWorkItem> {
@@ -422,13 +443,29 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 				const active = await txn.get<StoredOperatorAction>(this.actionKey(current.id, activeId));
 				if (active && !["applied", "rejected"].includes(active.status)) throw new Error(`Operator action ${active.id} must reconcile before another mutation can be staged.`);
 			}
+			// Merge-train admission gate: at most IMPLEMENT_SLOTS items may sit
+			// between implementation and merge at once, so candidates stop racing
+			// each other into hot-file conflicts. The grant commits with the
+			// staged action; a full house registers the item in the public queue
+			// and the stage is refused with a teaching error after commit.
+			if (input.command.kind === "implement") {
+				const grant = grantImplementSlot(await txn.get(ADMISSION_STATE_KEY), current.id);
+				await txn.put(ADMISSION_STATE_KEY, grant.state);
+				if (!grant.granted) return { implementQueuedAhead: grant.ahead };
+			}
 			const id = ((await txn.get<number>(ACTION_COUNTER_KEY)) ?? 0) + 1;
 			if (!Number.isSafeInteger(id)) throw new Error("Operator action counter is exhausted.");
 			const now = Date.now();
 			const action: StoredOperatorAction = { id, workItemId: current.id, expectedVersion: current.version, idempotencyKey: key, command: input.command, status: "staged", attempts: 0, createdAt: now, updatedAt: now };
 			await Promise.all([txn.put(ACTION_COUNTER_KEY, id), txn.put(this.actionKey(current.id, id), action), txn.put(`${ACTION_KEY_PREFIX}${key}`, id), txn.put(`${ACTION_ACTIVE_PREFIX}${current.id}`, id)]);
-			return action;
+			return action as StoredOperatorAction | { implementQueuedAhead: number };
 		});
+		if ("implementQueuedAhead" in action) {
+			// The refusal is a teaching error: it names the queue so the model
+			// replies WAITING, and the feed carries the honest position line.
+			await this.announceImplementQueue();
+			throw new Error(`All ${IMPLEMENT_SLOTS} implementation slots are busy: ${action.implementQueuedAhead} item(s) are queued ahead of this one. Reply WAITING; the ledger re-pokes this item when a slot frees.`);
+		}
 		await this.appendActionEvent(workItem.id, workItem.phase, `The operator staged ${action.command.kind.replaceAll("-", " ")}.`);
 		return action;
 	}
@@ -527,6 +564,15 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 	 * operator stages the actual transition itself.
 	 */
 	async ingestExternalFact(input: unknown): Promise<{ accepted: boolean }> {
+		// The operator worker's own health note: a model-credit outage found
+		// mid-turn. Only the private LEDGER service binding can present source
+		// "operator" — the public runner callback pins its source to "runner".
+		const note = normalizeOperatorNoteInput(input);
+		if (note) {
+			if (!isCreditsExhaustedClassification(note.note) || !(await this.loadWorkItem(note.workItemId))) return { accepted: false };
+			await this.recordModelCreditsExhausted();
+			return { accepted: true };
+		}
 		// Live progress is recorded under its own fact key with last-write-wins
 		// semantics and no poke, so it can never mask or dedupe the terminal
 		// runner result for the same run identifier. Step heartbeats also feed
@@ -574,6 +620,9 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 			return { duplicate: false };
 		});
 		if (!merged) return { accepted: false };
+		// The credential-verified runner artifact is the trusted signal for the
+		// room-level credit outage: recording is idempotent and announced once.
+		if (isCreditsExhaustedClassification(parsed.fact.classification)) await this.recordModelCreditsExhausted();
 		if (merged.duplicate) return { accepted: true };
 		const current = await this.loadWorkItem(parsed.workItemId);
 		if (current) {
@@ -655,6 +704,12 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 				await this.appendActionEvent(current.id, current.phase, githubFactMessage(parsed.fact), "github");
 				this.pokeOperator(current);
 			}
+		}
+		// A merged fact (or a successful promotion run) ends the item's
+		// implementation-to-merge window: free its admission slot now instead
+		// of waiting for the deployed/completed transitions.
+		if (parsed.fact.kind === "merged" || (parsed.fact.kind === "promotion" && parsed.fact.conclusion === "success")) {
+			for (const workItemId of merged.freshIds) await this.releaseImplementSlotFor(workItemId);
 		}
 		return { accepted: true };
 	}
@@ -807,6 +862,9 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		});
 		await this.broadcastWorkItem(persisted);
 		this.pokeOperator(persisted);
+		// The implementation-to-merge slot follows the item's fate: a retryable
+		// or terminal transition frees it for the next queued item.
+		if (persisted.phase === "retryable" || TERMINAL_PHASES.has(persisted.phase)) await this.releaseImplementSlotFor(persisted.id);
 		return persisted;
 	}
 
@@ -856,6 +914,9 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 					for await (const page of this.storagePages<unknown>(prefix)) keys.push(...page.keys());
 				}
 				for (const batch of storageDeleteBatches(keys)) await this.ctx.storage.delete(batch);
+				// A purged item must not keep holding an admission slot or a
+				// queue place its record can no longer release.
+				await this.releaseImplementSlotFor(item.id);
 				purged += 1;
 			}
 		}
@@ -895,6 +956,68 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 	}
 
 	/**
+	 * Free whatever the item holds in the admission record — its slot, or its
+	 * queue place when it ended while waiting — then publish the new queue
+	 * positions and nudge the queue head so a freed slot never waits for the
+	 * two-minute sweep. The nudge is sweep-class (free of the lifetime poke
+	 * cap): it measures a queue advance, not new item activity.
+	 */
+	private async releaseImplementSlotFor(workItemId: string): Promise<void> {
+		const release = await this.ctx.storage.transaction(async (txn) => {
+			const outcome = releaseImplementSlot(await txn.get(ADMISSION_STATE_KEY), workItemId);
+			if (outcome.released) await txn.put(ADMISSION_STATE_KEY, outcome.state);
+			return outcome;
+		});
+		if (!release.released) return;
+		await this.announceImplementQueue();
+		const head = release.state.queue[0];
+		if (head) {
+			const item = await this.loadWorkItem(head);
+			if (item && !TERMINAL_PHASES.has(item.phase)) this.pokeOperator(item, "sweep");
+		}
+	}
+
+	/**
+	 * Public honesty about the admission queue: one activity line per queued
+	 * item whenever its position changes, throttled by announcing changes only.
+	 */
+	private async announceImplementQueue(): Promise<void> {
+		const announcements = await this.ctx.storage.transaction(async (txn) => {
+			const state = normalizeAdmissionState(await txn.get(ADMISSION_STATE_KEY));
+			const changes: Array<{ id: string; position: number }> = [];
+			for (const [index, id] of state.queue.entries()) {
+				const position = index + 1;
+				if (state.announced[id] === position) continue;
+				state.announced[id] = position;
+				changes.push({ id, position });
+			}
+			if (changes.length) await txn.put(ADMISSION_STATE_KEY, state);
+			return changes;
+		});
+		for (const { id, position } of announcements) {
+			const item = await this.loadWorkItem(id);
+			if (item && !TERMINAL_PHASES.has(item.phase)) await this.appendActionEvent(id, item.phase, queuePositionMessage(position), "system");
+		}
+	}
+
+	/** Record the room-level credit outage exactly once and announce it publicly. */
+	private async recordModelCreditsExhausted(): Promise<void> {
+		const outcome = await this.ctx.storage.transaction(async (txn) => {
+			const recorded = recordCreditsExhausted(await txn.get(SYSTEM_HEALTH_KEY), Date.now());
+			if (recorded.changed) await txn.put(SYSTEM_HEALTH_KEY, recorded.health);
+			return recorded;
+		});
+		if (outcome.changed) await this.systemChat("Model credits are exhausted; work is paused until the balance is restored.");
+	}
+
+	/** One durable, broadcast chat line from the platform itself. */
+	private async systemChat(text: string): Promise<void> {
+		const message: ChatMessage = { id: crypto.randomUUID(), author: "System", text, createdAt: Date.now() };
+		await this.saveMessage(message);
+		this.broadcast({ type: "chat:message", message });
+	}
+
+	/**
 	 * The slow safety net behind event pokes. It recovers interrupted action
 	 * executions and re-pokes every live work item, so no failure mode can
 	 * silently strand work. Sweep re-pokes never consume the lifetime poke
@@ -902,6 +1025,19 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 	 */
 	private async sweep(): Promise<void> {
 		if (this.env.OPERATOR_PAUSED === "true") return;
+		// A recorded model-credit outage pauses the room: the sweep sends no
+		// pokes while it stands. Each sweep spends exactly one minimal probe
+		// through the operator worker; the first success clears the fact,
+		// announces recovery publicly, and this same sweep resumes pokes.
+		const health = await this.ctx.storage.get<CreditsHealth>(SYSTEM_HEALTH_KEY);
+		if (health?.creditsExhausted) {
+			const probe = await (this.env.OPERATOR as OperatorGatewayTransport).probeModel().catch(() => ({ ok: false as const }));
+			if (!probe.ok) return;
+			if (clearCreditsExhausted(health).changed) {
+				await this.ctx.storage.delete(SYSTEM_HEALTH_KEY);
+				await this.systemChat("Model credits are restored; paused work is resuming.");
+			}
+		}
 		const now = Date.now();
 		for await (const page of this.storagePages<StoredOperatorAction>(ACTION_PREFIX)) {
 			for (const action of page.values()) {
@@ -1148,7 +1284,7 @@ const OPERATOR_STATE_PROGRESS_EVENT_CHARS = 200;
  * single next command, and the durable ledger still enforces phase,
  * ordering, and idempotency invariants against whatever the model stages.
  */
-function operatorSnapshot(item: StoredWorkItem | undefined, actions: StoredOperatorAction[], facts?: ExternalFacts): string {
+function operatorSnapshot(item: StoredWorkItem | undefined, actions: StoredOperatorAction[], facts?: ExternalFacts, queuePosition?: number | null): string {
 	if (!item) return "null";
 	// Pushed external facts ride the snapshot; only facts for the currently
 	// active implementation run are shown so a stale run cannot masquerade.
@@ -1233,6 +1369,9 @@ function operatorSnapshot(item: StoredWorkItem | undefined, actions: StoredOpera
 		plan: item.plan,
 		...(nextStep ? { nextStep } : {}),
 		...(promotionDispatch ? { promotionDispatch } : {}),
+		...(queuePosition
+			? { implementQueue: { position: queuePosition, note: `All ${IMPLEMENT_SLOTS} implementation slots are busy; this item is number ${queuePosition} in the queue. Reply WAITING — the ledger re-pokes when a slot frees.` } }
+			: {}),
 		...(planProblem ? { planProblem } : {}),
 		...(implementationProblem ? { implementationProblem } : {}),
 		...(mergeTimeoutProblem ? { mergeTimeoutProblem } : {}),
@@ -1294,6 +1433,23 @@ function normalizeRunnerProgressInput(value: unknown): { workItemId: string; run
 		: undefined;
 	if (!step && !events?.length) return null;
 	return { workItemId: raw.workItemId, runId: raw.runId, ...(step ? { step } : {}), ...(events?.length ? { events } : {}) };
+}
+
+/** The public feed's honest admission-queue line, spoken only when a position changes. */
+function queuePositionMessage(position: number): string {
+	return position === 1
+		? "Waiting for an implementation slot: next in line."
+		: `Waiting for an implementation slot: ${position - 1} item(s) ahead in the queue.`;
+}
+
+/** A health note pushed by the operator worker over its private service binding. */
+function normalizeOperatorNoteInput(value: unknown): { workItemId: string; note: string } | null {
+	if (!value || typeof value !== "object") return null;
+	const raw = value as Record<string, unknown>;
+	if (raw.source !== "operator") return null;
+	if (typeof raw.workItemId !== "string" || !isUuid(raw.workItemId)) return null;
+	if (typeof raw.note !== "string" || !/^[a-z][a-z-]{0,60}$/u.test(raw.note)) return null;
+	return { workItemId: raw.workItemId, note: raw.note };
 }
 
 /** The public activity feed gets a short human line per step transition; raw agent events stay on /status. */

@@ -8,6 +8,10 @@
       "types": "./index.d.ts",
       "import": "./index.js"
     },
+    "./admission": {
+      "types": "./admission.d.ts",
+      "import": "./admission.js"
+    },
     "./ledger": {
       "types": "./ledger.d.ts",
       "import": "./ledger.js"
@@ -21,5 +25,5 @@
       "import": "./webhook.js"
     }
   },
-  "files": ["index.js", "index.d.ts", "ledger.js", "ledger.d.ts", "operator.js", "operator.d.ts", "webhook.js", "webhook.d.ts"]
+  "files": ["index.js", "index.d.ts", "admission.js", "admission.d.ts", "ledger.js", "ledger.d.ts", "operator.js", "operator.d.ts", "webhook.js", "webhook.d.ts"]
 }

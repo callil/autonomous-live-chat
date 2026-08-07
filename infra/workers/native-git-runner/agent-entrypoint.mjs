@@ -208,7 +208,16 @@ async function callModel(body) {
 	} catch {
 		throw classified("transport", "agent-model-unreachable", true);
 	}
-	if (response.status === 429 || response.status >= 500) throw classified("upstream", "agent-model-unavailable", true);
+	if (response.status === 429 || response.status >= 500) {
+		// A 429 for an exhausted balance is not transient overload: OpenAI marks
+		// it with error.type/code "insufficient_quota", and no retry can succeed
+		// until the balance is restored. Classify it distinctly, non-retryable,
+		// so the ledger can record the outage and pause the room.
+		if (response.status === 429 && (await response.text().catch(() => "")).includes("insufficient_quota")) {
+			throw classified("credits", "agent-credits-exhausted");
+		}
+		throw classified("upstream", "agent-model-unavailable", true);
+	}
 	if (!response.ok) {
 		// The provider's own words are the diagnosis (dead model vs gated org
 		// vs bad shape); put a bounded slice on the transcript stream.

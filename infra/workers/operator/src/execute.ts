@@ -62,6 +62,13 @@ export async function executeCommand(env: ExecuteEnv, workItem: LedgerWorkItem, 
 					},
 				},
 			});
+			// A full sandbox pool never becomes an implementation start: the run
+			// did not spawn, so recording one would leave the item waiting on a
+			// corpse. The rejection carries the classification; the LOOP — not
+			// the model — turns it into a WAITING turn with a longer re-poke.
+			if ((runner as { classification?: unknown })?.classification === "sandbox-capacity-exhausted") {
+				throw new Error("sandbox-capacity-exhausted: every sandbox slot is busy; the run was not started.");
+			}
 			await postIssueStatus(env, workItem, "implementation", "### Building\n\nThe App Harness coding agent is editing the repository in an isolated Cloudflare Sandbox run.");
 			const started = await env.LEDGER.startImplementation({ workItemId: workItem.id, runId: command.runId });
 			return { disposition: started.disposition, implementationRunId: command.runId, ledger: workItemReceipt(started.item), runner };

@@ -87,6 +87,8 @@ export interface AppHarnessLedger {
 	beginOperatorAction(input: { workItemId: string; actionId: number }): Promise<BeginOperatorAction>;
 	completeOperatorAction(input: { workItemId: string; actionId: number; idempotencyKey: string; executionToken: string; result: unknown }): Promise<StagedOperatorAction>;
 	rejectOperatorAction(input: { workItemId: string; actionId: number; executionToken: string; error?: string }): Promise<StagedOperatorAction>;
+	/** Pushed external facts, including the operator's own credit-outage health note. */
+	ingestExternalFact(input: unknown): Promise<{ accepted: boolean }>;
 }
 
 /** Disposable Cloudflare Sandbox direct-agent implementation surface. */
