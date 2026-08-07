@@ -58,7 +58,10 @@ export function assertOperatorCommandAllowed(workItem, command) {
 		return;
 	}
 	if (command.kind === "implement") {
-		if (workItem.phase !== "delegated" || workItem.plan === null) throw new Error("Implementation requires the accepted durable stack plan.");
+		// A dead or stalled run must be restartable in place: the disposable
+		// runner derives fresh process identity per attempt, and the ledger's
+		// own implementation logic already accepts a restart from implementing.
+		if (!["delegated", "implementing"].includes(workItem.phase) || workItem.plan === null) throw new Error("Implementation requires an accepted durable stack plan in the delegated or implementing phase.");
 		return;
 	}
 	if (command.kind === "record-candidate") {
