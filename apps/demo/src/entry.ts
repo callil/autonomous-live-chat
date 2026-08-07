@@ -5,6 +5,7 @@ export { ChatRoom, LedgerService };
 const AVATAR_SCRIPT = '<script src="/avatar-colors.js" defer></script>';
 const COMPOSER_HINT = '<span class="hint">Shared live · press Enter to send, Shift + Enter for a new line</span>';
 const SHIPPED_LIVE_FOOTER = '<span class="shipped-live">Shipped live by App Harness.</span>';
+const SITE_TARGET_BODY = '<body data-app-harness-id="entire-site" data-app-harness-label="Entire site">';
 
 const HARNESS_TOOLBAR_STYLES = `<style>
   .harness-launcher { display: none !important; }
@@ -27,6 +28,8 @@ const HARNESS_TOOLBAR_STYLES = `<style>
   .active-status-dot.working { animation: harness-status-pulse 1.35s ease-out infinite; }
   .authoring-notice { display: none !important; }
   .work-item[data-terminal="true"] { display: none; }
+  /* Holding Shift removes nested hit targets so both target and comment modes can reach their containing target. */
+  body.harness-parent-targeting [data-app-harness-id]:not(body) [data-app-harness-id] { pointer-events: none !important; }
   @keyframes harness-status-pulse { 0% { box-shadow: 0 0 0 0 rgba(101,217,150,.8); } 70%,100% { box-shadow: 0 0 0 .45rem rgba(101,217,150,0); } }
   @media (max-width: 64rem) { .authoring-popover { bottom: var(--narrow-launcher-bottom); } }
   @media (max-width: 40rem) { .harness-tool span { display: none; } .authoring-tools .harness-tool { padding: 0 .55rem; } }
@@ -58,6 +61,15 @@ const HARNESS_TOOLBAR_SCRIPT = `<script>
     const label = button?.querySelector('span')?.textContent || '';
     if (button) button.innerHTML = icons[icon] + '<span>' + label + '</span>';
   });
+  ['#target-mode', '#comment-mode'].forEach(selector => {
+    const button = document.querySelector(selector);
+    if (button) button.title += ' · Hold Shift for parent container';
+  });
+  const setParentTargeting = active => document.body.classList.toggle('harness-parent-targeting', active);
+  window.addEventListener('keydown', event => { if (event.key === 'Shift') setParentTargeting(true); });
+  window.addEventListener('keyup', event => { if (event.key === 'Shift') setParentTargeting(false); });
+  window.addEventListener('blur', () => setParentTargeting(false));
+
   activity.prepend(document.createRange().createContextualFragment(icons.activity));
   const statusLabel = document.createElement('span');
   statusLabel.className = 'active-status-label';
@@ -121,6 +133,7 @@ export default {
 			headers.delete("etag");
 			const html = (await asset.text())
 				.replace("</head>", `${AVATAR_SCRIPT}${HARNESS_TOOLBAR_STYLES}</head>`)
+				.replace("<body>", SITE_TARGET_BODY)
 				.replace(COMPOSER_HINT, `${COMPOSER_HINT}${SHIPPED_LIVE_FOOTER}`)
 				.replace("</body>", `${HARNESS_TOOLBAR_SCRIPT}</body>`);
 			return new Response(html, {
