@@ -8,7 +8,8 @@
   "vars": {
     "ALLOWED_REPOSITORY": "callil/autonomous-live-chat",
     "NATIVE_GIT_ENABLED": "true",
-    "SANDBOX_CLOUDFLARE_ACCOUNT_ID": "8942a6623f97627c7c62b64b259e5585"
+    "SANDBOX_CLOUDFLARE_ACCOUNT_ID": "8942a6623f97627c7c62b64b259e5585",
+    "LEDGER_CALLBACK_URL": "https://autonomous-live-chat.coda-a.workers.dev/api/runner/complete"
   },
   "containers": [
     {

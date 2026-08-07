@@ -13,9 +13,10 @@ type Env = {
 	NATIVE_GIT_ENABLED: string;
 	OPENAI_API_KEY: string;
 	SANDBOX_CLOUDFLARE_ACCOUNT_ID?: string;
+	LEDGER_CALLBACK_URL?: string;
 };
 
-type NativeGitJob = { jobId?: unknown; repository?: unknown; generation?: unknown; candidate?: unknown };
+type NativeGitJob = { jobId?: unknown; repository?: unknown; generation?: unknown; candidate?: unknown; ledgerRunId?: unknown };
 type CandidatePlan = {
 	change: { kind: "repository-task"; request: string };
 	stack: {
@@ -277,7 +278,13 @@ export class NativeGitRunner extends WorkerEntrypoint<Env> {
 			return { jobId: job.jobId, runId: ids.runId, state: "checkout-failed", classification: "github-installation-unavailable" };
 		}
 		const instructions = candidate ? buildNanocodexInstructions({ repository: job.repository, issueNumber: candidate.stack.issueNumber, branch: candidate.stack.branch, stackId: candidate.stack.stackId, generation: job.generation }) : "Inspect the repository checkout only.";
-		const request = { job, candidate, model, runId: ids.runId, checkoutDirectory: ids.checkoutDirectory, instructions };
+		// The ledger's per-run identifier rides into the container as the bearer
+		// credential for the completion callback; a run without one stays silent.
+		const ledgerRunId = typeof input.ledgerRunId === "string" && JOB_ID.test(input.ledgerRunId) ? input.ledgerRunId : null;
+		const callback = ledgerRunId && this.env.LEDGER_CALLBACK_URL?.startsWith("https://")
+			? { url: this.env.LEDGER_CALLBACK_URL, workItemId: job.jobId, runId: ledgerRunId }
+			: null;
+		const request = { job, candidate, model, runId: ids.runId, checkoutDirectory: ids.checkoutDirectory, instructions, callback };
 		const write = await session.writeFile(ids.requestPath, JSON.stringify(request));
 		if (!write.success) return { jobId: job.jobId, runId: ids.runId, state: "runner-unavailable", classification: "runner-input-write-failed" };
 		// Persist the start marker so inspectRun can derive run age. A failed
