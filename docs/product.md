@@ -19,7 +19,7 @@ The authoring layer should feel placed over the host app, not built into its per
 
 ## Autonomous operator
 
-Cloudflare OS holds the long-lived repository conversation. An ephemeral coding process receives a clean checkout for each implementation job. It can inspect and edit the full repository, use investigation subagents, run normal engineering tools, and produce one pull request or a genuinely dependent stack.
+The operator Worker holds the long-lived, per-item repository conversation. An ephemeral coding process receives a clean checkout for each implementation job. It can inspect and edit the full repository, use investigation subagents, run normal engineering tools, and produce one pull request or a genuinely dependent stack.
 
 Its default attention is the demo app—both frontend and backend. This is a prompt and ownership convention, not a hard path restriction. Cross-cutting changes may update the React wrapper, tests, workflows, migrations, or infrastructure.
 
