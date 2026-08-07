@@ -42,11 +42,13 @@ Rotate a secret for suspected disclosure or planned lifecycle policy—not as a 
 
 ## Failure handling
 
-External work uses idempotency IDs, durable leases, alarms, bounded retries, and truthful terminal states. Infrastructure interruption is retryable; a structured agent refusal, invalid output, failed check, unsafe migration, or unsupported external dependency moves to review.
+External work uses idempotency IDs, bounded per-call timeouts, one safety-net alarm, and truthful terminal states. Infrastructure interruption is retryable; a structured agent refusal, invalid output, failed check, unsafe migration, or unsupported external dependency moves to review.
 
-The operator runs one turn at a time per work item: the `OperatorTurn` Durable Object refuses a second wake while a turn is in flight, and every turn ends inside hard tool-call, token, and wall-clock budgets. A delivered wake holds a short response lease, and the turn's closing note settles only the latest durable revision. A completed turn with no durable progress parks instead of recursively prompting itself; three durable delivery attempts without a completed turn move the work item to review.
+The flow is event-driven with exactly two recovery mechanisms. First: every relevant ledger write fires one fire-and-forget poke at the operator; the per-item `OperatorTurn` Durable Object serializes turns, reads a fresh snapshot at each turn start, resumes a crashed turn from its persisted transcript by its own alarm, and re-drives itself after a `WAITING` turn. Second: a five-minute ledger sweep moves expired applying actions to reconciliation and re-pokes every non-terminal item. There are no work-item leases, wake records, delivery attempts, or response leases to babysit — a lost poke is recovered by the next event or the sweep. Two brakes bound runaway work: a lifetime budget of 200 pokes per item and a bounded staged-command rejection budget, each parking the item to `needs_review` with its ledger and artifacts intact.
 
-`OPERATOR_PAUSED=true` is the durable emergency brake. It preserves work items, actions, and pending wakes, deletes the room alarm, and sends no model prompts. Redeploying with the flag disabled reconstructs the schedule from the ledger; pausing never requires deleting or rewriting work state.
+Every turn ends inside hard tool-call and token caps and a ten-minute envelope; each model call and tool call carries its own timeout, and the loop ends the turn cleanly rather than starting a call that cannot finish inside the envelope.
+
+`OPERATOR_PAUSED=true` is the durable emergency brake. It preserves work items and actions, deletes the room alarm, sends no pokes, and prompts no models. Redeploying with the flag disabled reconstructs the schedule from the ledger; pausing never requires deleting or rewriting work state.
 
 Operator effects use semantic identities such as `work-item:classification`, `work-item:issue`, and the plan/implementation/promotion identifiers. They are not keyed to a transient ledger revision. The ledger also refuses an out-of-order or concurrent mutation. GitHub issue reconciliation reads the repository's recent issue list before using asynchronous search, so search-index lag cannot create another issue for the same durable marker.
 
