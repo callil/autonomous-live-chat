@@ -66,7 +66,7 @@ export const TOOLS = [
 		ciProfile: { type: "string", enum: CI_PROFILES },
 		message: { type: "string" },
 	}),
-	tool("stagePlan", "Record the one-node stack plan. The ledger derives revision, branch, and stack identity from its own durable facts.", {
+	tool("stagePlan", "Record the plan for this item's stack node. The ledger derives revision, branch, parent, and stack identity from its own durable facts and the room stack's pinned tip.", {
 		baseSha: { type: "string", description: "The exact sha returned by getMainSha." },
 		generation: { type: "integer" },
 		summary: { type: "string" },
@@ -161,7 +161,8 @@ export function commandFor(name, args, ctx) {
 			message: args.message,
 		};
 		// Placeholder stack fields are overwritten by the ledger's canonical
-		// one-node plan derivation; only the model's real decisions pass through.
+		// stack-plan derivation (node identity, parent, and branch come from the
+		// room stack); only the model's real decisions pass through.
 		case "stagePlan": return {
 			kind: "plan",
 			plan: {

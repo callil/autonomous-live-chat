@@ -130,13 +130,17 @@ export function recordLedgerPlan(item, { plan, now }) {
 	if (normalized.pullRequestBase !== normalized.parentBranch) throw new Error("The pull request base must be the stack parent branch.");
 	if (normalized.issueNumber !== issue.number) throw new Error("The plan issue must match the durable GitHub issue artifact.");
 	if (normalized.parentBranch !== "main" && normalized.parentBaseSha === null) throw new Error("A dependent stack node requires its parent's immutable head SHA.");
+	const canonical = `app-harness-os/${normalized.issueNumber}/g${normalized.generation}`;
+	if (normalized.branch !== canonical) throw new Error(`A stack node branch must be exactly ${canonical}.`);
 	if (normalized.nodeId === "root") {
 		if (normalized.parentBranch !== "main") throw new Error("A root stack node's parentBranch must be main.");
 		if (normalized.parentBaseSha === null) throw new Error("A root stack node requires parentBaseSha equal to the plan baseSha.");
-		const canonical = `app-harness-os/${normalized.issueNumber}/g${normalized.generation}`;
-		if (normalized.branch !== canonical) throw new Error(`A one-node stack branch must be exactly ${canonical}.`);
-	} else {
-		throw new Error("Only a one-node root stack plan is currently supported: nodeId must be root.");
+	} else if (!/^app-harness-os\/\d+\/g\d+$/u.test(normalized.parentBranch)) {
+		// A dependent node stacks on a sibling: its parent is another canonical
+		// node branch inside the room stack, never main and never arbitrary.
+		// The parent head SHA requirement and pullRequestBase = parentBranch
+		// are already enforced above for every non-main parent.
+		throw new Error("A dependent stack node's parentBranch must be a sibling app-harness-os stack branch.");
 	}
 	if (item.plan && normalized.revision <= item.plan.revision) throw new Error(`A revised plan must use revision ${item.plan.revision + 1} or later.`);
 	// A revised plan starts a fresh candidate lineage: stale candidate and

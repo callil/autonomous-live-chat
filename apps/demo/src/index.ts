@@ -32,6 +32,15 @@ import {
 } from "@app-harness/contracts/ledger";
 import { assertOperatorCommandAllowed, operatorActionEffectKey, operatorCommandEffectSatisfied } from "@app-harness/contracts/operator";
 import {
+	appendReservedNode,
+	canonicalStackPlan,
+	isStaleStackNode,
+	normalizeRoomStack,
+	pinStackNode,
+	stackTipPinned,
+	truncateStack,
+} from "@app-harness/contracts/room-stack";
+import {
 	expiredGithubDeliveryMarker,
 	GITHUB_DELIVERY_MARKER_PREFIX,
 	githubDeliveryMarkerKey,
@@ -183,6 +192,9 @@ const ACTION_COUNTER_KEY = "sequence:operator-action";
 const POKE_COUNT_PREFIX = "ledger-poke-count:";
 // Merge-train admission: one plain counter+set record for the whole room.
 const ADMISSION_STATE_KEY = "ledger-implement-admission";
+// The room's one shared linear stack: every pending request rides it, merged
+// bottom-up. One plain record; every transform over it is a pure contract.
+const ROOM_STACK_KEY = "ledger-room-stack";
 // Room-level system facts: a model-credit outage is a visible, self-recovering
 // state, not a mystery of parked turns and silent retries.
 const SYSTEM_HEALTH_KEY = "system-health";
@@ -333,7 +345,10 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		// A queued item's snapshot names its honest queue position so the model
 		// replies WAITING instead of re-staging into the same teaching error.
 		const admission = normalizeAdmissionState(await this.ctx.storage.get(ADMISSION_STATE_KEY));
-		return { state: operatorSnapshot(item, actions, facts, implementQueuePosition(admission, item.id)), version: item.version, terminal: TERMINAL_PHASES.has(item.phase) };
+		// A stale-marked stack node's snapshot carries the restack fact: its
+		// parent left the stack, so its single next step is a revised plan.
+		const roomStack = normalizeRoomStack(await this.ctx.storage.get(ROOM_STACK_KEY));
+		return { state: operatorSnapshot(item, actions, facts, implementQueuePosition(admission, item.id), isStaleStackNode(roomStack, item.id)), version: item.version, terminal: TERMINAL_PHASES.has(item.phase) };
 	}
 
 	async recordClassification(input: { workItemId: string; classification: LedgerClassification; message: string }): Promise<StoredWorkItem> {
@@ -345,7 +360,26 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 	async recordPlan(input: { workItemId: string; plan: LedgerPlan; message: string }): Promise<StoredWorkItem> {
 		const current = await this.requireWorkItem(input.workItemId);
 		const updated = applyPlan(current, { plan: input.plan, now: Date.now() }) as StoredWorkItem;
-		return this.persistTransition(current.version, updated, normalizeOperatorMessage(input.message), "cloudflare-os");
+		let staleSurvivors: string[] = [];
+		const persisted = await this.persistTransition(current.version, updated, normalizeOperatorMessage(input.message), "cloudflare-os", async (txn) => {
+			// The room stack advances inside the same transaction that records
+			// the plan: a replan of a node already on the stack truncates it
+			// first (marking every node above stale), then the accepted plan's
+			// node is appended as the new reserved tip. The append re-verifies
+			// the plan's parent against the live tip, so a plan staged against a
+			// stack that has since moved is refused, never recorded.
+			const plan = updated.plan!;
+			const truncated = truncateStack(normalizeRoomStack(await txn.get(ROOM_STACK_KEY)), updated.id);
+			staleSurvivors = truncated.staleWorkItemIds;
+			const appended = appendReservedNode(truncated.stack, { workItemId: updated.id, nodeId: plan.nodeId, branch: plan.branch, parentBranch: plan.parentBranch, parentBaseSha: plan.parentBaseSha, stackId: plan.stackId });
+			if (!appended.appended) throw new Error(`The room stack moved before this plan could commit (${appended.reason}). Stage a revised plan; the ledger re-derives the parent from the current tip.`);
+			await txn.put(ROOM_STACK_KEY, appended.stack);
+		});
+		// The truncation's survivors replan lowest-first: the tip-pinning rule
+		// refuses the higher ones until the lower one's candidate pins the tip,
+		// so one sweep-class nudge to the lowest survivor starts the cascade.
+		if (staleSurvivors.length) await this.nudgeRestackSurvivor(staleSurvivors[0]);
+		return persisted;
 	}
 
 	async startImplementation(input: { workItemId: string; runId: string }): Promise<{ disposition: string; item: StoredWorkItem }> {
@@ -360,7 +394,13 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		const current = await this.requireWorkItem(input.workItemId);
 		assertGitHubPullRequestUrl(input.pullRequestUrl, input.pullRequestNumber);
 		const updated = applyCandidate(current, { runId: input.runId, branch: input.branch, headSha: input.headSha, pullRequestNumber: input.pullRequestNumber, pullRequestUrl: input.pullRequestUrl, now: Date.now() }) as StoredWorkItem;
-		return this.persistTransition(current.version, updated, normalizeOperatorMessage(input.message), "runner");
+		return this.persistTransition(current.version, updated, normalizeOperatorMessage(input.message), "runner", async (txn) => {
+			// Pin the item's stack node to the candidate head: when the node is
+			// the tip, this immutable revision is the parent base the next
+			// dependent plan builds on — the pipeline's unblocking event.
+			const pinned = pinStackNode(normalizeRoomStack(await txn.get(ROOM_STACK_KEY)), updated.id, input.headSha);
+			if (pinned.pinned) await txn.put(ROOM_STACK_KEY, pinned.stack);
+		});
 	}
 
 	async recordExternalState(input: { workItemId: string; phase: Extract<LedgerPhase, "validating" | "promoting" | "deployed" | "completed" | "retryable" | "needs_review" | "rejected">; artifacts?: Record<string, unknown>; message: string; source: LedgerEvent["source"] }): Promise<StoredWorkItem> {
@@ -394,10 +434,12 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 	async stageOperatorAction(input: { workItemId: string; expectedVersion: number; command: OperatorCommand }): Promise<StoredOperatorAction> {
 		const workItem = await this.requireWorkItem(input.workItemId);
 		// The operator decides that and what to plan (summary, CI profile, base
-		// revision); the ledger owns the mechanical one-node stack identity and
-		// derives it from its own durable facts before validation.
+		// revision); the ledger owns the mechanical stack-node identity and
+		// derives it from its own durable facts — including the room stack's
+		// pinned tip — before validation.
 		if (input.command.kind === "plan" && input.command.plan && typeof input.command.plan === "object") {
-			input.command = { ...input.command, plan: canonicalOneNodePlan(workItem, input.command.plan) };
+			const roomStack = normalizeRoomStack(await this.ctx.storage.get(ROOM_STACK_KEY));
+			input.command = { ...input.command, plan: canonicalStackPlan(workItem, input.command.plan, roomStack) };
 		}
 		// A candidate can only ever belong to the active implementation run; the
 		// operator decides to record it, the ledger owns the run identity.
@@ -448,7 +490,12 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 			// each other into hot-file conflicts. The grant commits with the
 			// staged action; a full house registers the item in the public queue
 			// and the stage is refused with a teaching error after commit.
+			// The room stack adds one conjunct: a grant requires a pinned tip
+			// (or no tip, or this item's own reserved tip, which this very run
+			// will pin), so a dependent run never starts under an unknowable
+			// parent revision.
 			if (input.command.kind === "implement") {
+				if (!stackTipPinned(normalizeRoomStack(await txn.get(ROOM_STACK_KEY)), current.id)) return { stackTipUnpinned: true as const };
 				const grant = grantImplementSlot(await txn.get(ADMISSION_STATE_KEY), current.id);
 				await txn.put(ADMISSION_STATE_KEY, grant.state);
 				if (!grant.granted) return { implementQueuedAhead: grant.ahead };
@@ -458,8 +505,14 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 			const now = Date.now();
 			const action: StoredOperatorAction = { id, workItemId: current.id, expectedVersion: current.version, idempotencyKey: key, command: input.command, status: "staged", attempts: 0, createdAt: now, updatedAt: now };
 			await Promise.all([txn.put(ACTION_COUNTER_KEY, id), txn.put(this.actionKey(current.id, id), action), txn.put(`${ACTION_KEY_PREFIX}${key}`, id), txn.put(`${ACTION_ACTIVE_PREFIX}${current.id}`, id)]);
-			return action as StoredOperatorAction | { implementQueuedAhead: number };
+			return action as StoredOperatorAction | { implementQueuedAhead: number } | { stackTipUnpinned: true };
 		});
+		if ("stackTipUnpinned" in action) {
+			// The tip-pinning refusal is a teaching error too: the item below is
+			// still between plan and candidate, and its candidate event re-pokes
+			// the whole room's queue.
+			throw new Error("The room stack tip is not pinned yet: the item below must record its candidate first. Reply WAITING; the ledger re-pokes when the tip pins.");
+		}
 		if ("implementQueuedAhead" in action) {
 			// The refusal is a teaching error: it names the queue so the model
 			// replies WAITING, and the feed carries the honest position line.
@@ -849,7 +902,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		});
 	}
 
-	private async persistTransition(expectedVersion: number, nextItem: StoredWorkItem, message: string, source: LedgerEvent["source"]): Promise<StoredWorkItem> {
+	private async persistTransition(expectedVersion: number, nextItem: StoredWorkItem, message: string, source: LedgerEvent["source"], mutate?: (txn: DurableObjectTransaction) => Promise<void>): Promise<StoredWorkItem> {
 		const at = Date.now();
 		const persisted = await this.ctx.storage.transaction(async (txn) => {
 			const current = await txn.get<StoredWorkItem>(this.workItemKey(nextItem.id));
@@ -858,13 +911,21 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 			const event: LedgerEvent = { id: `${current.id}:${eventSequence}`, workItemId: current.id, sequence: eventSequence, phase: nextItem.phase, message, source, at };
 			const item = { ...nextItem, eventSequence, latestEvent: event, updatedAt: at };
 			await Promise.all([txn.put(this.workItemKey(item.id), item), txn.put(this.eventKey(item.id, eventSequence), event)]);
+			// A caller-supplied room-record mutation (the stack append or pin)
+			// commits atomically with the transition it belongs to.
+			if (mutate) await mutate(txn);
 			return item;
 		});
 		await this.broadcastWorkItem(persisted);
 		this.pokeOperator(persisted);
 		// The implementation-to-merge slot follows the item's fate: a retryable
-		// or terminal transition frees it for the next queued item.
-		if (persisted.phase === "retryable" || TERMINAL_PHASES.has(persisted.phase)) await this.releaseImplementSlotFor(persisted.id);
+		// or terminal transition frees it for the next queued item. The room
+		// stack follows the same transitions: the dead item's node truncates
+		// out, marking any dependents stale for their replan.
+		if (persisted.phase === "retryable" || TERMINAL_PHASES.has(persisted.phase)) {
+			await this.releaseImplementSlotFor(persisted.id);
+			await this.truncateRoomStackFor(persisted.id);
+		}
 		return persisted;
 	}
 
@@ -914,9 +975,10 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 					for await (const page of this.storagePages<unknown>(prefix)) keys.push(...page.keys());
 				}
 				for (const batch of storageDeleteBatches(keys)) await this.ctx.storage.delete(batch);
-				// A purged item must not keep holding an admission slot or a
-				// queue place its record can no longer release.
+				// A purged item must not keep holding an admission slot, a queue
+				// place, or a room-stack node its record can no longer release.
 				await this.releaseImplementSlotFor(item.id);
+				await this.truncateRoomStackFor(item.id);
 				purged += 1;
 			}
 		}
@@ -998,6 +1060,28 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 			const item = await this.loadWorkItem(id);
 			if (item && !TERMINAL_PHASES.has(item.phase)) await this.appendActionEvent(id, item.phase, queuePositionMessage(position), "system");
 		}
+	}
+
+	/**
+	 * Truncate the item's node out of the room stack at exactly the transitions
+	 * where its admission slot releases. Every node above it is marked stale —
+	 * its recorded parent is gone — and the lowest survivor gets one
+	 * sweep-class nudge so the sequential replan cascade starts now instead of
+	 * on the next sweep.
+	 */
+	private async truncateRoomStackFor(workItemId: string): Promise<void> {
+		const outcome = await this.ctx.storage.transaction(async (txn) => {
+			const truncated = truncateStack(normalizeRoomStack(await txn.get(ROOM_STACK_KEY)), workItemId);
+			if (truncated.removed) await txn.put(ROOM_STACK_KEY, truncated.stack);
+			return truncated;
+		});
+		if (outcome.removed && outcome.staleWorkItemIds.length) await this.nudgeRestackSurvivor(outcome.staleWorkItemIds[0]);
+	}
+
+	/** Sweep-class poke to a restacked survivor: it measures a stack event, not new item activity, so it never burns the lifetime poke cap. */
+	private async nudgeRestackSurvivor(workItemId: string): Promise<void> {
+		const item = await this.loadWorkItem(workItemId);
+		if (item && !TERMINAL_PHASES.has(item.phase)) this.pokeOperator(item, "sweep");
 	}
 
 	/** Record the room-level credit outage exactly once and announce it publicly. */
@@ -1241,34 +1325,6 @@ function publicWorkItem(item: StoredWorkItem, events: LedgerEvent[], activityHas
 	};
 }
 
-/**
- * Derive the mechanical one-node stack identity from durable ledger facts.
- * The model's decisions (summary, ciProfile, baseSha it read from GitHub)
- * pass through; everything else is the platform's own naming contract.
- */
-function canonicalOneNodePlan(item: StoredWorkItem, plan: LedgerPlan): LedgerPlan {
-	const issue = item.artifacts?.issue as { number?: number } | undefined;
-	const issueNumber = Number.isSafeInteger(issue?.number) && issue!.number! >= 1 ? issue!.number! : plan.issueNumber;
-	// A replan over an existing candidate is a restack: the next generation
-	// gets a fresh branch so the stale candidate can never be revalidated.
-	const priorCandidate = item.artifacts?.candidate as { generation?: number } | undefined;
-	const floor = Number.isSafeInteger(priorCandidate?.generation) ? priorCandidate!.generation! + 1 : 1;
-	const generation = Math.max(floor, Number.isSafeInteger(plan.generation) && plan.generation >= 1 ? plan.generation : 1);
-	const baseSha = typeof plan.baseSha === "string" ? plan.baseSha : "";
-	return {
-		...plan,
-		revision: item.plan ? item.plan.revision + 1 : 1,
-		generation,
-		issueNumber,
-		nodeId: "root",
-		parentBranch: "main",
-		pullRequestBase: "main",
-		parentBaseSha: baseSha,
-		branch: `app-harness-os/${issueNumber}/g${generation}`,
-		stackId: typeof plan.stackId === "string" && plan.stackId.trim() ? plan.stackId : `stack-${item.id.slice(0, 8)}`,
-	};
-}
-
 const OPERATOR_STATE_ACTION_LIMIT = 10;
 const OPERATOR_STATE_RESULT_CHARS = 400;
 const OPERATOR_STATE_MAX_CHARS = 6_000;
@@ -1284,7 +1340,7 @@ const OPERATOR_STATE_PROGRESS_EVENT_CHARS = 200;
  * single next command, and the durable ledger still enforces phase,
  * ordering, and idempotency invariants against whatever the model stages.
  */
-function operatorSnapshot(item: StoredWorkItem | undefined, actions: StoredOperatorAction[], facts?: ExternalFacts, queuePosition?: number | null): string {
+function operatorSnapshot(item: StoredWorkItem | undefined, actions: StoredOperatorAction[], facts?: ExternalFacts, queuePosition?: number | null, parentRestacked?: boolean): string {
 	if (!item) return "null";
 	// Pushed external facts ride the snapshot; only facts for the currently
 	// active implementation run are shown so a stale run cannot masquerade.
@@ -1352,14 +1408,27 @@ function operatorSnapshot(item: StoredWorkItem | undefined, actions: StoredOpera
 		? `The failed implementation run was cleared. Stage a revised plan (revision ${item.plan ? item.plan.revision + 1 : 1}, next generation, fresh getMainSha baseSha) to restack.`
 		: undefined;
 	// Surface a recorded plan the runner would refuse as a fact, so the
-	// bounded model stages a revised plan instead of retrying implement.
+	// bounded model stages a revised plan instead of retrying implement. The
+	// rules are scoped per node: a root node stacks on main, a dependent node
+	// stacks on a pinned sibling branch.
 	let planProblem: string | undefined;
 	if (item.plan && !item.activeImplementation) {
 		const canonical = `app-harness-os/${item.plan.issueNumber}/g${item.plan.generation}`;
-		if (item.plan.nodeId !== "root" || item.plan.parentBranch !== "main" || item.plan.pullRequestBase !== "main" || item.plan.parentBaseSha === null || item.plan.branch !== canonical) {
-			planProblem = `The recorded plan is invalid for the one-node runner: nodeId must be root, parentBranch and pullRequestBase main, parentBaseSha = baseSha, branch exactly ${canonical}. Stage a revised plan with revision ${item.plan.revision + 1} before implementation.`;
+		if (item.plan.nodeId === "root") {
+			if (item.plan.parentBranch !== "main" || item.plan.pullRequestBase !== "main" || item.plan.parentBaseSha === null || item.plan.branch !== canonical) {
+				planProblem = `The recorded plan is invalid for a root stack node: parentBranch and pullRequestBase must be main, parentBaseSha = baseSha, branch exactly ${canonical}. Stage a revised plan with revision ${item.plan.revision + 1} before implementation.`;
+			}
+		} else if (!/^app-harness-os\/\d+\/g\d+$/u.test(item.plan.parentBranch) || item.plan.pullRequestBase !== item.plan.parentBranch || item.plan.parentBaseSha === null || item.plan.branch !== canonical) {
+			planProblem = `The recorded plan is invalid for a dependent stack node: parentBranch must be a sibling app-harness-os stack branch, pullRequestBase = parentBranch, parentBaseSha = the parent's pinned head, branch exactly ${canonical}. Stage a revised plan with revision ${item.plan.revision + 1} before implementation.`;
 		}
 	}
+	// The cascade-restack fact: this node's recorded parent left the room
+	// stack, so its plan builds on a branch that will never merge. The single
+	// next step is a revised plan; the ledger re-derives the parent from the
+	// current tip when it is staged.
+	const restackProblem = parentRestacked
+		? `Your parent was restacked and this node left the room stack. Stage a revised plan (revision ${item.plan ? item.plan.revision + 1 : 1}, next generation, fresh getMainSha baseSha); the ledger re-derives the parent from the current stack tip.`
+		: undefined;
 	const snapshot = {
 		workItemId: item.id,
 		phase: item.phase,
@@ -1373,6 +1442,7 @@ function operatorSnapshot(item: StoredWorkItem | undefined, actions: StoredOpera
 			? { implementQueue: { position: queuePosition, note: `All ${IMPLEMENT_SLOTS} implementation slots are busy; this item is number ${queuePosition} in the queue. Reply WAITING — the ledger re-pokes when a slot frees.` } }
 			: {}),
 		...(planProblem ? { planProblem } : {}),
+		...(restackProblem ? { restackProblem } : {}),
 		...(implementationProblem ? { implementationProblem } : {}),
 		...(mergeTimeoutProblem ? { mergeTimeoutProblem } : {}),
 		...(runnerResult || runnerProgress || validation || promotion || candidate || merged || mainDeploy
