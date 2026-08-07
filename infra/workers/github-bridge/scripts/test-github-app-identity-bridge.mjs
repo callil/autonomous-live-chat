@@ -37,7 +37,7 @@ globalThis.fetch = async (input, init = {}) => {
 		return new Response(null, { status: 204 });
 	}
 	if (url.includes("/actions/workflows/os-stack-promote.yml/runs?")) return Response.json({ workflow_runs: [{ id: 124, status: "completed", conclusion: "success", html_url: "https://github.com/callil/autonomous-live-chat/actions/runs/124", display_title: "App Harness promotion · dispatch-work-42", created_at: "2026-08-06T20:00:00Z" }] });
-	if (url.includes("/actions/workflows/os-stack-ci.yml/runs?")) return Response.json({ workflow_runs: [{ id: 122, status: "completed", conclusion: "success", html_url: "https://github.com/callil/autonomous-live-chat/actions/runs/122", display_title: `App Harness candidate · PR #55 · ${"b".repeat(40)}`, created_at: "2026-08-06T19:58:00Z", event: "pull_request_target", path: ".github/workflows/os-stack-ci.yml@main" }] });
+	if (url.includes("/actions/workflows/os-stack-ci.yml/runs?")) return Response.json({ workflow_runs: [{ id: 122, status: "completed", conclusion: "success", html_url: "https://github.com/callil/autonomous-live-chat/actions/runs/122", display_title: "App Harness candidate · PR", head_sha: "b".repeat(40), created_at: "2026-08-06T19:58:00Z", event: "pull_request_target", path: ".github/workflows/os-stack-ci.yml@main" }] });
 	if (url.endsWith("/actions/runs/123")) return Response.json({ status: "completed", conclusion: "success", html_url: "https://github.com/callil/autonomous-live-chat/actions/runs/123" });
 	if (url.endsWith("/issues/42/comments?per_page=100")) return Response.json([{ id: 900, body: "Previous status\n\n<!-- app-harness-event:event-close -->" }]);
 	if (url.endsWith("/issues/comments/900") && method === "PATCH") return Response.json({ id: 900 });
