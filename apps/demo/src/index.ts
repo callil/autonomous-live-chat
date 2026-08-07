@@ -749,10 +749,13 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		const key = `${WAKE_PREFIX}${item.id}`;
 		const now = Date.now();
 		const existing = await txn.get<WakeRecord>(key);
-		const wake = queueOperatorWakeRecord(existing, { id: item.id, workItemId: item.id, version: item.version, now, delayMs });
+		const deliveredTurn = (await txn.get<number>(this.wakeTurnKey(item.id))) ?? 0;
+		const wake = queueOperatorWakeRecord(existing, { id: item.id, workItemId: item.id, version: item.version, now, delayMs, turnFloor: deliveredTurn + 1 });
 		await txn.put(key, wake);
 		await this.scheduleAlarmInTransaction(txn, wake.availableAt);
 	}
+
+	private wakeTurnKey(id: string): string { return `ledger-wake-turn:${id}`; }
 
 	private async scheduleAlarmInTransaction(txn: StorageTransactionLike, availableAt: number): Promise<void> {
 		if (this.env.OPERATOR_PAUSED === "true") return;
@@ -790,6 +793,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 					return undefined;
 				}
 				await txn.put(key, marked);
+				await txn.put(this.wakeTurnKey(wake.workItemId), Math.max((await txn.get<number>(this.wakeTurnKey(wake.workItemId))) ?? 0, marked.turn));
 				await this.scheduleAlarmInTransaction(txn, marked.availableAt);
 				return { kind: "deliver", wake: marked } as const;
 			});

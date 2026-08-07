@@ -6,7 +6,10 @@ export function queueOperatorWakeRecord(existing, input) {
 	if (existing?.version === input.version) {
 		return { ...existing, turn: existing.turn ?? 1, state: existing.state ?? "pending", availableAt: Math.min(existing.availableAt, availableAt) };
 	}
-	return { id: input.id, workItemId: input.workItemId, version: input.version, turn: 1, state: "pending", attempts: 0, availableAt };
+	// A fresh record must never reuse an already-delivered turn number for the
+	// same revision: the external gateway deduplicates by version and turn, so
+	// a reset counter would silently swallow the next prompt.
+	return { id: input.id, workItemId: input.workItemId, version: input.version, turn: Math.max(1, input.turnFloor ?? 1), state: "pending", attempts: 0, availableAt };
 }
 
 export function settleOperatorWakeRecord(wake, input) {
