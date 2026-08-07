@@ -1,29 +1,25 @@
 name: Validate App Harness OS candidate
+run-name: App Harness candidate · PR #${{ github.event.pull_request.number }} · ${{ github.event.pull_request.head.sha }}
 
 on:
-  pull_request:
+  # GitHub evaluates this workflow from the protected default branch. Candidate
+  # code is checked out only by the unprivileged validation job below.
+  pull_request_target:
     types: [opened, reopened, synchronize, ready_for_review, edited]
-  workflow_dispatch:
-    inputs:
-      pull_request:
-        description: Existing App Harness OS pull request to validate
-        required: true
-        type: string
 
 permissions: {}
 
 concurrency:
-  group: app-harness-candidate-${{ inputs.pull_request || github.event.pull_request.number }}
+  group: app-harness-candidate-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
   provenance:
-    if: github.event_name == 'workflow_dispatch' || startsWith(github.event.pull_request.head.ref || '', 'app-harness-os/')
+    if: startsWith(github.event.pull_request.head.ref || '', 'app-harness-os/')
     runs-on: ubuntu-latest
     permissions:
       contents: read
       pull-requests: read
-      statuses: write
     outputs:
       pull_request: ${{ steps.candidate.outputs.pull_request }}
       head_sha: ${{ steps.candidate.outputs.head_sha }}
@@ -31,7 +27,7 @@ jobs:
     env:
       GH_REPO: ${{ github.repository }}
       GH_TOKEN: ${{ github.token }}
-      PR: ${{ inputs.pull_request || github.event.pull_request.number }}
+      PR: ${{ github.event.pull_request.number }}
     steps:
       - name: Check out trusted verifier from main
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -39,19 +35,9 @@ jobs:
           ref: main
           fetch-depth: 1
           persist-credentials: false
-      - name: Verify trusted one-node candidate provenance and scope
+      - name: Verify trusted candidate provenance and scope
         id: candidate
-        env:
-          EXPECTED_PARENT: main
         run: node infra/scripts/os-stack-gate.mjs verify-pr
-      - name: Publish signed pending status before candidate execution
-        env:
-          ATTESTATION_SECRET: ${{ secrets.AUTONOMY_CALLBACK_SECRET }}
-          EXPECTED_BASE: ${{ steps.candidate.outputs.candidate_base_sha }}
-          EXPECTED_HEAD: ${{ steps.candidate.outputs.head_sha }}
-          PR: ${{ steps.candidate.outputs.pull_request }}
-          VALIDATION_STATE: pending
-        run: node infra/scripts/os-stack-gate.mjs publish-status
 
   validate_candidate:
     name: validate-candidate
@@ -84,41 +70,3 @@ jobs:
         run: npm ci
       - name: Run mandatory candidate baseline
         run: npm run check
-
-  publish_validation:
-    name: publish-validation
-    needs: [provenance, validate_candidate]
-    if: always() && needs.provenance.result == 'success'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: write
-      statuses: write
-    env:
-      GH_REPO: ${{ github.repository }}
-      GH_TOKEN: ${{ github.token }}
-      PR: ${{ needs.provenance.outputs.pull_request }}
-      EXPECTED_BASE: ${{ needs.provenance.outputs.candidate_base_sha }}
-      EXPECTED_HEAD: ${{ needs.provenance.outputs.head_sha }}
-      ATTESTATION_SECRET: ${{ secrets.AUTONOMY_CALLBACK_SECRET }}
-    steps:
-      - name: Check out trusted publisher from main
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          ref: main
-          fetch-depth: 1
-          persist-credentials: false
-      - name: Publish signed immutable validation result
-        env:
-          VALIDATION_STATE: ${{ needs.validate_candidate.result == 'success' && 'success' || 'failure' }}
-        run: node infra/scripts/os-stack-gate.mjs publish-status
-      - name: Comment with successful validation evidence
-        if: needs.validate_candidate.result == 'success'
-        continue-on-error: true
-        run: |
-          printf '%s\n' \
-            '<!-- app-harness-os-ci:${{ github.run_id }} -->' \
-            "App Harness OS one-node candidate validation passed for ${{ needs.provenance.outputs.head_sha }}." \
-            'Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}' \
-            > /tmp/app-harness-os-ci.md
-          gh pr comment "$PR" --body-file /tmp/app-harness-os-ci.md

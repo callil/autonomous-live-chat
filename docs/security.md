@@ -17,7 +17,7 @@ The agent must preserve user data and secrets and refuse work that is illegal, h
 - immutable base/head provenance;
 - unprivileged candidate CI;
 - serialized stack promotion and deployment;
-- signed, idempotent lifecycle callbacks;
+- protected-default-branch GitHub Actions provenance bound to the candidate branch and immutable head;
 - public issue, PR, and durable activity records.
 
 These boundaries constrain authority and prove outcomes. They do not restrict legitimate source edits.

@@ -1,4 +1,4 @@
-export type StackMode = "single-fast" | "multi-restack";
+export type StackMode = "one-node-stack" | "multi-restack";
 export type StackLedgerStatus = "active" | "needs-restack" | "restacking" | "blocked" | "cancelled" | "completed";
 export type StackNodeState = "ready" | "running" | "candidate" | "passed" | "needs-restack" | "blocked" | "failed" | "closed" | "merged";
 

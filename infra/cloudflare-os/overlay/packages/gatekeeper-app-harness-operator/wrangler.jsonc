@@ -1,0 +1,31 @@
+{
+  "name": "app-harness-operator-gatekeeper",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-06",
+  "services": [
+    {
+      "binding": "LEDGER",
+      "service": "autonomous-live-chat",
+      "entrypoint": "LedgerService"
+    },
+    {
+      "binding": "RUNNER",
+      "service": "app-harness-os-native-git",
+      "entrypoint": "NativeGitRunner"
+    },
+    {
+      "binding": "GITHUB",
+      "service": "app-harness-os-git-proxy",
+      "entrypoint": "GitHubAppCapability"
+    }
+  ],
+  "vars": {
+    "REPOSITORY": "callil/autonomous-live-chat"
+  },
+  "observability": {
+    "enabled": true,
+    "logs": {
+      "invocation_logs": false
+    }
+  }
+}

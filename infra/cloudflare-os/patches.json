@@ -1,0 +1,87 @@
+{
+  "schemaVersion": 1,
+  "upstreamLock": "./upstream.lock.json",
+  "patches": [
+    {
+      "id": "operator-gatekeeper-v1",
+      "kind": "directory-overlay",
+      "source": "overlay/packages/gatekeeper-app-harness-operator",
+      "destination": "packages/gatekeeper-app-harness-operator",
+      "baseCommit": "0eaec6c5e8fc6b3298ea1aa73bf5c3e47b923c7f",
+      "files": [
+        { "path": "package.json", "sha256": "72b77a96640a650eea53c85293e05e017da46a75bacfcde8c77d26c68868b526" },
+        { "path": "src/index.ts", "sha256": "33081fa0dcb05239b7b4ed04233916822d9dc8f9a96f58744ee324c915b9974e" },
+        { "path": "src/operator-gatekeeper.contract.ts", "sha256": "533aa830e6bde2e4fdaa2289139d2456fa9b71951599a8a55803877f44cd62b3" },
+        { "path": "src/operator-gatekeeper.ts", "sha256": "5c1603092228b55fea7bfd11747c89a586e4254ca1a6811063efd2a04040ed30" },
+        { "path": "src/types.ts", "sha256": "35412a88a3ecf7685bd0e4040c87ece2ffd38ffb3189e9b8cd9abb45b604b428" },
+        { "path": "tsconfig.json", "sha256": "bbe0bffb8d694925b20c3713dbcb5619df5f2ba480f4f93106e10a08e7d7304f" },
+        { "path": "wrangler.jsonc", "sha256": "2dc207d2e0eed18d1a15383d676d20b4e3a9e59c4eec696a59e11bd4d6202e73" }
+      ],
+      "review": {
+        "status": "ready-for-maintainer-review",
+        "requiredChecks": [
+          "node infra/cloudflare-os/scripts/verify.mjs",
+          "pnpm --dir <checkout> --filter @app-harness/operator-gatekeeper types:check"
+        ],
+        "securityInvariants": [
+          "The App Harness ledger is the only action, retry, and idempotency store.",
+          "The overlay creates no Durable Object, KV, D1, R2, or local action cache.",
+          "The model chooses commands explicitly; the Gatekeeper contains no phase-to-next-command selection.",
+          "Every external executor call is bound to a durable domain key: work-item ID for issues, job and generation for Sandbox, or dispatch key for promotion."
+        ]
+      }
+    },
+    {
+      "id": "workshop-app-harness-ambient-v1",
+      "kind": "text-replacement",
+      "destination": "packages/workshop-backend/src/admin-config.ts",
+      "baseCommit": "0eaec6c5e8fc6b3298ea1aa73bf5c3e47b923c7f",
+      "expectedSha256": "ccdbe82c37d732bc1986164576ec165744409b64e6132fd70ec1d68f1dd1fafe",
+      "search": "  ambientGatekeeperModes: {},",
+      "replace": "  ambientGatekeeperModes: { \"app_harness\": \"enabled\" },",
+      "expectedMatches": 1,
+      "review": {
+        "status": "ready-for-maintainer-review",
+        "securityInvariants": [
+          "Only the App Harness ambient account is enabled by default for a fresh Workshop deployment.",
+          "The persisted admin policy remains the source of truth after initialization."
+        ]
+      }
+    },
+    {
+      "id": "workshop-app-harness-auto-approval-v1",
+      "kind": "text-replacement",
+      "destination": "packages/workshop-backend/src/overseer.ts",
+      "baseCommit": "0eaec6c5e8fc6b3298ea1aa73bf5c3e47b923c7f",
+      "expectedSha256": "e11ee9479c995cc6219a0deac0ed5382550b2c2c0642b5cd943ddd76d0ec96f6",
+      "search": "    return new GatekeeperClientImpl<any>(this, id, facet);\n  }\n\n  // Destroy a gatekeeper",
+      "replace": "    if (creationSpec?.type === \"ambient\" && creationSpec.vendorId === \"app_harness\") {\n      this.storage.autoApproveTags.put({\n        gatekeeperId: id,\n        actionKind: {tag: \"apply-app-harness-operator-command\", label: \"Apply App Harness operator command\"},\n        enabledBy: await this.#ownerUserDo().whoami(),\n      });\n    }\n\n    return new GatekeeperClientImpl<any>(this, id, facet);\n  }\n\n  // Destroy a gatekeeper",
+      "expectedMatches": 1,
+      "review": {
+        "status": "ready-for-maintainer-review",
+        "securityInvariants": [
+          "Only the deployment-owned app_harness ambient Gatekeeper receives the autonomous demo rule.",
+          "The Gatekeeper must still mark each command autoApprovable, preserving Cloudflare OS's two-signal approval design.",
+          "The user who owns the workspace remains recorded as the authority behind every automatically applied action."
+        ]
+      }
+    },
+    {
+      "id": "workshop-app-harness-forced-provisioning-v1",
+      "kind": "text-replacement",
+      "destination": "packages/workshop-backend/src/provisioning-policy.ts",
+      "baseCommit": "0eaec6c5e8fc6b3298ea1aa73bf5c3e47b923c7f",
+      "expectedSha256": "c5fe44ad2f6a5c6e285803a3b579b7f7a8512f85dd2668a3e70bb52c53330ac0",
+      "search": "export function ambientGatekeeperMode(config: AdminConfig, vendorId: string): AmbientGatekeeperMode {\n  return config.ambientGatekeeperModes?.[vendorId.toLowerCase()] ?? DEFAULT_AMBIENT_GATEKEEPER_MODE;\n}",
+      "replace": "export function ambientGatekeeperMode(config: AdminConfig, vendorId: string): AmbientGatekeeperMode {\n  if (vendorId.toLowerCase() === \"app_harness\") return \"enabled\";\n  return config.ambientGatekeeperModes?.[vendorId.toLowerCase()] ?? DEFAULT_AMBIENT_GATEKEEPER_MODE;\n}",
+      "expectedMatches": 1,
+      "review": {
+        "status": "ready-for-maintainer-review",
+        "securityInvariants": [
+          "Only the deployment-owned app_harness vendor is forced into every demo workspace.",
+          "All other ambient vendors retain Cloudflare OS's stored administrator policy and optional default."
+        ]
+      }
+    }
+  ]
+}

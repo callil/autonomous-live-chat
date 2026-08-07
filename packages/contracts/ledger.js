@@ -1,0 +1,253 @@
+const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,191}$/u;
+const BRANCH = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,159}$/u;
+const SHA = /^[0-9a-f]{40}$/u;
+
+export const LEDGER_PHASES = [
+	"submitted",
+	"claimed",
+	"classified",
+	"delegated",
+	"implementing",
+	"candidate",
+	"validating",
+	"promoting",
+	"deployed",
+	"completed",
+	"retryable",
+	"needs_review",
+	"rejected",
+];
+
+export const TERMINAL_LEDGER_PHASES = new Set(["completed", "needs_review", "rejected"]);
+
+function identifier(value, label) {
+	if (typeof value !== "string" || !IDENTIFIER.test(value)) throw new Error(`${label} must be a bounded identifier.`);
+	return value;
+}
+
+function timestamp(value, label) {
+	if (!Number.isSafeInteger(value) || value < 0) throw new Error(`${label} must be a non-negative integer timestamp.`);
+	return value;
+}
+
+function positiveInteger(value, label) {
+	if (!Number.isSafeInteger(value) || value < 1) throw new Error(`${label} must be a positive integer.`);
+	return value;
+}
+
+function sha(value, label) {
+	if (typeof value !== "string" || !SHA.test(value)) throw new Error(`${label} must be a full Git SHA.`);
+	return value;
+}
+
+function branch(value, label) {
+	if (typeof value !== "string" || !BRANCH.test(value) || value.includes("..") || value.endsWith("/") || value.startsWith("-")) {
+		throw new Error(`${label} must be a safe Git branch name.`);
+	}
+	return value;
+}
+
+function requireLease(item, input, now) {
+	if (!item.lease || item.lease.id !== input.leaseId || item.lease.operatorId !== input.operatorId) {
+		throw new Error("The operator does not own this work-item lease.");
+	}
+	if (item.lease.expiresAt <= now) throw new Error("The work-item lease expired.");
+}
+
+function next(item, phase, now, changes = {}) {
+	if (!LEDGER_PHASES.includes(phase)) throw new Error("Unknown ledger phase.");
+	return {
+		...item,
+		...changes,
+		phase,
+		version: item.version + 1,
+		updatedAt: now,
+	};
+}
+
+/**
+ * Creates the sole durable control record for one public request. Detailed
+ * events and attempts are stored as separate records keyed by work item and
+ * sequence so neither history nor idempotency is hidden in an in-memory loop.
+ */
+export function createLedgerWorkItem({ id, room, request, target, submissionId, now }) {
+	return {
+		schemaVersion: 1,
+		id: identifier(id, "Work item ID"),
+		room: identifier(room, "Room"),
+		request,
+		target,
+		submissionId: submissionId === undefined ? undefined : identifier(submissionId, "Submission ID"),
+		phase: "submitted",
+		version: 1,
+		lease: null,
+		resumeAt: null,
+		classification: null,
+		plan: null,
+		activeImplementation: null,
+		artifacts: {},
+		createdAt: timestamp(now, "Creation time"),
+		updatedAt: timestamp(now, "Update time"),
+	};
+}
+
+/** Claiming is the only scheduling primitive. The persistent OS operator owns
+ * the lease; the demo Worker never interprets phase or decides the next step. */
+export function claimLedgerWorkItem(item, { operatorId, leaseId, now, leaseMs }) {
+	const at = timestamp(now, "Claim time");
+	if (TERMINAL_LEDGER_PHASES.has(item.phase)) return { disposition: "terminal", item };
+	if (item.resumeAt !== null && item.resumeAt !== undefined && item.resumeAt > at) return { disposition: "deferred", item };
+	if (!Number.isSafeInteger(leaseMs) || leaseMs < 1) throw new Error("Lease duration must be positive.");
+	const owner = identifier(operatorId, "Operator ID");
+	const id = identifier(leaseId, "Lease ID");
+	if (item.lease && item.lease.expiresAt > at && (item.lease.id !== id || item.lease.operatorId !== owner)) {
+		return { disposition: "busy", item };
+	}
+	return {
+		disposition: item.lease?.id === id ? "renewed" : "claimed",
+		item: next(item, item.phase === "submitted" || item.phase === "retryable" ? "claimed" : item.phase, at, {
+			lease: { id, operatorId: owner, expiresAt: at + leaseMs },
+			resumeAt: null,
+		}),
+	};
+}
+
+export function releaseLedgerWorkItem(item, { operatorId, leaseId, now }) {
+	const at = timestamp(now, "Release time");
+	requireLease(item, { operatorId, leaseId }, at);
+	return next(item, item.phase, at, { lease: null });
+}
+
+/** Persisted backoff is part of the sole ledger, not an in-memory OS loop. */
+export function deferLedgerWorkItem(item, { operatorId, leaseId, now, delayMs }) {
+	const at = timestamp(now, "Defer time");
+	requireLease(item, { operatorId, leaseId }, at);
+	if (!Number.isSafeInteger(delayMs) || delayMs < 1 || delayMs > 5 * 60_000) throw new Error("Defer duration must be between one millisecond and five minutes.");
+	return next(item, item.phase, at, { lease: null, resumeAt: at + delayMs });
+}
+
+export function recordLedgerClassification(item, { operatorId, leaseId, classification, now }) {
+	const at = timestamp(now, "Classification time");
+	requireLease(item, { operatorId, leaseId }, at);
+	if (item.phase !== "claimed") throw new Error("Only claimed work can be classified.");
+	if (!classification || typeof classification !== "object") throw new Error("Classification is required.");
+	if (!['eligible', 'needs_review', 'rejected'].includes(classification.decision)) throw new Error("Classification decision is invalid.");
+	const phase = classification.decision === "eligible" ? "classified" : classification.decision;
+	return next(item, phase, at, { classification, lease: phase === "classified" ? item.lease : null });
+}
+
+export function recordLedgerPlan(item, { operatorId, leaseId, plan, now }) {
+	const at = timestamp(now, "Plan time");
+	requireLease(item, { operatorId, leaseId }, at);
+	if (item.phase !== "classified") throw new Error("Only classified work can receive a plan.");
+	if (!plan || typeof plan !== "object") throw new Error("Plan is required.");
+	const normalized = {
+		revision: positiveInteger(plan.revision, "Plan revision"),
+		baseSha: sha(plan.baseSha, "Plan base"),
+		stackId: identifier(plan.stackId, "Stack ID"),
+		generation: positiveInteger(plan.generation, "Stack generation"),
+		nodeId: identifier(plan.nodeId, "Stack node ID"),
+		branch: branch(plan.branch, "Stack branch"),
+		parentBranch: branch(plan.parentBranch, "Stack parent branch"),
+		parentBaseSha: plan.parentBaseSha === null ? null : sha(plan.parentBaseSha, "Stack parent base"),
+		pullRequestBase: branch(plan.pullRequestBase, "Pull request base"),
+		issueNumber: positiveInteger(plan.issueNumber, "Issue number"),
+		summary: plan.summary,
+		ciProfile: identifier(plan.ciProfile, "CI profile"),
+	};
+	if (normalized.pullRequestBase !== normalized.parentBranch) throw new Error("The pull request base must be the stack parent branch.");
+	if (normalized.parentBranch !== "main" && normalized.parentBaseSha === null) throw new Error("A dependent stack node requires its parent's immutable head SHA.");
+	return next(item, "delegated", at, {
+		plan: normalized,
+		activeImplementation: null,
+	});
+}
+
+/**
+ * The implementation key is deterministic for the accepted plan and base.
+ * Before spawning NanoCodex, the operator checks this key and existing Git
+ * artifacts. A retry with the same key resumes; it never starts over.
+ */
+export function implementationKey(item) {
+	if (!item.plan) throw new Error("A plan is required before implementation.");
+	return `${item.id}:p${item.plan.revision}:g${item.plan.generation}:${item.plan.baseSha}`;
+}
+
+export function startLedgerImplementation(item, { operatorId, leaseId, runId, now }) {
+	const at = timestamp(now, "Implementation start time");
+	requireLease(item, { operatorId, leaseId }, at);
+	if (!item.plan) throw new Error("A plan is required before implementation.");
+	if (!["delegated", "implementing", "candidate"].includes(item.phase)) throw new Error("Only delegated work can start implementation.");
+	const key = implementationKey(item);
+	if (item.activeImplementation?.key === key) {
+		return { disposition: "resume", item };
+	}
+	if (item.artifacts?.candidate?.implementationKey === key) {
+		return { disposition: "artifact-exists", item };
+	}
+	return {
+		disposition: "started",
+		item: next(item, "implementing", at, {
+			activeImplementation: {
+				key,
+				runId: identifier(runId, "Implementation run ID"),
+				attempt: (item.activeImplementation?.attempt ?? 0) + 1,
+				startedAt: at,
+			},
+		}),
+	};
+}
+
+export function recordLedgerCandidate(item, { operatorId, leaseId, runId, branch: candidateBranch, headSha, pullRequestNumber, pullRequestUrl, now }) {
+	const at = timestamp(now, "Candidate time");
+	requireLease(item, { operatorId, leaseId }, at);
+	if (item.phase !== "implementing") throw new Error("Only an implementing work item can record a candidate.");
+	if (!item.activeImplementation || item.activeImplementation.runId !== runId) throw new Error("Candidate does not match the active implementation run.");
+	const normalizedBranch = branch(candidateBranch, "Candidate branch");
+	if (!item.plan || normalizedBranch !== item.plan.branch) throw new Error("Candidate branch does not match the durable stack node.");
+	let normalizedPullRequestUrl;
+	try { normalizedPullRequestUrl = new URL(pullRequestUrl).toString(); } catch { throw new Error("Candidate pull request URL is invalid."); }
+	if (!normalizedPullRequestUrl.startsWith("https://github.com/")) throw new Error("Candidate pull request must be hosted on GitHub.");
+	const candidate = {
+		implementationKey: item.activeImplementation.key,
+		runId: identifier(runId, "Implementation run ID"),
+		branch: normalizedBranch,
+		headSha: sha(headSha, "Candidate head"),
+		pullRequestNumber: positiveInteger(pullRequestNumber, "Pull request number"),
+		pullRequestUrl: normalizedPullRequestUrl,
+		pullRequestBase: item.plan.pullRequestBase,
+		stackId: item.plan.stackId,
+		generation: item.plan.generation,
+		nodeId: item.plan.nodeId,
+	};
+	return next(item, "candidate", at, {
+		activeImplementation: null,
+		artifacts: { ...item.artifacts, candidate },
+	});
+}
+
+export function recordLedgerExternalState(item, { operatorId, leaseId, phase, artifacts = {}, now }) {
+	const at = timestamp(now, "External-state time");
+	requireLease(item, { operatorId, leaseId }, at);
+	if (!['validating', 'promoting', 'deployed', 'completed', 'retryable', 'needs_review', 'rejected'].includes(phase)) {
+		throw new Error("External ledger phase is invalid.");
+	}
+	if (phase === "validating" && item.phase !== "candidate") throw new Error("Only a candidate can enter validation.");
+	if (phase === "promoting" && item.phase !== "validating") throw new Error("Only a validated candidate can enter promotion.");
+	if (phase === "deployed" && item.phase !== "promoting") throw new Error("Only a promoted candidate can be deployed.");
+	if (phase === "completed" && item.phase !== "deployed") throw new Error("Only a deployed candidate can complete.");
+	if (phase === "promoting" && typeof (artifacts.validation?.url ?? item.artifacts.validation?.url) !== "string") {
+		throw new Error("Promotion requires a validation artifact.");
+	}
+	if (phase === "deployed" && typeof (artifacts.deploymentUrl ?? item.artifacts.deploymentUrl) !== "string") {
+		throw new Error("A deployed work item requires a deployment artifact.");
+	}
+	if (phase === "completed" && typeof (artifacts.deploymentUrl ?? item.artifacts.deploymentUrl) !== "string") {
+		throw new Error("A completed work item requires a deployment artifact.");
+	}
+	return next(item, phase, at, {
+		artifacts: { ...item.artifacts, ...artifacts },
+		lease: TERMINAL_LEDGER_PHASES.has(phase) || phase === "retryable" ? null : item.lease,
+		activeImplementation: phase === "retryable" ? null : item.activeImplementation,
+	});
+}

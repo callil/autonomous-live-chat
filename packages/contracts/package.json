@@ -7,7 +7,11 @@
     ".": {
       "types": "./index.d.ts",
       "import": "./index.js"
+    },
+    "./ledger": {
+      "types": "./ledger.d.ts",
+      "import": "./ledger.js"
     }
   },
-  "files": ["index.js", "index.d.ts"]
+  "files": ["index.js", "index.d.ts", "ledger.js", "ledger.d.ts"]
 }

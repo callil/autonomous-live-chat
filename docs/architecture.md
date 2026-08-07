@@ -16,14 +16,16 @@ The current demo uses a small framework-free browser client, so it does not cons
 ```mermaid
 flowchart LR
     User["User targets the live app"] --> Room["Demo Durable Object"]
-    Room --> Issue["GitHub issue + public status"]
     Room --> OS["Persistent Cloudflare OS operator"]
+    OS --> GitHub["Private GitHub App capability"]
+    GitHub --> Issue["Issue + public status"]
     OS --> Runner["Isolated Cloudflare Sandbox job"]
-    Runner --> Git["Short-lived repository credential"]
+    Runner --> GitHub
+    GitHub --> Git["Short-lived repository credential"]
     Runner --> Stack["PR or dependent PR stack"]
     Stack --> CI["Profile-aware CI"]
     CI --> Promote["Serialized promotion + deploy"]
-    Promote --> Room
+    OS --> Room
 ```
 
 The Durable Object is the workflow ledger and realtime broadcaster. It persists bounded work-item and stack state, schedules resumable delivery, and never treats an agent message as proof that GitHub or deployment succeeded.

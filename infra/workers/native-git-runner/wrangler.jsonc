@@ -21,12 +21,19 @@
   ],
   "durable_objects": {
     "bindings": [
-      { "class_name": "Sandbox", "name": "Sandbox" },
-      { "class_name": "RunnerJob", "name": "RUNNER_JOB" }
+      { "class_name": "Sandbox", "name": "Sandbox" }
     ]
   },
+  "services": [
+    {
+      "binding": "GITHUB_APP",
+      "service": "app-harness-os-git-proxy",
+      "entrypoint": "GitHubAppCapability"
+    }
+  ],
   "migrations": [
     { "new_sqlite_classes": ["Sandbox"], "tag": "v1" },
-    { "new_sqlite_classes": ["RunnerJob"], "tag": "v2" }
+    { "new_sqlite_classes": ["RunnerJob"], "tag": "v2" },
+    { "deleted_classes": ["RunnerJob"], "tag": "v3" }
   ]
 }

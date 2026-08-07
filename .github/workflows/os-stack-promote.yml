@@ -1,4 +1,5 @@
 name: Promote App Harness OS candidate
+run-name: App Harness promotion · ${{ inputs.dispatch_key }}
 
 on:
   workflow_dispatch:
@@ -9,8 +10,7 @@ on:
       issue_number: { required: true, type: string }
       parent_branch: { required: true, type: string }
       head_sha: { required: true, type: string }
-      room: { required: true, type: string }
-      workflow_id: { required: true, type: string }
+      dispatch_key: { required: true, type: string }
       ci_profile: { required: true, type: string }
 
 permissions: {}
@@ -32,6 +32,7 @@ jobs:
     outputs:
       pull_request: ${{ steps.candidate.outputs.pull_request }}
       head_sha: ${{ steps.candidate.outputs.head_sha }}
+      head_ref: ${{ steps.candidate.outputs.head_ref }}
       candidate_base_sha: ${{ steps.candidate.outputs.candidate_base_sha }}
       already_merged: ${{ steps.candidate.outputs.already_merged }}
       merge_sha: ${{ steps.candidate.outputs.merge_sha }}
@@ -47,12 +48,11 @@ jobs:
       EXPECTED_GENERATION: ${{ inputs.generation }}
       EXPECTED_STACK: ${{ inputs.stack_id }}
     steps:
-      - name: Require the supported one-node policy
+      - name: Require the currently supported one-node stack promotion policy
         env:
           CI_PROFILE: ${{ inputs.ci_profile }}
         run: |
           test "$EXPECTED_PARENT" = main
-          test "$EXPECTED_GENERATION" = 1
           case "$CI_PROFILE" in
             visual|content|behavior|data|infrastructure) ;;
             *) echo "Unsupported CI profile: $CI_PROFILE"; exit 1 ;;
@@ -70,19 +70,18 @@ jobs:
           remote_sha="$(gh api "repos/${GH_REPO}/git/ref/heads/main" --jq '.object.sha')"
           test "$local_sha" = "$remote_sha"
           printf 'sha=%s\n' "$local_sha" >> "$GITHUB_OUTPUT"
-      - name: Verify immutable one-node provenance and scope from trusted main
+      - name: Verify immutable candidate provenance and scope from trusted main
         id: candidate
         env:
           ALLOW_MERGED: true
         run: node infra/scripts/os-stack-gate.mjs verify-pr
-      - name: Wait for newest signed validation bound to this PR, head, and base
+      - name: Wait for the newest GitHub Actions validation bound to this PR and head
         id: validation
         env:
-          ATTESTATION_SECRET: ${{ secrets.AUTONOMY_CALLBACK_SECRET }}
-          EXPECTED_BASE: ${{ steps.candidate.outputs.candidate_base_sha }}
           EXPECTED_HEAD: ${{ steps.candidate.outputs.head_sha }}
+          EXPECTED_HEAD_REF: ${{ steps.candidate.outputs.head_ref }}
           PR: ${{ steps.candidate.outputs.pull_request }}
-        run: node infra/scripts/os-stack-gate.mjs wait-status
+        run: node infra/scripts/os-stack-gate.mjs wait-validation
 
   integrate:
     needs: prepare
@@ -217,66 +216,3 @@ jobs:
           remote_main="$(gh api "repos/${GH_REPO}/git/ref/heads/main" --jq '.object.sha')"
           test "$remote_main" = "${{ steps.verify_merge.outputs.deployment_sha }}"
           npm run deploy
-  callback:
-    needs: [prepare, integrate, promote]
-    if: always()
-    runs-on: ubuntu-latest
-    timeout-minutes: 3
-    permissions: {}
-    env:
-      AUTONOMY_CALLBACK_URL: ${{ secrets.AUTONOMY_CALLBACK_URL }}
-      AUTONOMY_CALLBACK_TOKEN: ${{ secrets.AUTONOMY_CALLBACK_SECRET }}
-      AUTONOMY_REQUEST_ID: ${{ inputs.workflow_id }}
-      AUTONOMY_ROOM: ${{ inputs.room }}
-      PROMOTION_RESULT: ${{ needs.promote.result }}
-      ALREADY_MERGED: ${{ needs.prepare.outputs.already_merged }}
-      STACK_ID: ${{ inputs.stack_id }}
-      GENERATION: ${{ inputs.generation }}
-      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-      CURRENT_MAIN_SHA: ${{ needs.prepare.outputs.candidate_base_sha }}
-      HEAD_SHA: ${{ needs.prepare.outputs.head_sha }}
-      MERGE_SHA: ${{ needs.prepare.outputs.merge_sha || needs.promote.outputs.deployment_sha }}
-      PROMOTION_RUN_ID: ${{ github.run_id }}
-    steps:
-      - name: Publish retried completion or review callback
-        run: |
-          node - <<'NODE'
-          const url = process.env.AUTONOMY_CALLBACK_URL;
-          const token = process.env.AUTONOMY_CALLBACK_TOKEN;
-          if (!url || !token) throw new Error("Autonomy callback configuration is missing.");
-          const completed = process.env.PROMOTION_RESULT === "success";
-          const reconciled = process.env.ALREADY_MERGED === "true";
-          const phase = completed ? "completed" : "requires_review";
-          const message = completed
-            ? `Cloudflare OS candidate ${process.env.STACK_ID} generation ${process.env.GENERATION} ${reconciled ? "reconciled its merge and redeployed verified current main" : "validated, merged at its exact tested tree, and deployed"}.`
-            : "Cloudflare OS candidate promotion requires review. Merge or deployment may be partial; inspect the linked Actions run and no deployment success is claimed.";
-          const body = JSON.stringify({
-            room: process.env.AUTONOMY_ROOM,
-            requestId: process.env.AUTONOMY_REQUEST_ID,
-            phase,
-            message,
-            result: process.env.RUN_URL,
-            deploymentUrl: completed ? "https://autonomous-live-chat.coda-a.workers.dev/" : undefined,
-            currentMainSha: completed ? process.env.CURRENT_MAIN_SHA : undefined,
-            headSha: completed ? process.env.HEAD_SHA : undefined,
-            mergeSha: completed ? process.env.MERGE_SHA : undefined,
-            runId: process.env.PROMOTION_RUN_ID,
-          });
-          let lastError;
-          for (let attempt = 1; attempt <= 5; attempt += 1) {
-            try {
-              const response = await fetch(url, {
-                method: "POST",
-                headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-                body,
-                signal: AbortSignal.timeout(10_000),
-              });
-              if (response.ok) process.exit(0);
-              lastError = new Error(`Callback failed (${response.status}).`);
-            } catch (error) {
-              lastError = error;
-            }
-            if (attempt < 5) await new Promise((resolve) => setTimeout(resolve, attempt * 2_000));
-          }
-          throw lastError ?? new Error("Callback failed.");
-          NODE
