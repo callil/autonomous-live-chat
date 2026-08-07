@@ -1,5 +1,23 @@
 const TERMINAL = new Set(["completed", "needs_review", "rejected"]);
 
+// A state record carrying different artifacts is a different effect: without
+// this, a later record that merges late artifacts (for example the CI
+// validation reference) would deduplicate against an earlier bare record and
+// silently never apply.
+function artifactsTag(artifacts) {
+	if (!artifacts || typeof artifacts !== "object" || Array.isArray(artifacts) || Object.keys(artifacts).length === 0) return "";
+	const canonical = JSON.stringify(sortValue(artifacts));
+	let hash = 5381;
+	for (let index = 0; index < canonical.length; index += 1) hash = ((hash * 33) ^ canonical.charCodeAt(index)) >>> 0;
+	return `:a${hash.toString(16)}`;
+}
+
+function sortValue(value) {
+	if (Array.isArray(value)) return value.map(sortValue);
+	if (value && typeof value === "object") return Object.fromEntries(Object.keys(value).toSorted().map((key) => [key, sortValue(value[key])]));
+	return value;
+}
+
 export function operatorActionEffectKey(workItemId, command) {
 	if (command.kind === "classify") return `${workItemId}:classification`;
 	if (command.kind === "create-issue") return `${workItemId}:issue`;
@@ -7,7 +25,7 @@ export function operatorActionEffectKey(workItemId, command) {
 	if (command.kind === "implement") return `${workItemId}:implementation:${command.runId}`;
 	if (command.kind === "record-candidate") return `${workItemId}:candidate:${command.runId}`;
 	if (command.kind === "promote") return `${workItemId}:promotion:${command.dispatchKey}`;
-	if (command.kind === "record-state") return `${workItemId}:state:${command.phase}`;
+	if (command.kind === "record-state") return `${workItemId}:state:${command.phase}${artifactsTag(command.artifacts)}`;
 	if (command.kind === "claim") return `${workItemId}:claim:${command.leaseId}`;
 	if (command.kind === "release") return `${workItemId}:release:${command.leaseId}`;
 	return `${workItemId}:defer:${command.leaseId}:${command.delayMs}`;
