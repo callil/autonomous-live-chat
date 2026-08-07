@@ -33,8 +33,11 @@ export function AppHarness({ children, onRequest, onOpenActivity, activityCount 
       setHoverRect(undefined);
       return;
     }
-    const candidate = (event: Event): Element | null => {
-      return event.target instanceof Element ? event.target.closest(TARGET_SELECTOR) : null;
+    const candidate = (event: MouseEvent | PointerEvent): Element | null => {
+      const closest = event.target instanceof Element ? event.target.closest(TARGET_SELECTOR) : null;
+      if (!closest) return null;
+      if (!event.shiftKey) return closest;
+      return closest.parentElement?.closest(TARGET_SELECTOR) ?? closest;
     };
     const move = (event: PointerEvent) => {
       const element = candidate(event);
@@ -80,7 +83,7 @@ export function AppHarness({ children, onRequest, onOpenActivity, activityCount 
       {open && <section className="ah-panel" aria-label="App Harness" data-app-harness-id="authoring-panel" data-app-harness-label="App Harness authoring panel">
         <header><strong>App Harness</strong><button type="button" aria-label="Close App Harness" data-app-harness-id="close-authoring" data-app-harness-label="Close App Harness" onClick={() => setOpen(false)}>×</button></header>
         {!target ? <div className="ah-actions">
-          <button type="button" aria-pressed={targeting} data-app-harness-id="target-control" data-app-harness-label="Target control" onClick={() => setTargeting((value) => !value)}><CrosshairIcon />Target an element</button>
+          <button type="button" aria-pressed={targeting} data-app-harness-id="target-control" data-app-harness-label="Target control" title="Hold Shift to target a parent container" onClick={() => setTargeting((value) => !value)}><CrosshairIcon />Target an element</button>
           {onOpenActivity && <button type="button" data-app-harness-id="activity-control" data-app-harness-label="Activity control" onClick={onOpenActivity}>Activity{activityCount ? ` · ${activityCount}` : ""}</button>}
         </div> : <form aria-labelledby={composerId} onSubmit={submit}>
           <label id={composerId} htmlFor={`${composerId}-request`}>Target: {target.label ?? target.targetId}</label>
