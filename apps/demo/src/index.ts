@@ -171,7 +171,10 @@ const OPERATOR_TURN_DELIVERY_ATTEMPTS = 3;
 const ACTION_APPLY_LEASE_MS = 60_000;
 const STAGED_ACTION_RECOVERY_MS = 90_000;
 const REJECTED_ACTION_PARK_THRESHOLD = 14;
-const STALLED_IMPLEMENTATION_MS = 20 * 60_000;
+// Just above the runner's own 650s hard deadline: by the time this fires the
+// prior run is provably dead. With push-based completion this is a rare
+// fallback, not the primary recovery path.
+const STALLED_IMPLEMENTATION_MS = 12 * 60_000;
 const UNLEASED_REVIVAL_DELAY_MS = 5_000;
 const LEASED_REVIVAL_DELAY_MS = 8_000;
 const OPERATOR_TURN_HARD_BUDGET = 60;
