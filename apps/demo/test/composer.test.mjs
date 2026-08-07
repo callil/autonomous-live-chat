@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { AUTHORING_ENVELOPE_POLICY } from "../../../packages/contracts/index.js";
 
 const html = await readFile(new URL("../public/index.html", import.meta.url), "utf8");
+const entry = await readFile(new URL("../src/entry.ts", import.meta.url), "utf8");
 const worker = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
 const clientScript = html.match(/<script>([\s\S]*?)<\/script>/u)?.[1];
 
@@ -15,6 +16,8 @@ assert.doesNotMatch(html, /maxlength=/u);
 assert.doesNotMatch(html, /message-count/u);
 assert.match(html, /<span class="room-title"[^>]*>Live Main room<\/span>/u);
 assert.match(html, /<h1>Shape this app together<\/h1>/u);
+assert.match(entry, /SHIPPED_LIVE_FOOTER = '<span class="shipped-live">Shipped live by App Harness\.<\/span>'/u, "the composer has the requested live-shipping footer");
+assert.match(entry, /\.replace\(COMPOSER_HINT, `\$\{COMPOSER_HINT\}\$\{SHIPPED_LIVE_FOOTER\}`\)/u, "the footer is rendered directly beneath the composer");
 const browserSafeTextPolicy = html.match(/TARGET_SAFE_TEXT_CHARACTERS = (\d+)/u);
 assert.equal(Number(browserSafeTextPolicy?.[1]), AUTHORING_ENVELOPE_POLICY.safeTextCharacters, "the no-build demo mirrors the shared privacy envelope exactly");
 assert.doesNotMatch(worker, /MAX_(?:MESSAGE_LENGTH|REQUEST_LENGTH|STORED_MESSAGES|STORED_ANNOTATIONS|STORED_WORK_ITEMS)/u);
