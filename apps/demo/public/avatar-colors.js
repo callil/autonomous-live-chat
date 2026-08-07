@@ -18,8 +18,13 @@ function colorAvatar(avatar) {
 }
 
 function colorAvatars(root) {
+  if (!(root instanceof Element || root instanceof Document)) {
+    const avatar = root.parentElement?.closest('.message')?.querySelector('.message-avatar');
+    if (avatar) colorAvatar(avatar);
+    return;
+  }
   if (root instanceof Element && root.matches('.message-avatar')) colorAvatar(root);
-  if (root instanceof Element || root instanceof Document) root.querySelectorAll('.message-avatar').forEach(colorAvatar);
+  root.querySelectorAll('.message-avatar').forEach(colorAvatar);
 }
 
 colorAvatars(document);
