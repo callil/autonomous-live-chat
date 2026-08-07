@@ -16,9 +16,9 @@ const NANOCODEX_TIMEOUT_MS = 520_000;
 const NANOCODEX_INACTIVITY_MS = Number(process.env.NANOCODEX_INACTIVITY_MS_OVERRIDE) || 120_000;
 const WATCHDOG_INTERVAL_MS = Number(process.env.NANOCODEX_WATCHDOG_INTERVAL_MS_OVERRIDE) || 5_000;
 const KILL_GRACE_MS = 2_000;
-// Accumulated stdout is capped so a chatty agent cannot fill the pipe buffer
-// and deadlock its own writes while this process is still reading.
-const MAX_ACCUMULATED_STDOUT_BYTES = 2_097_152;
+// Bounded stderr tail. stderr was previously discarded outright, which threw
+// away the primary diagnostic whenever a run failed.
+const MAX_STDERR_BYTES = 8_192;
 
 function emit(value) {
 	return new Promise((resolve) => process.stdout.write(`${JSON.stringify(value)}\n`, resolve));
@@ -53,14 +53,21 @@ const child = spawn(binary, [
 	"--subagents", "true",
 	"--",
 	request.prompt,
-], { env: process.env, stdio: ["ignore", "pipe", "ignore"] });
+], {
+	env: process.env,
+	// stderr is piped, not discarded: it is the primary diagnostic when a run
+	// fails. Node's own timeout/killSignal is the innermost backstop, so the
+	// child dies even if this process's own loops are wedged.
+	stdio: ["ignore", "pipe", "pipe"],
+	timeout: NANOCODEX_TIMEOUT_MS,
+	killSignal: "SIGKILL",
+});
 
 const responseIds = new Set();
 const tools = new Set();
 let terminal = null;
 let pending = Buffer.alloc(0);
-let accumulated = 0;
-let droppedBytes = 0;
+let stderrTail = "";
 let lastLineAt = Date.now();
 let killClassification = null;
 let killTimer;
@@ -83,6 +90,24 @@ const watchdog = setInterval(() => {
 // Never let a failed write to a closed stdout throw and abort the run.
 process.stdout.on("error", () => {});
 child.stdin?.on("error", () => {});
+child.stderr.on("error", () => {});
+// stderr is drained continuously so it can never fill its pipe, but only a
+// bounded tail is retained for the failure artifact.
+child.stderr.on("data", (chunk) => {
+	stderrTail = `${stderrTail}${chunk}`.slice(-MAX_STDERR_BYTES);
+});
+
+// Nothing below is awaited without a deadline: neither the stdout iterator nor
+// the close event is trusted to settle on its own.
+function withDeadline(promise, ms, fallback) {
+	return new Promise((resolve) => {
+		const timer = setTimeout(() => resolve(fallback), ms);
+		promise.then(
+			(value) => { clearTimeout(timer); resolve(value); },
+			() => { clearTimeout(timer); resolve(fallback); },
+		);
+	});
+}
 
 function acceptLine(bytes) {
 	if (bytes.length > MAX_LINE_BYTES) return;
@@ -94,37 +119,39 @@ function acceptLine(bytes) {
 	if (event?.type === "run.failed") terminal = "failed";
 }
 
-// The stream is always drained, even past the cap: dropping bytes on the floor
-// still consumes them, which is what keeps the child's writes from blocking.
-for await (const chunk of child.stdout) {
-	accumulated += chunk.length;
-	if (accumulated > MAX_ACCUMULATED_STDOUT_BYTES) {
-		droppedBytes += chunk.length;
-		pending = Buffer.alloc(0);
-		lastLineAt = Date.now();
-		continue;
+async function consumeStdout() {
+	for await (const chunk of child.stdout) {
+		pending = Buffer.concat([pending, chunk]);
+		let newline;
+		while ((newline = pending.indexOf(10)) >= 0) {
+			acceptLine(pending.subarray(0, newline));
+			lastLineAt = Date.now();
+			pending = pending.subarray(newline + 1);
+		}
+		if (pending.length > MAX_LINE_BYTES) pending = Buffer.alloc(0);
 	}
-	pending = Buffer.concat([pending, chunk]);
-	let newline;
-	while ((newline = pending.indexOf(10)) >= 0) {
-		acceptLine(pending.subarray(0, newline));
-		lastLineAt = Date.now();
-		pending = pending.subarray(newline + 1);
-	}
-	if (pending.length > MAX_LINE_BYTES) pending = Buffer.alloc(0);
+	if (pending.length) acceptLine(pending);
 }
-if (pending.length) acceptLine(pending);
 
-const code = await new Promise((resolve) => child.once("close", resolve));
+// The iterator is bounded: if it never ends, the run still reports rather than
+// hanging here forever.
+await withDeadline(consumeStdout(), NANOCODEX_TIMEOUT_MS + KILL_GRACE_MS, null);
+const code = await withDeadline(
+	new Promise((resolve) => child.once("close", resolve)),
+	KILL_GRACE_MS * 2,
+	null,
+);
 clearInterval(watchdog);
 if (killTimer) clearTimeout(killTimer);
+if (code === null && !killClassification) killClassification = "nanocodex-process-unterminated";
+try { child.kill("SIGKILL"); } catch { /* already gone */ }
 const ok = code === 0 && terminal === "completed" && !killClassification;
 await emit({
 	ok,
 	model: request.model,
 	responseIds: [...responseIds],
 	tools: [...tools],
-	droppedBytes: droppedBytes || undefined,
+	stderr: ok ? undefined : stderrTail.trim().slice(-MAX_STDERR_BYTES) || undefined,
 	classification: ok ? undefined : killClassification ?? (terminal === "failed" ? "nanocodex-run-failed" : "nanocodex-process-failed"),
 });
 process.exitCode = ok ? 0 : 1;

@@ -63,9 +63,22 @@ const RUN_DEADLINE_MS = 650_000;
 const WATCHDOG_INTERVAL_MS = 5_000;
 const KILL_GRACE_MS = 2_000;
 
+// Every live child is tracked so the run deadline can SIGKILL all of them. A
+// surviving grandchild holds the sandbox process entry open and is exactly what
+// keeps a run non-terminal after this process has given up.
+const liveChildren = new Set();
+
+function killAllChildren() {
+	for (const child of liveChildren) {
+		try { child.kill("SIGKILL"); } catch { /* already gone */ }
+	}
+	liveChildren.clear();
+}
+
 function run(command, args, options = {}) {
 	return new Promise((resolve) => {
 		const child = spawn(command, args, { cwd: options.cwd, env: process.env, stdio: ["pipe", "pipe", "pipe"] });
+		liveChildren.add(child);
 		let stdout = "";
 		let stderr = "";
 		let settled = false;
@@ -78,6 +91,7 @@ function run(command, args, options = {}) {
 			if (kill) clearTimeout(kill);
 			resolve(result);
 		};
+		child.once("close", () => liveChildren.delete(child));
 		if (options.timeoutMs) {
 			timeout = setTimeout(() => {
 				// Escalate: a well-behaved child exits on SIGTERM, a wedged one
@@ -236,12 +250,21 @@ async function main() {
 // alive and re-checks a wall-clock deadline, so it still fires even if one tick
 // is delayed.
 const startedAt = Date.now();
-const watchdog = setInterval(() => {
+const watchdog = setInterval(async () => {
 	if (Date.now() - startedAt < RUN_DEADLINE_MS) return;
 	clearInterval(watchdog);
-	emit({ jobId: "unknown", state: "candidate-failed", classification: "nanocodex-deadline-exceeded" });
-	// process.exit is deliberate: a wedged child or blocked stdout write must
-	// not be able to keep this process alive past its own deadline.
+	// Kill every tracked child first: a surviving grandchild would hold the
+	// sandbox process entry open and leave the run looking non-terminal even
+	// after this process exits.
+	killAllChildren();
+	// The artifact must reach the kernel before exiting, so this await is
+	// load-bearing rather than cosmetic. It is still raced against a hard cap:
+	// if stdout itself is blocked the write can never resolve, and exiting
+	// without the artifact still beats hanging here forever.
+	await Promise.race([
+		emit({ jobId: "unknown", state: "candidate-failed", classification: "nanocodex-deadline-exceeded" }),
+		new Promise((resolve) => setTimeout(resolve, KILL_GRACE_MS)),
+	]);
 	process.exit(1);
 }, WATCHDOG_INTERVAL_MS);
 
@@ -250,9 +273,11 @@ try {
 	// Clear before emitting so the watchdog can never race a completed run and
 	// append a second, contradictory artifact.
 	clearInterval(watchdog);
-	emit(result);
+	killAllChildren();
+	await emit(result);
 } catch {
 	clearInterval(watchdog);
-	emit({ jobId: "unknown", state: "candidate-failed", classification: "runner-entrypoint-failed" });
+	killAllChildren();
+	await emit({ jobId: "unknown", state: "candidate-failed", classification: "runner-entrypoint-failed" });
 	process.exitCode = 1;
 }

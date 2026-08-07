@@ -82,6 +82,10 @@ assert.match(source, /async function runAgeMs/u);
 assert.match(source, /NANOCODEX_EXECUTION_TIMEOUT_MS \+ RUNNER_DEADLINE_GRACE_MS/u, "inspectRun enforces the deadline from the persisted start marker");
 assert.match(source, /process\.kill\("SIGKILL"\)/u, "a wedged run is actively killed rather than reported as running forever");
 assert.match(source, /classification: "runner-deadline-enforced"/u);
+assert.match(source, /MAX_ARTIFACT_STDOUT_CHARS = 200_000/u, "a chatty run must not have its terminal artifact discarded by a low cap");
+assert.match(source, /function parseArtifactLine/u);
+assert.match(source, /for \(let index = lines\.length - 1; index >= 0; index -= 1\)/u, "the parser scans backwards for the last parseable artifact");
+assert.match(source, /destroySandboxSafely\(sandbox, ids\.sessionId\)/u, "a wedged sandbox is destroyed so max_instances capacity is reclaimed");
 for (const obsolete of ["DOC_AGENT_TOOLS", "safeDocumentationPatch", "runDocumentationAgent", "add -- README.md docs"]) assert.doesNotMatch(source, new RegExp(obsolete.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"));
 assert.match(dockerfile, new RegExp(`NANOCODEX_VERSION=${NANOCODEX_VERSION}`, "u"));
 assert.match(dockerfile, /GH_VERSION=2\.97\.0/u);
@@ -128,17 +132,31 @@ assert.match(jobEntrypointSource, /const watchdog = setInterval\(/u);
 assert.doesNotMatch(jobEntrypointSource, /\.unref\(\)|unref\?\.\(\)/u, "the run deadline must not be unref'd");
 assert.match(jobEntrypointSource, /clearInterval\(watchdog\)/gu, "the watchdog is cleared before the final artifact is emitted");
 assert.match(jobEntrypointSource, /nanocodex-deadline-exceeded/u);
+// The proven root cause of the wedged runs: stdout.write to a pipe is async, so
+// a fire-and-forget emit followed by process.exit destroyed the artifact.
+assert.match(jobEntrypointSource, /function emit\(value\) \{\n\treturn new Promise/u, "emit resolves on the write callback");
+assert.match(jobEntrypointSource, /await Promise\.race\(\[\n\t\temit\(\{ jobId: "unknown", state: "candidate-failed", classification: "nanocodex-deadline-exceeded" \}\)/u, "the watchdog awaits its artifact, capped, before exiting");
+assert.match(jobEntrypointSource, /await emit\(result\)/u);
+assert.doesNotMatch(jobEntrypointSource, /\n\temit\(/u, "no emit is fire-and-forget");
+assert.match(jobEntrypointSource, /const liveChildren = new Set\(\)/u);
+assert.match(jobEntrypointSource, /function killAllChildren/u);
 
 // The agent process bounds itself, caps buffering, and detects a silent stall.
 assert.match(entrypointSource, /NANOCODEX_TIMEOUT_MS = 520_000/u);
-assert.match(entrypointSource, /NANOCODEX_INACTIVITY_MS = 120_000/u);
-assert.match(entrypointSource, /MAX_ACCUMULATED_STDOUT_BYTES = 2_097_152/u, "a chatty agent cannot backpressure-deadlock its own stdout");
+assert.match(entrypointSource, /NANOCODEX_INACTIVITY_MS_OVERRIDE\) \|\| 120_000/u, "the stall budget defaults to 120s and is overridable only for tests");
 assert.match(entrypointSource, /"nanocodex-stalled"/u);
 assert.match(entrypointSource, /"nanocodex-timeout"/u);
 assert.match(entrypointSource, /child\.kill\("SIGTERM"\)/u);
 assert.match(entrypointSource, /child\.kill\("SIGKILL"\)/u);
 assert.match(entrypointSource, /const watchdog = setInterval\(/u);
 assert.doesNotMatch(entrypointSource, /\.unref\(\)|unref\?\.\(\)/u, "the agent budget must not be unref'd");
+assert.match(entrypointSource, /timeout: NANOCODEX_TIMEOUT_MS/u, "Node's own spawn timeout is the innermost backstop");
+assert.match(entrypointSource, /killSignal: "SIGKILL"/u);
+assert.match(entrypointSource, /stdio: \["ignore", "pipe", "pipe"\]/u, "stderr is captured, not discarded");
+assert.match(entrypointSource, /MAX_STDERR_BYTES = 8_192/u);
+assert.match(entrypointSource, /function withDeadline/u, "neither the stdout iterator nor the close event is awaited unguarded");
+assert.match(entrypointSource, /await withDeadline\(consumeStdout\(\)/u);
+assert.match(entrypointSource, /nanocodex-process-unterminated/u);
 
 const directory = await mkdtemp(join(tmpdir(), "nanocodex-contract-"));
 const mock = join(directory, "nanocodex");
@@ -185,7 +203,11 @@ const stalled = spawn(process.execPath, [entrypoint.pathname], {
 let stalledStdout = "";
 stalled.stdout.on("data", (chunk) => { stalledStdout += chunk; });
 stalled.stdin.end(JSON.stringify({ prompt: "Implement task", instructions, cwd: "/workspace/repository", model: NANOCODEX_DEFAULT_MODEL }));
+// Bounded so a regressed watchdog fails this test fast instead of hanging it.
+const stalledGuard = setTimeout(() => stalled.kill("SIGKILL"), 15_000);
 const stalledCode = await new Promise((resolve) => stalled.once("close", resolve));
+clearTimeout(stalledGuard);
+assert.notEqual(stalledCode, null, "the stalled run must be reaped by the watchdog, not by the test guard");
 assert.equal(stalledCode, 1, "a stalled NanoCodex run exits non-zero");
 const stalledSummary = JSON.parse(stalledStdout);
 assert.equal(stalledSummary.ok, false);
