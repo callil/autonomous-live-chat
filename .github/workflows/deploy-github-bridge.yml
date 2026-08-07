@@ -15,6 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      APP_HARNESS_GITHUB_WEBHOOK_SECRET: ${{ secrets.APP_HARNESS_GITHUB_WEBHOOK_SECRET }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -29,3 +30,8 @@ jobs:
           npm --workspace @app-harness/github-bridge run typecheck
       - name: Deploy GitHub App capability Worker
         run: npm --workspace @app-harness/github-bridge exec -- wrangler deploy
+      - name: Install webhook delivery secret
+        shell: bash
+        run: |
+          test -n "$APP_HARNESS_GITHUB_WEBHOOK_SECRET"
+          printf '%s' "$APP_HARNESS_GITHUB_WEBHOOK_SECRET" | npm --workspace @app-harness/github-bridge exec -- wrangler secret put GITHUB_WEBHOOK_SECRET --name app-harness-os-git-proxy

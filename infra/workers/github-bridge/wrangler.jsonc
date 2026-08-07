@@ -5,6 +5,9 @@
   "compatibility_date": "2026-08-06",
   "compatibility_flags": ["nodejs_compat"],
   "observability": { "enabled": true },
+  "services": [
+    { "binding": "LEDGER", "service": "autonomous-live-chat", "entrypoint": "LedgerService" }
+  ],
   "vars": {
     "ALLOWED_REPOSITORY": "callil/autonomous-live-chat",
     "PRODUCTION_ORIGIN": "https://autonomous-live-chat.coda-a.workers.dev"
