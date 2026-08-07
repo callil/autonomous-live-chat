@@ -13,6 +13,15 @@ export type GithubWebhookFact =
 	| { kind: "candidate"; number: number; url: string; headSha: string; branch: string }
 	| { kind: "merged"; number: number; url: string; headSha: string; branch: string; mergeCommitSha: string };
 
+/**
+ * What extraction alone can prove from one delivery: a promotion run whose
+ * display_title did not render the run-name carries dispatchKey null and must
+ * be resolved by the bridge before it can become a GithubWebhookFact.
+ */
+export type ExtractedGithubWebhookFact =
+	| Exclude<GithubWebhookFact, { kind: "promotion" }>
+	| { kind: "promotion"; runId: number; url: string; conclusion: string | null; createdAt: string; dispatchKey: string | null };
+
 export type GithubFactRecord = {
 	validation?: { runId: number; url: string; conclusion: string | null; createdAt: string; headSha: string; at: number };
 	promotion?: { runId: number; url: string; conclusion: string | null; createdAt: string; dispatchKey: string; at: number };
@@ -31,7 +40,8 @@ export type GithubFactWorkItemView = {
 export function normalizeGithubDeliveryId(value: unknown): string | null;
 export function githubDeliveryMarkerKey(deliveryId: string): string;
 export function expiredGithubDeliveryMarker(marker: unknown, now: number): boolean;
-export function extractGithubWebhookFact(input: { event: string | null | undefined; payload: unknown }): GithubWebhookFact | null;
+export function parsePromotionDispatchKey(displayTitle: unknown): string | null;
+export function extractGithubWebhookFact(input: { event: string | null | undefined; payload: unknown }): ExtractedGithubWebhookFact | null;
 export function normalizeGithubWebhookFact(value: unknown): GithubWebhookFact | null;
 export function matchGithubFactToWorkItem(
 	fact: GithubWebhookFact,

@@ -75,6 +75,22 @@ const fastLaneArtifacts = {
 };
 const fastLaneDeployed = commandFor("stageState", { phase: "deployed", artifacts: fastLaneArtifacts, message: "Deployed by auto-merge.", source: "github" }, ctx);
 assert.deepEqual(fastLaneDeployed.artifacts, { merged: fastLaneArtifacts.merged, mainDeploy: fastLaneArtifacts.mainDeploy }, "the fast-lane evidence artifacts pass through stageState unmodified");
+// Loop-injected promotion evidence: whatever facts the snapshot (or the loop's
+// own promoting-phase observation) carries overrides anything the model typed,
+// so stageState deployed needs no retyped run reference at all.
+const observedPromotion = { runId: 70, url: "https://github.com/callil/autonomous-live-chat/actions/runs/70", conclusion: "success", createdAt: "2026-08-06T21:00:00Z", dispatchKey: "dispatch-1", at: 1 };
+const promotionLaneDeployed = commandFor(
+	"stageState",
+	{ phase: "deployed", artifacts: { validation: null, promotion: null, merged: null, mainDeploy: null }, message: "Deployed by promotion.", source: "github" },
+	{ ...ctx, facts: { promotion: observedPromotion } },
+);
+assert.deepEqual(promotionLaneDeployed.artifacts, { promotion: observedPromotion }, "loop-observed promotion evidence rides stageState deployed even when the model typed none");
+const promotionOverride = commandFor(
+	"stageState",
+	{ phase: "deployed", artifacts: { validation: null, promotion: { url: "https://github.com/callil/autonomous-live-chat/actions/runs/999", runId: 999 }, merged: null, mainDeploy: null }, message: "Deployed by promotion.", source: "github" },
+	{ ...ctx, facts: { promotion: observedPromotion } },
+);
+assert.deepEqual(promotionOverride.artifacts.promotion, observedPromotion, "a retyped promotion reference can never displace the loop-owned fact");
 assert.throws(() => commandFor("stageClaim", {}, ctx), /Unknown operator stage tool/u, "claim is unrepresentable");
 assert.throws(() => commandFor("stageDefer", { delayMs: 60_000, message: "wait" }, ctx), /Unknown operator stage tool/u, "defer is unrepresentable");
 assert.throws(() => commandFor("inventedMethod", {}, ctx), /Unknown operator stage tool/u);
@@ -146,6 +162,20 @@ assert.match(demoWorker, /let mergeTimeoutProblem/u, "the snapshot carries the m
 assert.match(demoWorker, /validation\.conclusion === "success" && !merged && !facts\?\.promotion && Date\.now\(\) - validation\.at > MERGE_WATCH_TIMEOUT_MS/u, "the problem fires only for a successful validation with no merged or promotion fact past the watch window");
 assert.match(demoWorker, /Observe the candidate pull request state with observeCandidatePullRequest/u, "the problem text instructs the bounded observation, not a ledger-side GitHub query");
 assert.match(operatorWorker, /observeCandidatePullRequest\(\{ number: turn\.candidatePr \}\)/u, "the loop injects the recorded candidate PR number into the observation");
+
+// ---- promoting-phase self-rescue: the loop observes, the model records ----
+// The promotion webhook fact can be lost to GitHub's unreliable display_title
+// rendering. The loop (never the model) then performs the bounded promotion
+// observation before the model call and injects the concluded run as evidence.
+assert.match(demoWorker, /const appliedPromote = item\.phase === "promoting" \? actions\.findLast\(\(action\) => action\.command\.kind === "promote" && action\.status === "applied"\)/u, "the snapshot exposes the applied promote action's durable dispatch key only while promoting");
+assert.match(demoWorker, /\.\.\.\(promotionDispatch \? \{ promotionDispatch \} : \{\}\)/u, "the loop-facing promotion identity rides the snapshot");
+assert.match(operatorWorker, /await this\.observePromotionIfBlind\(turn, snapshot\);/u, "the loop performs the promoting-phase observation before any model call");
+assert.match(operatorWorker, /turn\.phase !== "promoting" \|\| turn\.snapshotFacts\?\.promotion/u, "the loop observes only when promoting with no pushed promotion fact — bounded, once per turn");
+assert.match(operatorWorker, /this\.env\.GITHUB\.findPromotionRun\(\{ dispatchKey \}\)/u, "the loop supplies the dispatch key from the snapshot; the model never retypes it");
+assert.match(operatorWorker, /if \(!run \|\| run\.conclusion === null\) return;/u, "only a concluded promotion run becomes injected evidence");
+assert.match(operatorWorker, /promotion: \{ runId: run\.runId, url: run\.url, conclusion: run\.conclusion, createdAt: run\.createdAt, dispatchKey, at: Date\.now\(\) \}/u, "the injected fact carries the full evidence shape the deployed guard requires");
+assert.match(operatorWorker, /name === "stagePromotion" && turn\.phase === "promoting"/u, "a re-promotion while promoting is refused client-side, before staging");
+assert.match(operatorWorker, /already promoting — do not dispatch promotion again/u, "the refusal teaches the productive next step instead of a bare phase error");
 
 // ---- fast-lane facts: honest joins in the ledger and snapshot ----
 assert.match(demoWorker, /matchGithubMainDeployToWorkItems\(fact, live, merges\)/u, "main-deploy matching receives the per-item merge commits and may match several contained merges");

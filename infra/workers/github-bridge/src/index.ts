@@ -1,3 +1,5 @@
+import { parsePromotionDispatchKey } from "@app-harness/contracts/webhook";
+
 /**
  * Private, repository-scoped GitHub App capability.
  *
@@ -401,6 +403,21 @@ export class GitHubCapability {
 		if (!run) return null;
 		if (!Number.isSafeInteger(run.id) || (run.id as number) < 1 || typeof run.status !== "string" || (run.conclusion !== null && typeof run.conclusion !== "string") || typeof run.html_url !== "string" || typeof run.created_at !== "string") throw new Error("GitHub candidate validation observation returned an invalid response.");
 		return { runId: run.id as number, status: run.status, conclusion: run.conclusion, url: run.html_url, createdAt: run.created_at };
+	}
+
+	/**
+	 * Resolve a promotion run's durable dispatch key by re-reading the run.
+	 * Webhook payloads do not reliably carry the rendered run-name in
+	 * display_title, but the REST representation renders it by completion
+	 * time — the same title the Actions UI shows. Returns null while the
+	 * title remains unrendered or is not a promotion run-name at all.
+	 */
+	async resolvePromotionDispatchKey(input: { runId: number }): Promise<string | null> {
+		if (!Number.isSafeInteger(input.runId) || input.runId < 1) throw new Error("Invalid workflow run identifier.");
+		const response = await fetch(`https://api.github.com/repos/${this.env.ALLOWED_REPOSITORY}/actions/runs/${input.runId}`, { headers: githubHeaders(await this.installationToken()) });
+		if (!response.ok) throw new Error(`GitHub workflow observation failed (${response.status}).`);
+		const body = await response.json() as { display_title?: unknown };
+		return parsePromotionDispatchKey(body.display_title);
 	}
 
 	async observeWorkflowRun(input: { runId: number }): Promise<{ runId: number; status: string; conclusion: string | null; url: string }> {

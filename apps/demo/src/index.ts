@@ -1173,6 +1173,14 @@ function operatorSnapshot(item: StoredWorkItem | undefined, actions: StoredOpera
 	const validation = facts?.validation && candidateArtifact?.headSha === facts.validation.headSha ? facts.validation : undefined;
 	const promotionFact = facts?.promotion;
 	const promotion = promotionFact && actions.some((action) => action.command.kind === "promote" && action.command.dispatchKey === promotionFact.dispatchKey) ? promotionFact : undefined;
+	// While the item is promoting, the applied promote action's durable dispatch
+	// key rides the snapshot as a loop-facing identity: the operator loop (never
+	// the model) uses it to observe the promotion run when the webhook fact was
+	// lost, so the item can still record deployed from real evidence.
+	const appliedPromote = item.phase === "promoting" ? actions.findLast((action) => action.command.kind === "promote" && action.status === "applied") : undefined;
+	const promotionDispatch = appliedPromote && appliedPromote.command.kind === "promote"
+		? { dispatchKey: appliedPromote.command.dispatchKey, dispatchedAt: appliedPromote.updatedAt }
+		: undefined;
 	const candidate = facts?.candidate && item.phase === "implementing" && item.plan && facts.candidate.branch === item.plan.branch ? facts.candidate : undefined;
 	// Auto-merge fast lane facts: the merged fact is gated by the recorded
 	// candidate's immutable head revision (or the plan branch), and the main
@@ -1224,6 +1232,7 @@ function operatorSnapshot(item: StoredWorkItem | undefined, actions: StoredOpera
 		classification: item.classification,
 		plan: item.plan,
 		...(nextStep ? { nextStep } : {}),
+		...(promotionDispatch ? { promotionDispatch } : {}),
 		...(planProblem ? { planProblem } : {}),
 		...(implementationProblem ? { implementationProblem } : {}),
 		...(mergeTimeoutProblem ? { mergeTimeoutProblem } : {}),
