@@ -842,7 +842,9 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 			for (const wake of page.values()) availableAt = availableAt === undefined ? wake.availableAt : Math.min(availableAt, wake.availableAt);
 		}
 		for await (const page of this.storagePages<StoredWorkItem>(WORK_ITEM_PREFIX)) {
-			for (const item of page.values()) if (!TERMINAL_PHASES.has(item.phase) && item.lease && item.lease.expiresAt > Date.now()) availableAt = availableAt === undefined ? item.lease.expiresAt : Math.min(availableAt, item.lease.expiresAt);
+			// An already-expired lease still needs an immediate alarm: recovery is
+			// what re-queues the wake, and nothing else re-arms a dormant room.
+			for (const item of page.values()) if (!TERMINAL_PHASES.has(item.phase) && item.lease) { const at = Math.max(item.lease.expiresAt, Date.now()); availableAt = availableAt === undefined ? at : Math.min(availableAt, at); }
 		}
 		for await (const page of this.storagePages<StoredOperatorAction>(ACTION_PREFIX)) {
 			for (const action of page.values()) {
