@@ -25,7 +25,7 @@ export interface AppHarnessLedger {
 	listOperatorActions(input: { workItemId: string }): Promise<StagedOperatorAction[]>;
 	beginOperatorAction(input: { actionId: number }): Promise<BeginOperatorAction>;
 	completeOperatorAction(input: { actionId: number; idempotencyKey: string; executionToken: string; result: unknown }): Promise<StagedOperatorAction>;
-	rejectOperatorAction(input: { actionId: number; executionToken: string }): Promise<StagedOperatorAction>;
+	rejectOperatorAction(input: { actionId: number; executionToken: string; error?: string }): Promise<StagedOperatorAction>;
 }
 
 /** Disposable Cloudflare Sandbox/NanoCodex implementation surface. */
