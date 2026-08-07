@@ -38,6 +38,14 @@
 			"binding": "OPERATOR",
 			"service": "app-harness-operator",
 			"entrypoint": "OperatorGateway"
+		},
+		{
+			// The sweep's merge-train reconciliation: one bounded candidate-PR
+			// observation through the sole GitHub App capability when the stack
+			// bottom's merged webhook never arrived.
+			"binding": "GITHUB",
+			"service": "app-harness-os-git-proxy",
+			"entrypoint": "GitHubAppCapability"
 		}
 	],
 	"durable_objects": {

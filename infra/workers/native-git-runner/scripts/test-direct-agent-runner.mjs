@@ -32,7 +32,8 @@ assert.match(instructions, /default product surface is apps\/demo/u);
 assert.match(instructions, /Never read, print, copy, commit, or expose credentials/u);
 assert.match(instructions, /official gh stack CLI/u, "the harness, not the model, owns stack submission");
 assert.match(instructions, /CI is the merge and production deployment authority/u);
-assert.match(instructions, /Multi-node stacks are not enabled yet/u);
+assert.match(instructions, /required node branch/u, "the branch teaching is node-generic: root and dependent nodes ride the same harness");
+assert.match(instructions, /may sit inside a shared multi-node stack; the harness owns all stack mechanics/u, "multi-node stacking is the harness's job, never the model's");
 assert.doesNotMatch(instructions, /subagents|terminal|package managers|Wrangler/u, "capabilities the direct agent does not have must not be promised");
 assert.equal(AGENT_DEFAULT_MODEL, "gpt-5.3-codex");
 
@@ -132,10 +133,46 @@ assert.match(jobEntrypointSource, /findAndAnnotatePullRequest/u);
 assert.match(jobEntrypointSource, /gh", \["stack", "init", "--base", "main", branch\]/u);
 assert.match(jobEntrypointSource, /gh", \["stack", "submit", "--auto", "--open"\]/u);
 assert.match(jobEntrypointSource, /gh", \["stack", "view", "--json"\]/u);
-assert.match(jobEntrypointSource, /oneNodeStackView/u);
 assert.match(jobEntrypointSource, /candidate-working-tree-dirty/u);
 assert.match(jobEntrypointSource, /stack-head-not-pushed/u);
 assert.doesNotMatch(jobEntrypointSource, /console\.log/u, "the background process emits only bounded JSONL");
+
+// --- Multi-node append: adopt, verify tip, add, re-verify parent, submit -----
+
+// The append sequence per the shared-stack design: a fresh clone has no local
+// stack tracking, so the runner adopts the server-side stack by the parent
+// branch, asserts the stack's top IS the recorded parent (a stale ledger tip
+// is a terminal stack-tip-diverged, never an improvised base), and adds this
+// node's branch at the parent's HEAD before the agent runs.
+assert.match(jobEntrypointSource, /gh", \["stack", "checkout", request\.candidate\.stack\.parentBranch\]/u, "the append case adopts the server-side stack by branch name — init would start a second stack and link is race-prone");
+assert.match(jobEntrypointSource, /stackViewTop\(adoptedView\.stdout\) !== request\.candidate\.stack\.parentBranch/u, "the adopted stack's top must be the recorded parent");
+assert.match(jobEntrypointSource, /"needs-restack", \{ baseSha, classification: "stack-tip-diverged"/u, "a diverged tip is a needs-restack classification, not a generic failure");
+assert.match(jobEntrypointSource, /gh", \["stack", "add", request\.candidate\.stack\.branch\]/u, "the node branch is created at the top of the adopted stack");
+assert.ok(jobEntrypointSource.indexOf('["stack", "add"') < jobEntrypointSource.indexOf("agent-started"), "the append sequence runs before the agent step");
+
+// Pre-submit re-verify: a parent restacked mid-run is caught before the push.
+assert.match(jobEntrypointSource, /ls-remote", "origin", `refs\/heads\/\$\{parentBranch\}`/u, "the parent's remote head is re-read immediately before submit");
+assert.match(jobEntrypointSource, /return \{ restack: "parent-head-moved" \}/u, "a moved parent head is a needs-restack, one generation, never a corrupt stack");
+assert.match(jobEntrypointSource, /"restack" in submitted\) return artifact\(request, "needs-restack"/u);
+
+// Topology verification for N nodes: trunk main, branches exactly the
+// ledger-expected order with this node on top, own base = the parent's pinned
+// head, own needsRebase false. Lower nodes' needsRebase is the cascade's
+// business after main moves — deliberately not asserted.
+assert.match(jobEntrypointSource, /function stackNodeTopology/u);
+assert.match(jobEntrypointSource, /const expected = \[\.\.\.stack\.expectedOrder, stack\.branch\]/u, "the expected order comes from the ledger record, with this node appended");
+assert.match(jobEntrypointSource, /own\.needsRebase !== false/u, "the node's own needsRebase must be false");
+assert.match(jobEntrypointSource, /own\.base\.toLowerCase\(\) !== stack\.parentBaseSha\.toLowerCase\(\)/u, "the node's own base must be the parent's pinned head");
+assert.match(jobEntrypointSource, /Lower nodes' needsRebase is deliberately ignored/u);
+assert.doesNotMatch(jobEntrypointSource, /oneNodeStackView|submitOneNodeStack/u, "the one-node-only machinery is fully replaced");
+
+// safeRequest relaxation: a parent is main (root, empty expectedOrder) or a
+// canonical sibling (pullRequestBase = parent, expectedOrder ends at parent).
+assert.match(jobEntrypointSource, /const STACK_PARENT = \/\^app-harness-os\\\/\\d\+\\\/g\\d\+\$\/u/u, "sibling parents are canonical node branches only");
+assert.match(jobEntrypointSource, /function safeExpectedOrder/u, "expectedOrder is validated as a bounded array of safe branches");
+assert.match(jobEntrypointSource, /EXPECTED_ORDER_MAX = 16/u);
+assert.match(jobEntrypointSource, /candidate\.stack\.pullRequestBase !== "main" \|\| expectedOrder\.length !== 0/u, "a root request must carry an empty expected order");
+assert.match(jobEntrypointSource, /candidate\.stack\.pullRequestBase !== parentBranch \|\| expectedOrder\.at\(-1\) !== parentBranch/u, "a sibling-parent request targets its parent and ends its expected order at it");
 
 // --- Local test gate and the single merge path -------------------------------
 
@@ -146,7 +183,7 @@ assert.match(jobEntrypointSource, /node", \["apps\/demo\/test\/composer\.test\.m
 assert.doesNotMatch(jobEntrypointSource, /run\("npm"/u, "no npm invocation may enter the bounded sandbox run");
 assert.match(jobEntrypointSource, /local-tests-failed/u);
 assert.match(jobEntrypointSource, /local-tests-timeout/u, "a hung local test is classified distinctly, not folded into failure");
-assert.ok(jobEntrypointSource.indexOf('["apps/demo/test/composer.test.mjs"]') < jobEntrypointSource.indexOf("await submitOneNodeStack"), "local tests run before the branch is pushed");
+assert.ok(jobEntrypointSource.indexOf('["apps/demo/test/composer.test.mjs"]') < jobEntrypointSource.indexOf("await submitStackNode"), "local tests run before the branch is pushed");
 
 // No auto-merge arming: every candidate PR is a server-side stack member and
 // the legacy pull request merge endpoints cannot merge a stack. The

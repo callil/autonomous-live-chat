@@ -158,22 +158,54 @@ assert.throws(
 	"a diverged recorded parent base is not a merged parent",
 );
 
-assert.throws(() => validatePullRequest(
-	{
-		...pullRequest,
-		head: { ...pullRequest.head, ref: "app-harness-os/19/g2" },
-		base: { ...pullRequest.base, ref: "app-harness-os/19/g1" },
-		body: [
-			"- Stack: `stack-request-19` generation 2",
-			"- Node: `root`",
-			"- Parent base: `app-harness-os/19/g1`",
-			`- Candidate head: \`${headSha}\``,
-		].join("\n"),
-	},
-	commit,
-	files,
-	{ ...options, expectedGeneration: 2, expectedParent: undefined },
-	comparison,
-), /one-node stack root/u, "dependent nodes fail closed until multi-node restacking is implemented");
+// ---- multi-node: a dependent node based on its canonical sibling parent ----
+
+const dependent = {
+	...pullRequest,
+	number: 21,
+	head: { ...pullRequest.head, ref: "app-harness-os/21/g1" },
+	base: { ...pullRequest.base, ref: "app-harness-os/19/g1" },
+	body: [
+		"- Stack: `stack-request-19` generation 1",
+		"- Node: `n-11223344`",
+		"- Parent base: `app-harness-os/19/g1`",
+		`- Candidate head: \`${headSha}\``,
+		"- CI profile: `content`",
+	].join("\n"),
+};
+const dependentOptions = { ...options, expectedIssue: 21, expectedParent: "app-harness-os/19/g1", expectedNode: "n-11223344" };
+const dependentValid = validatePullRequest(dependent, commit, files, dependentOptions, comparison);
+assert.equal(dependentValid.nodeId, "n-11223344", "a dependent node's marker rides into the gate outputs");
+assert.equal(dependentValid.issue, 21);
+assert.throws(
+	() => validatePullRequest(dependent, commit, files, { ...dependentOptions, expectedNode: "root" }, comparison),
+	/node provenance does not match orchestration/u,
+	"a node marker that disagrees with the dispatcher-expected node fails closed",
+);
+assert.throws(
+	() => validatePullRequest({ ...dependent, body: dependent.body.replace("- Node: `n-11223344`", "- Node: `not a node!`") }, commit, files, dependentOptions, comparison),
+	/node provenance is invalid/u,
+	"a malformed node marker is never accepted, even without dispatcher context",
+);
+assert.throws(
+	() => validatePullRequest({ ...dependent, base: { ...dependent.base, ref: "release" } }, commit, files, dependentOptions, comparison),
+	/main or a canonical sibling stack branch/u,
+	"a base outside main and the canonical stack namespace fails closed",
+);
+assert.throws(
+	() => validatePullRequest(dependent, commit, files, { ...dependentOptions, expectedParent: "release" }, comparison),
+	/outside the canonical stack namespace/u,
+	"an expected parent outside the canonical namespace fails closed",
+);
+// A retargeted dependent survivor: GitHub moved base.ref back to main while
+// the marker still names the merged sibling — the ancestor rule carries it.
+const retargeted = { ...dependent, base: { ...pullRequest.base, ref: "main" } };
+assert.throws(
+	() => validatePullRequest(retargeted, commit, files, dependentOptions, comparison),
+	/parent provenance is invalid/u,
+	"a retargeted survivor fails closed without ancestor evidence",
+);
+const retargetedValid = validatePullRequest(retargeted, commit, files, { ...dependentOptions, parentMarkerComparison: { status: "behind", ahead_by: 0, behind_by: 2 } }, comparison);
+assert.equal(retargetedValid.nodeId, "n-11223344", "a retargeted dependent survivor verifies with its unchanged provenance once its parent merged");
 
 console.log("OS stack trusted gate contracts passed");

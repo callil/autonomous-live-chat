@@ -34,7 +34,7 @@ assert.deepEqual(Object.keys(TOOLS.find((candidate) => candidate.function.name =
 assert.deepEqual(Object.keys(TOOLS.find((candidate) => candidate.function.name === "observeCandidatePullRequest").function.parameters.properties), [], "the candidate PR number is loop-injected from the recorded artifact, never a model argument");
 
 // ---- system prompt: no lease ceremony, WAITING is a turn outcome ----
-assert.ok(SYSTEM_PROMPT.length < 1_500, `system prompt stays compact (${SYSTEM_PROMPT.length} chars)`);
+assert.ok(SYSTEM_PROMPT.length < 1_650, `system prompt stays compact (${SYSTEM_PROMPT.length} chars)`);
 assert.match(SYSTEM_PROMPT, /classification -> issue -> plan -> implementation -> candidate -> validating -> promotion -> deployed -> completed/u);
 assert.doesNotMatch(SYSTEM_PROMPT, /claim|lease|defer|stageRelease/iu, "no lease vocabulary survives the simplification");
 assert.match(SYSTEM_PROMPT, /never poll getCandidate/u, "candidate results arrive by push");
@@ -42,6 +42,8 @@ assert.match(SYSTEM_PROMPT, /State\.facts\.runnerResult/u, "the prompt teaches t
 assert.match(SYSTEM_PROMPT, /Stage from pushed State\.facts/u, "pushed GitHub facts are staged directly, never re-observed");
 // ---- single merge path: promotion dispatch after validation, never auto-merge ----
 assert.match(SYSTEM_PROMPT, /then stagePromotion: the trusted promotion dispatch is the single merge path/u, "after validating, the operator stages the promotion — candidates are stack members and never merge on their own");
+assert.match(SYSTEM_PROMPT, /Only the bottom merge-train item promotes: on a mergeTrainHold fact reply WAITING/u, "the prompt teaches the merge-train hold: a green upper node waits with its position instead of dispatching a doomed promotion");
+assert.match(SYSTEM_PROMPT, /the ledger pokes when the item below merges/u, "the hold names the event that unblocks it");
 assert.doesNotMatch(SYSTEM_PROMPT, /auto-merge/u, "the prompt must not teach the dead auto-merge fast lane");
 assert.match(SYSTEM_PROMPT, /facts\.merged and a success facts\.mainDeploy arrive, stageState deployed with both as artifacts, then completed/u, "the merge and main-deploy facts together are the deployed evidence");
 // ---- merge-watch recovery: dispatch the promotion, restack when dirty ----
@@ -59,6 +61,11 @@ assert.match(SYSTEM_PROMPT, /PROGRESSED, WAITING, PARKED:<code>, or COMPLETE/u, 
 // ---- commandFor: the loop injects run and stack identity ----
 const ctx = { minted: "minted-uuid", activeRunId: "run-active", planBranch: "app-harness-os/7/g1", issueNumber: 7 };
 assert.deepEqual(commandFor("stageImplementation", {}, ctx), { kind: "implement", runId: "minted-uuid" }, "the implementation run identifier is minted by the loop and doubles as the callback bearer credential");
+assert.deepEqual(
+	commandFor("stageImplementation", {}, { ...ctx, expectedOrder: ["app-harness-os/6/g1"] }),
+	{ kind: "implement", runId: "minted-uuid", expectedOrder: ["app-harness-os/6/g1"] },
+	"the merge-train order beneath the node rides from the snapshot through the loop context, never a model argument",
+);
 const candidate = commandFor("stageCandidate", { headSha: "a".repeat(40), pullRequestNumber: 12, pullRequestUrl: "https://github.com/callil/autonomous-live-chat/pull/12", message: "Candidate ready." }, ctx);
 assert.equal(candidate.runId, "run-active", "the candidate is bound to the active implementation run");
 assert.equal(candidate.branch, "app-harness-os/7/g1");
@@ -159,7 +166,9 @@ assert.match(SYSTEM_PROMPT, /never wait for a cleared run/u, "the wedge — wait
 // ---- merge watch: the ledger names the problem; the operator observes ----
 assert.match(demoWorker, /MERGE_WATCH_TIMEOUT_MS = 4 \* 60_000/u, "the merge watch window is a named four-minute constant");
 assert.match(demoWorker, /let mergeTimeoutProblem/u, "the snapshot carries the merge-timeout problem fact");
-assert.match(demoWorker, /validation\.conclusion === "success" && !merged && !facts\?\.promotion && Date\.now\(\) - validation\.at > MERGE_WATCH_TIMEOUT_MS/u, "the problem fires only for a successful validation with no merged or promotion fact past the watch window");
+assert.match(demoWorker, /validation\.conclusion === "success" && !merged && !facts\?\.promotion && !mergeTrainHold && Date\.now\(\) - validation\.at > MERGE_WATCH_TIMEOUT_MS/u, "the problem fires only for a successful validation with no merged or promotion fact past the watch window — and never for a held upper merge-train node");
+assert.match(demoWorker, /const mergeTrainHold = stackNode && stackNode\.position > 1 && validation\?\.conclusion === "success"/u, "a green node above the merge-train bottom carries the hold fact instead of a promotion instruction");
+assert.match(demoWorker, /only the bottom item promotes\. Reply WAITING with your position/u, "the hold text names the WAITING move and the position");
 assert.match(demoWorker, /Dispatch the merge now with stagePromotion — the operator-staged promotion dispatch is the single merge path/u, "the problem text names the promotion dispatch as the primary recovery");
 assert.match(demoWorker, /observe the candidate pull request state with observeCandidatePullRequest/u, "the problem text instructs the bounded observation, not a ledger-side GitHub query");
 assert.match(operatorWorker, /observeCandidatePullRequest\(\{ number: turn\.candidatePr \}\)/u, "the loop injects the recorded candidate PR number into the observation");

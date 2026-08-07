@@ -4,6 +4,9 @@ import { pathToFileURL } from "node:url";
 const SHA = /^[0-9a-f]{40}$/iu;
 const REPOSITORY = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u;
 const STACK_BRANCH = /^app-harness-os\/(\d+)\/g(\d+)$/u;
+/** A dependent node's base is a canonical sibling node branch, never arbitrary. */
+const STACK_PARENT = /^app-harness-os\/\d+\/g\d+$/u;
+const NODE_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/u;
 const APP_LOGIN = "app-harness-native-git-callil[bot]";
 const WORKFLOW_PATH = ".github/workflows/os-stack-ci.yml";
 const CI_PROFILES = new Set(["visual", "content", "behavior", "data", "infrastructure"]);
@@ -46,7 +49,12 @@ export function validatePullRequest(pr, commit, files, options, comparison) {
 	if (!branch) throw new Error("Candidate branch is outside the OS stack namespace.");
 	const issue = Number(branch[1]);
 	const generation = Number(branch[2]);
-	if (base.ref !== "main" || (options.expectedParent && options.expectedParent !== "main")) throw new Error("Only the durable one-node stack root based on main can be promoted.");
+	// A bottom node is based on main; a dependent node on a canonical sibling
+	// branch — and a retargeted survivor is back on main while its recorded
+	// parent marker still names the merged sibling (handled below by the
+	// ancestor-of-main rule). Anything else is outside the stack namespace.
+	if (base.ref !== "main" && !STACK_PARENT.test(base.ref)) throw new Error("Candidate base must be main or a canonical sibling stack branch.");
+	if (options.expectedParent && options.expectedParent !== "main" && !STACK_PARENT.test(options.expectedParent)) throw new Error("Expected stack parent is outside the canonical stack namespace.");
 	if (options.expectedIssue && issue !== options.expectedIssue) throw new Error("Candidate branch does not match the expected issue.");
 	if (options.expectedGeneration && generation !== options.expectedGeneration) throw new Error("Candidate branch does not match the expected generation.");
 	const headSha = exactSha(head.sha, "pull request head");
@@ -66,7 +74,13 @@ export function validatePullRequest(pr, commit, files, options, comparison) {
 	const stackMatch = body.match(/- Stack: `([^`]+)` generation (\d+)/u);
 	if (!stackMatch || Number(stackMatch[2]) !== generation) throw new Error("Pull request stack generation provenance is invalid.");
 	if (options.expectedStack && stackMatch[1] !== options.expectedStack) throw new Error("Pull request stack id does not match orchestration.");
-	if (lineValue(body, /- Node: `([^`]+)`/u, "node") !== "root") throw new Error("One-node stack provenance must identify the root node.");
+	// The node marker is the plan's durable node identity. When the dispatcher
+	// supplies the expected node (promotion), the marker must match exactly;
+	// CI verification without dispatcher context still requires a well-formed
+	// marker so provenance can never be blank or free text.
+	const nodeMarker = lineValue(body, /- Node: `([^`]+)`/u, "node");
+	if (!NODE_ID.test(nodeMarker)) throw new Error("Pull request node provenance is invalid.");
+	if (options.expectedNode && nodeMarker !== options.expectedNode) throw new Error("Pull request node provenance does not match orchestration.");
 	// A retargeted survivor keeps its recorded parent marker while GitHub has
 	// already retargeted base.ref to main. Accept the mismatch only with proof
 	// that the recorded parent base is an ancestor of current main — i.e. the
@@ -89,6 +103,7 @@ export function validatePullRequest(pr, commit, files, options, comparison) {
 		issue,
 		generation,
 		stackId: stackMatch[1],
+		nodeId: nodeMarker,
 		ciProfile: profileMatch ? profileMatch[1] : "",
 		alreadyMerged: Boolean(merged),
 		mergeSha: merged ? pr.merge_commit_sha.toLowerCase() : "",
@@ -233,6 +248,7 @@ async function verifyPullRequestCommand() {
 		recordedParentBase,
 		parentMarkerComparison,
 		expectedParent: process.env.EXPECTED_PARENT,
+		expectedNode: process.env.EXPECTED_NODE,
 		expectedHead,
 		expectedIssue: process.env.EXPECTED_ISSUE ? integer(process.env.EXPECTED_ISSUE, "EXPECTED_ISSUE") : undefined,
 		expectedGeneration: process.env.EXPECTED_GENERATION ? integer(process.env.EXPECTED_GENERATION, "EXPECTED_GENERATION") : undefined,
@@ -260,7 +276,7 @@ async function verifyPullRequestCommand() {
 		generation: result.generation,
 		stack_id: result.stackId,
 		ci_profile: result.ciProfile,
-		node_id: "root",
+		node_id: result.nodeId,
 		already_merged: result.alreadyMerged,
 		merge_sha: result.mergeSha,
 	});

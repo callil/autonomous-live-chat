@@ -35,10 +35,14 @@ import {
 	appendReservedNode,
 	canonicalStackPlan,
 	isStaleStackNode,
+	markNodeRetargeted,
 	normalizeRoomStack,
 	pinStackNode,
+	popBottomNode,
+	stackNodeContext,
 	stackTipPinned,
 	truncateStack,
+	type RoomStackNodeContext,
 } from "@app-harness/contracts/room-stack";
 import {
 	expiredGithubDeliveryMarker,
@@ -136,7 +140,7 @@ type OperatorCommand =
 	| { kind: "classify"; classification: LedgerClassification; message: string }
 	| { kind: "plan"; plan: LedgerPlan; message: string }
 	| { kind: "create-issue"; title: string; body: string; classification: string }
-	| { kind: "implement"; runId: string }
+	| { kind: "implement"; runId: string; expectedOrder?: string[] }
 	| { kind: "record-candidate"; runId: string; branch: string; headSha: string; pullRequestNumber: number; pullRequestUrl: string; message: string }
 	| { kind: "promote"; pullRequestNumber: number; headSha: string; dispatchKey: string }
 	| { kind: "record-state"; phase: Extract<LedgerPhase, "validating" | "promoting" | "deployed" | "completed" | "retryable" | "needs_review" | "rejected">; artifacts?: Record<string, unknown>; message: string; source: LedgerEvent["source"] };
@@ -173,12 +177,19 @@ type ExternalFacts = {
 	candidate?: { number: number; url: string; headSha: string; branch: string; at: number };
 	/** The merge evidence chain's merge leg: the candidate PR closed merged, carrying the merge commit join key. */
 	merged?: { number: number; url: string; headSha: string; branch: string; mergeCommitSha: string; at: number };
+	/** GitHub's native-stack membership signal for the candidate PR: current base and coordinates — the retarget marker after the node below merges. */
+	stack?: { number: number; branch: string; headSha: string; base: string; position: number; size: number; at: number };
 };
 type ExternalFactInput =
 	| { source: "runner"; workItemId: string; runId: string; fact: NonNullable<ExternalFacts["runnerResult"]> }
 	| { source: "github"; deliveryId: string; fact: GithubWebhookFact };
 
-type RuntimeEnv = Omit<Env, "OPERATOR" | "OPERATOR_PAUSED"> & { OPERATOR: unknown; OPERATOR_PAUSED?: string };
+type RuntimeEnv = Omit<Env, "OPERATOR" | "OPERATOR_PAUSED" | "GITHUB"> & { OPERATOR: unknown; GITHUB?: unknown; OPERATOR_PAUSED?: string };
+
+/** The one bridge observation the room's sweep reconciliation uses: a bounded candidate PR read that recovers a lost merged delivery. */
+type GithubBridgeTransport = {
+	observeCandidatePullRequest(input: { number: number }): Promise<{ number: number; state: string; merged: boolean; mergeableState: string; mergeCommitSha?: string | null }>;
+};
 
 const MESSAGE_PREFIX = "message:";
 const ANNOTATION_PREFIX = "annotation:";
@@ -349,8 +360,11 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		const admission = normalizeAdmissionState(await this.ctx.storage.get(ADMISSION_STATE_KEY));
 		// A stale-marked stack node's snapshot carries the restack fact: its
 		// parent left the stack, so its single next step is a revised plan.
+		// A stacked node's snapshot also carries its merge-train coordinates:
+		// the loop supplies expectedOrder to the runner from here, and a green
+		// upper node learns to WAIT instead of dispatching a doomed promotion.
 		const roomStack = normalizeRoomStack(await this.ctx.storage.get(ROOM_STACK_KEY));
-		return { state: operatorSnapshot(item, actions, facts, implementQueuePosition(admission, item.id), isStaleStackNode(roomStack, item.id)), version: item.version, terminal: TERMINAL_PHASES.has(item.phase) };
+		return { state: operatorSnapshot(item, actions, facts, implementQueuePosition(admission, item.id), isStaleStackNode(roomStack, item.id), stackNodeContext(roomStack, item.id)), version: item.version, terminal: TERMINAL_PHASES.has(item.phase) };
 	}
 
 	async recordClassification(input: { workItemId: string; classification: LedgerClassification; message: string }): Promise<StoredWorkItem> {
@@ -766,6 +780,20 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		if (parsed.fact.kind === "merged" || (parsed.fact.kind === "promotion" && parsed.fact.conclusion === "success")) {
 			for (const workItemId of merged.freshIds) await this.releaseImplementSlotFor(workItemId);
 		}
+		// The merged bottom node advances the merge train: pop it, advance the
+		// recorded base to the merge commit, and poke the new bottom item so it
+		// promotes without waiting for its next wake.
+		if (parsed.fact.kind === "merged") {
+			for (const workItemId of merged.freshIds) await this.popRoomStackBottom(workItemId, parsed.fact.mergeCommitSha);
+		}
+		// A stack fact whose base no longer names the node's recorded parent is
+		// GitHub's retarget after the node below merged: mark the node — tip,
+		// head shas, and generations stay untouched, because the gate's
+		// ancestor-of-main rule is what keeps the survivor's unchanged
+		// provenance verifiable. No replan, no poke storm.
+		if (parsed.fact.kind === "stack") {
+			for (const workItemId of merged.freshIds) await this.markRoomStackRetargeted(workItemId, parsed.fact.base);
+		}
 		return { accepted: true };
 	}
 
@@ -1086,6 +1114,98 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		if (item && !TERMINAL_PHASES.has(item.phase)) this.pokeOperator(item, "sweep");
 	}
 
+	/**
+	 * The cascade's forward step: the bottom node's pull request merged, so it
+	 * pops off the room stack and the recorded base advances to the merge
+	 * commit. Survivors keep their tip, head shas, and generations — GitHub
+	 * retargets them without rebasing — and the new bottom item gets one
+	 * sweep-class poke so it promotes promptly instead of on its next wake.
+	 */
+	private async popRoomStackBottom(workItemId: string, mergeCommitSha: string): Promise<void> {
+		const outcome = await this.ctx.storage.transaction(async (txn) => {
+			const popped = popBottomNode(normalizeRoomStack(await txn.get(ROOM_STACK_KEY)), workItemId, mergeCommitSha);
+			if (popped.popped) await txn.put(ROOM_STACK_KEY, popped.stack);
+			return popped;
+		});
+		if (!outcome.popped) return;
+		const bottom = outcome.stack.order[0];
+		if (bottom) await this.nudgeRestackSurvivor(bottom.workItemId);
+	}
+
+	/**
+	 * GitHub's retarget marker: after the node below merged, the survivor's
+	 * pull request was retargeted off its recorded parent (to the stack base)
+	 * without a rebase. Only the marker changes — a stack fact whose base
+	 * still names the recorded parent is a join or move, not a retarget.
+	 */
+	private async markRoomStackRetargeted(workItemId: string, base: string): Promise<void> {
+		await this.ctx.storage.transaction(async (txn) => {
+			const stack = normalizeRoomStack(await txn.get(ROOM_STACK_KEY));
+			const node = stack.order.find((entry) => entry.workItemId === workItemId);
+			if (!node || node.parentBranch === base) return;
+			const marked = markNodeRetargeted(stack, workItemId);
+			if (marked.marked) await txn.put(ROOM_STACK_KEY, marked.stack);
+		});
+	}
+
+	/**
+	 * Missed-delivery backstop for the merge train: the pop above rides the
+	 * merged webhook, and a lost delivery would otherwise leave the bottom
+	 * node holding the stack forever. Each sweep spends at most one bounded
+	 * bridge observation on the bottom node — only when its merged fact is
+	 * overdue — and reconciles the pop from the observed merge commit.
+	 */
+	private async reconcileStackBottom(now: number): Promise<void> {
+		const stack = normalizeRoomStack(await this.ctx.storage.get(ROOM_STACK_KEY));
+		const bottom = stack.order[0];
+		if (!bottom) return;
+		const item = await this.loadWorkItem(bottom.workItemId);
+		if (!item) return;
+		const facts = await this.ctx.storage.get<ExternalFacts>(`${EXTERNAL_FACT_PREFIX}${item.id}`);
+		if (facts?.merged?.mergeCommitSha) {
+			// The merged fact is recorded but the pop was lost: reconcile it.
+			await this.popRoomStackBottom(item.id, facts.merged.mergeCommitSha);
+			return;
+		}
+		const overdue = (facts?.promotion?.conclusion === "success" && now - facts.promotion.at > MERGE_WATCH_TIMEOUT_MS)
+			|| item.phase === "deployed" || item.phase === "completed";
+		const candidate = item.artifacts.candidate as { pullRequestNumber?: unknown } | undefined;
+		if (!overdue || !Number.isSafeInteger(candidate?.pullRequestNumber) || !this.env.GITHUB) return;
+		try {
+			const observed = await (this.env.GITHUB as GithubBridgeTransport).observeCandidatePullRequest({ number: candidate!.pullRequestNumber as number });
+			if (observed.merged && typeof observed.mergeCommitSha === "string" && /^[0-9a-f]{40}$/u.test(observed.mergeCommitSha)) {
+				await this.popRoomStackBottom(item.id, observed.mergeCommitSha);
+			}
+		} catch (error) {
+			// An unobservable PR is not a lost stack: the next sweep retries.
+			console.error("Stack-bottom merge reconciliation failed.", { workItemId: item.id, error });
+		}
+	}
+
+	/**
+	 * The nuke-and-rebuild lever for a corrupted room stack: park every
+	 * stacked non-terminal item and clear the record so the queue can be
+	 * re-admitted in order as fresh generations. The trusted server-side
+	 * unstack (`gh stack unstack`) is a documented operator-side manual step,
+	 * never executed by this worker.
+	 */
+	async rebuildStack(): Promise<{ parked: number; clearedStackId: string | null }> {
+		const stack = normalizeRoomStack(await this.ctx.storage.get(ROOM_STACK_KEY));
+		const stacked = [...stack.order.map((node) => node.workItemId), ...stack.stale.map((node) => node.workItemId)];
+		let parked = 0;
+		for (const workItemId of stacked) {
+			try {
+				const current = await this.loadWorkItem(workItemId);
+				if (!current || TERMINAL_PHASES.has(current.phase)) continue;
+				const next = { ...current, phase: "needs_review" as const, version: current.version + 1, activeImplementation: null, updatedAt: Date.now() };
+				await this.persistTransition(current.version, next, "Parked by the stack rebuild lever: the room stack record is being cleared; resubmit this request to re-admit it as a fresh generation.", "system");
+				parked += 1;
+			} catch { /* raced with its own transition; clearing the record below is what matters */ }
+		}
+		await this.ctx.storage.delete(ROOM_STACK_KEY);
+		return { parked, clearedStackId: stack.stackId };
+	}
+
 	/** Record the room-level credit outage exactly once and announce it publicly. */
 	private async recordModelCreditsExhausted(): Promise<void> {
 		const outcome = await this.ctx.storage.transaction(async (txn) => {
@@ -1125,6 +1245,9 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 			}
 		}
 		const now = Date.now();
+		// Merge-train reconciliation: recover a lost merged delivery for the
+		// stack's bottom node before the per-item re-pokes below.
+		await this.reconcileStackBottom(now);
 		for await (const page of this.storagePages<StoredOperatorAction>(ACTION_PREFIX)) {
 			for (const action of page.values()) {
 				if (action.status !== "applying" || !action.leaseExpiresAt || action.leaseExpiresAt > now) continue;
@@ -1342,7 +1465,7 @@ const OPERATOR_STATE_PROGRESS_EVENT_CHARS = 200;
  * single next command, and the durable ledger still enforces phase,
  * ordering, and idempotency invariants against whatever the model stages.
  */
-function operatorSnapshot(item: StoredWorkItem | undefined, actions: StoredOperatorAction[], facts?: ExternalFacts, queuePosition?: number | null, parentRestacked?: boolean): string {
+function operatorSnapshot(item: StoredWorkItem | undefined, actions: StoredOperatorAction[], facts?: ExternalFacts, queuePosition?: number | null, parentRestacked?: boolean, stackNode?: RoomStackNodeContext | null): string {
 	if (!item) return "null";
 	// Pushed external facts ride the snapshot; only facts for the currently
 	// active implementation run are shown so a stale run cannot masquerade.
@@ -1386,6 +1509,13 @@ function operatorSnapshot(item: StoredWorkItem | undefined, actions: StoredOpera
 	// evidence chain instead of needing a second promotion run.
 	const merged = facts?.merged && (candidateArtifact?.headSha === facts.merged.headSha || (item.plan && facts.merged.branch === item.plan.branch)) ? facts.merged : undefined;
 	const mainDeploy = merged && facts?.mainDeploy && (facts.mainDeploy.headSha === merged.mergeCommitSha || (facts.mainDeploy.conclusion === "success" && Date.parse(facts.mainDeploy.createdAt) > merged.at)) ? facts.mainDeploy : undefined;
+	// The merge-train hold: a green upper node is blocked by design — only the
+	// bottom item promotes, so a held item's single honest move is WAITING.
+	// The hold also suppresses the merge-watch problem below, which would
+	// otherwise instruct a promotion dispatch the trusted gate must refuse.
+	const mergeTrainHold = stackNode && stackNode.position > 1 && validation?.conclusion === "success"
+		? `Validation is green, but ${stackNode.position - 1} item(s) are below this one in the merge train and only the bottom item promotes. Reply WAITING with your position; the ledger pokes this item when the item below merges.`
+		: undefined;
 	// Merge-watch problem fact: a promotion dispatch that was never staged (or
 	// whose fact was lost) is invisible by push, and GitHub sends no event
 	// when a PR becomes conflicted. Validation succeeded, the watch window
@@ -1393,7 +1523,7 @@ function operatorSnapshot(item: StoredWorkItem | undefined, actions: StoredOpera
 	// problem so the operator dispatches the promotion now — the single merge
 	// path — and restacks a conflicted candidate via the bridge observation.
 	let mergeTimeoutProblem: string | undefined;
-	if (validation && validation.conclusion === "success" && !merged && !facts?.promotion && Date.now() - validation.at > MERGE_WATCH_TIMEOUT_MS) {
+	if (validation && validation.conclusion === "success" && !merged && !facts?.promotion && !mergeTrainHold && Date.now() - validation.at > MERGE_WATCH_TIMEOUT_MS) {
 		mergeTimeoutProblem = "Validation succeeded but no promotion fact and no merged fact arrived within the merge watch window. Dispatch the merge now with stagePromotion — the operator-staged promotion dispatch is the single merge path; candidates never auto-merge. If the candidate may be conflicted, observe the candidate pull request state with observeCandidatePullRequest: if mergeableState is dirty the candidate is conflicted — restack now with stagePlan (next generation, fresh getMainSha baseSha).";
 	}
 	// Surface a stalled implementation run as a fact: the disposable runner
@@ -1444,6 +1574,13 @@ function operatorSnapshot(item: StoredWorkItem | undefined, actions: StoredOpera
 		...(queuePosition
 			? { implementQueue: { position: queuePosition, note: `All ${IMPLEMENT_SLOTS} implementation slots are busy; this item is number ${queuePosition} in the queue. Reply WAITING — the ledger re-pokes when a slot frees.` } }
 			: {}),
+		// The item's merge-train coordinates: the loop (never the model) reads
+		// expectedOrder from here and supplies it to the runner, which asserts
+		// the server-side stack shows exactly these branches beneath the node.
+		...(stackNode
+			? { stack: { position: stackNode.position, size: stackNode.size, expectedOrder: stackNode.expectedOrder, ...(stackNode.retargeted ? { retargeted: true } : {}) } }
+			: {}),
+		...(mergeTrainHold ? { mergeTrainHold } : {}),
 		...(planProblem ? { planProblem } : {}),
 		...(restackProblem ? { restackProblem } : {}),
 		...(implementationProblem ? { implementationProblem } : {}),
@@ -1648,7 +1785,14 @@ function normalizeArtifacts(value: unknown): Record<string, unknown> {
 
 function validateOperatorCommand(command: OperatorCommand): void {
 	if (!command || typeof command !== "object") throw new Error("Operator command is required.");
-	if (command.kind === "implement") return;
+	if (command.kind === "implement") {
+		// The loop-supplied merge-train order beneath this node: a bounded list
+		// of canonical sibling branches, never model-typed free text.
+		if (command.expectedOrder !== undefined && (!Array.isArray(command.expectedOrder) || command.expectedOrder.length > 16 || command.expectedOrder.some((branch) => typeof branch !== "string" || !/^app-harness-os\/\d+\/g\d+$/u.test(branch)))) {
+			throw new Error("Implement command expectedOrder must be a bounded list of canonical stack branches.");
+		}
+		return;
+	}
 	if (command.kind === "classify") {
 		if (!command.classification || !["eligible", "needs_review", "rejected"].includes(command.classification.decision) || !command.message.trim()) throw new Error("Classification command is invalid.");
 		return;
@@ -1770,6 +1914,18 @@ export default {
 			if (request.method !== "POST") return new Response("Method not allowed", { status: 405 });
 			const purged = await env.CHAT_ROOM.getByName("main").purgeReviewWorkItems();
 			return Response.json({ purged });
+		}
+		if (pathname === "/api/admin/rebuild-stack") {
+			// The merge-train recovery lever: park every stacked non-terminal
+			// item and clear the room-stack record. The trusted server-side
+			// unstack is documented in the response as an operator-side manual
+			// step; this worker never runs it.
+			if (request.method !== "POST") return new Response("Method not allowed", { status: 405 });
+			const outcome = await env.CHAT_ROOM.getByName("main").rebuildStack();
+			return Response.json({
+				...outcome,
+				operatorStep: "Manual trusted step (not executed by this worker): run `gh stack unstack` against the abandoned server-side stack, then resubmit the parked requests in order as fresh generations.",
+			});
 		}
 		if (pathname === "/api/admin/park-stale") {
 			// Prototype maintenance lever: park every non-terminal work item at or

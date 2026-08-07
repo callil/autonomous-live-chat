@@ -46,7 +46,7 @@ export type OperatorCommand =
 	| { kind: "classify"; classification: LedgerClassification; message: string }
 	| { kind: "plan"; plan: LedgerPlan; message: string }
 	| { kind: "create-issue"; title: string; body: string; classification: "triage" | "agent" | "needs-review" | "rejected" | "deployed" }
-	| { kind: "implement"; runId: string }
+	| { kind: "implement"; runId: string; expectedOrder?: string[] }
 	| { kind: "record-candidate"; runId: string; branch: string; headSha: string; pullRequestNumber: number; pullRequestUrl: string; message: string }
 	| { kind: "promote"; pullRequestNumber: number; headSha: string; dispatchKey: string }
 	| { kind: "record-state"; phase: ExternalPhase; artifacts?: Record<string, unknown>; message: string; source: EventSource };
@@ -101,10 +101,10 @@ export interface NativeGitRunnerBinding {
 export interface GitHubRepositoryBinding {
 	createIssue(input: { eventId: string; title: string; body: string; classification: "triage" | "agent" | "needs-review" | "rejected" | "deployed" }): Promise<{ issueNumber: number; issueUrl: string; existing?: true }>;
 	closeAfterDeployment(input: { issueNumber: number; eventId: string; body: string; deploymentUrl: string }): Promise<{ issueNumber: number; state: "closed"; deploymentUrl: string }>;
-	dispatchPromotion(input: { pullRequest: number; stackId: string; generation: number; issueNumber: number; parentBranch: string; headSha: string; dispatchKey: string; ciProfile: "visual" | "content" | "behavior" | "data" | "infrastructure" }): Promise<{ dispatchKey: string; dispatched: true }>;
+	dispatchPromotion(input: { pullRequest: number; stackId: string; generation: number; issueNumber: number; nodeId: string; parentBranch: string; headSha: string; dispatchKey: string; ciProfile: "visual" | "content" | "behavior" | "data" | "infrastructure" }): Promise<{ dispatchKey: string; dispatched: true }>;
 	getMainSha(): Promise<{ sha: string }>;
 	getCandidate(input: { branch: string; pullRequestBase: string }): Promise<{ number: number; url: string; headSha: string; base: string; state: string } | null>;
-	observeCandidatePullRequest(input: { number: number }): Promise<{ number: number; state: string; merged: boolean; mergeableState: string }>;
+	observeCandidatePullRequest(input: { number: number }): Promise<{ number: number; state: string; merged: boolean; mergeableState: string; mergeCommitSha: string | null }>;
 	observeCandidateValidation(input: { pullRequest: number; headSha: string }): Promise<{ runId: number; status: string; conclusion: string | null; url: string; createdAt: string } | null>;
 	updateClassification(input: { issueNumber: number; classification: "triage" | "agent" | "needs-review" | "rejected" | "deployed"; modelClassification?: { changeType: "visual" | "content" | "data" | "behavior" | "infrastructure"; scope: "localized" | "bounded" | "broad"; risk: "low" | "medium" | "high"; affectedSurface: "ui" | "copy" | "data" | "behavior" | "infrastructure"; reversible: boolean; executionEligibility: "eligible" | "needs_review"; ciProfile: "visual" | "content" | "behavior" | "data" | "infrastructure" } }): Promise<unknown>;
 	postStatus(input: { issueNumber: number; eventId: string; body: string }): Promise<unknown>;

@@ -61,6 +61,8 @@ export type DispatchPromotionInput = {
 	stackId: string;
 	generation: number;
 	issueNumber: number;
+	/** The durable node identity the trusted gate pins as EXPECTED_NODE. */
+	nodeId: string;
 	parentBranch: string;
 	headSha: string;
 	/** Durable idempotency key used for exactly one workflow dispatch and observation. */
@@ -365,30 +367,38 @@ export class GitHubCapability {
 	}
 
 	async dispatchPromotion(input: DispatchPromotionInput): Promise<{ dispatchKey: string; dispatched: true }> {
-		if (!validIssueNumber(input.pullRequest) || !validIssueNumber(input.issueNumber) || !validIdentifier(input.stackId) || !validIdentifier(input.dispatchKey) || !validIdentifier(input.parentBranch) || !GIT_SHA.test(input.headSha) || !Number.isSafeInteger(input.generation) || input.generation < 1 || !enumValue(input.ciProfile, CI_PROFILES)) {
+		if (!validIssueNumber(input.pullRequest) || !validIssueNumber(input.issueNumber) || !validIdentifier(input.stackId) || !validIdentifier(input.nodeId) || !validIdentifier(input.dispatchKey) || !validIdentifier(input.parentBranch) || !GIT_SHA.test(input.headSha) || !Number.isSafeInteger(input.generation) || input.generation < 1 || !enumValue(input.ciProfile, CI_PROFILES)) {
 			throw new Error("Invalid promotion dispatch input.");
 		}
 		const response = await fetch(`https://api.github.com/repos/${this.env.ALLOWED_REPOSITORY}/actions/workflows/os-stack-promote.yml/dispatches`, {
 			method: "POST",
 			headers: githubHeaders(await this.installationToken()),
 			body: JSON.stringify({ ref: "main", inputs: {
-				pull_request: String(input.pullRequest), stack_id: input.stackId, generation: String(input.generation), issue_number: String(input.issueNumber), parent_branch: input.parentBranch, head_sha: input.headSha, dispatch_key: input.dispatchKey, ci_profile: input.ciProfile,
+				pull_request: String(input.pullRequest), stack_id: input.stackId, generation: String(input.generation), issue_number: String(input.issueNumber), node_id: input.nodeId, parent_branch: input.parentBranch, head_sha: input.headSha, dispatch_key: input.dispatchKey, ci_profile: input.ciProfile,
 			} }),
 		});
 		if (!response.ok) throw new Error(`GitHub promotion dispatch failed (${response.status}).`);
 		return { dispatchKey: input.dispatchKey, dispatched: true };
 	}
 
-	async observeCandidatePullRequest(input: CandidatePullRequestObservationInput): Promise<{ number: number; state: string; merged: boolean; mergeableState: string }> {
+	async observeCandidatePullRequest(input: CandidatePullRequestObservationInput): Promise<{ number: number; state: string; merged: boolean; mergeableState: string; mergeCommitSha: string | null }> {
 		if (!validIssueNumber(input.number)) throw new Error("Invalid candidate pull request observation input.");
 		const response = await fetch(`https://api.github.com/repos/${this.env.ALLOWED_REPOSITORY}/pulls/${input.number}`, { headers: githubHeaders(await this.installationToken()) });
 		if (!response.ok) throw new Error(`GitHub candidate pull request observation failed (${response.status}).`);
-		const body = await response.json() as { state?: unknown; merged?: unknown; mergeable_state?: unknown };
+		const body = await response.json() as { state?: unknown; merged?: unknown; mergeable_state?: unknown; merge_commit_sha?: unknown };
 		if (typeof body.state !== "string" || typeof body.merged !== "boolean") throw new Error("GitHub candidate pull request observation returned an invalid response.");
 		// GitHub computes mergeability lazily; while the background job runs the
 		// field is null. "unknown" is the honest projection: the operator keeps
-		// waiting and re-observes rather than treating it as evidence.
-		return { number: input.number, state: body.state, merged: body.merged, mergeableState: typeof body.mergeable_state === "string" ? body.mergeable_state : "unknown" };
+		// waiting and re-observes rather than treating it as evidence. The merge
+		// commit rides along so a lost merged webhook can be reconciled from
+		// this same bounded observation.
+		return {
+			number: input.number,
+			state: body.state,
+			merged: body.merged,
+			mergeableState: typeof body.mergeable_state === "string" ? body.mergeable_state : "unknown",
+			mergeCommitSha: typeof body.merge_commit_sha === "string" && GIT_SHA.test(body.merge_commit_sha) ? body.merge_commit_sha : null,
+		};
 	}
 
 	async observeCandidateValidation(input: CandidateValidationObservationInput): Promise<{ runId: number; status: string; conclusion: string | null; url: string; createdAt: string } | null> {

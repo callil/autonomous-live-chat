@@ -28,6 +28,8 @@ type CandidatePlan = {
 		parentBaseSha: string | null;
 		pullRequestBase: string;
 		issueNumber: number;
+		/** The exact branch order beneath this node in the room's shared stack, from the ledger's record; empty for a root node. */
+		expectedOrder: string[];
 	};
 };
 type AgentSummary = { model: string; responseIds: string[]; tools: string[] };
@@ -37,6 +39,10 @@ type RunIds = { sandboxId: string; sessionId: string; runId: string; checkoutDir
 const JOB_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/u;
 const BRANCH = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,159}$/u;
 const SHA = /^[0-9a-f]{40}$/iu;
+/** A sibling parent inside the room stack is always a canonical node branch. */
+const STACK_PARENT = /^app-harness-os\/\d+\/g\d+$/u;
+/** Bounded, well above the room's implement slots: the stack can never grow this deep. */
+const EXPECTED_ORDER_MAX = 16;
 const RUNNER_IMAGE_REVISION = "da052-async015";
 // The SDK-side process timeout. This MUST sit strictly above the in-container
 // RUN_DEADLINE_MS (300s) plus the watchdog's emit-and-callback grace (~17s):
@@ -128,20 +134,38 @@ function safeCandidate(input: unknown): CandidatePlan | null {
 	const pullRequestBase = safeBranch(rawStack.pullRequestBase);
 	const parentBaseSha = rawStack.parentBaseSha === null ? null : typeof rawStack.parentBaseSha === "string" && SHA.test(rawStack.parentBaseSha) ? rawStack.parentBaseSha : undefined;
 	const issueNumber = rawStack.issueNumber;
-	if (!stackId || !nodeId || !branch || !parentBranch || !pullRequestBase || parentBaseSha === undefined || !Number.isInteger(issueNumber) || (issueNumber as number) < 1) return null;
+	const expectedOrder = safeExpectedOrder(rawStack.expectedOrder);
+	if (!stackId || !nodeId || !branch || !parentBranch || !pullRequestBase || parentBaseSha === undefined || !expectedOrder || !Number.isInteger(issueNumber) || (issueNumber as number) < 1) return null;
 	if (pullRequestBase !== parentBranch || (parentBranch !== "main" && parentBaseSha === null)) return null;
 	return {
 		change: { kind: "repository-task", request: rawChange.request.trim(), ciProfile: typeof rawChange.ciProfile === "string" ? rawChange.ciProfile : undefined },
-		stack: { stackId, nodeId, branch, parentBranch, parentBaseSha, pullRequestBase, issueNumber: issueNumber as number },
+		stack: { stackId, nodeId, branch, parentBranch, parentBaseSha, pullRequestBase, issueNumber: issueNumber as number, expectedOrder },
 	};
 }
 
-function isOneNodeStack(candidate: CandidatePlan, generation: number): boolean {
-	return candidate.stack.nodeId === "root"
-		&& candidate.stack.parentBranch === "main"
-		&& candidate.stack.pullRequestBase === "main"
-		&& candidate.stack.parentBaseSha !== null
-		&& candidate.stack.branch === `app-harness-os/${candidate.stack.issueNumber}/g${generation}`;
+/** The exact branch order beneath this node, from the ledger's room-stack record; absent means empty (the root case). */
+function safeExpectedOrder(value: unknown): string[] | null {
+	if (value === undefined) return [];
+	if (!Array.isArray(value) || value.length > EXPECTED_ORDER_MAX) return null;
+	const order = value.map(safeBranch);
+	return order.every((entry): entry is string => entry !== null) ? order : null;
+}
+
+/**
+ * A canonical durable stack-node plan: the root node stacks on main with
+ * nothing beneath it; a dependent node stacks on a pinned canonical sibling,
+ * targets that parent, and knows the exact branch order below it.
+ */
+function isCanonicalStackNode(candidate: CandidatePlan, generation: number): boolean {
+	const stack = candidate.stack;
+	if (stack.parentBaseSha === null || stack.branch !== `app-harness-os/${stack.issueNumber}/g${generation}`) return false;
+	if (stack.parentBranch === "main") {
+		return stack.nodeId === "root" && stack.pullRequestBase === "main" && stack.expectedOrder.length === 0;
+	}
+	return stack.nodeId !== "root"
+		&& STACK_PARENT.test(stack.parentBranch)
+		&& stack.pullRequestBase === stack.parentBranch
+		&& stack.expectedOrder.at(-1) === stack.parentBranch;
 }
 
 function classifySandboxFailure(error: unknown): "sandbox-capacity-exhausted" | "sandbox-runtime-updating" | "sandbox-unavailable" {
@@ -223,13 +247,13 @@ function parseArtifactLine(line: string, job: SafeJob, model: string): Record<st
 		const topology = stack.topology as Record<string, unknown> | undefined;
 		if (
 			typeof stack.id === "string" && JOB_ID.test(stack.id)
-			&& stack.nodeId === "root"
+			&& typeof stack.nodeId === "string" && JOB_ID.test(stack.nodeId)
 			&& typeof stack.branch === "string" && safeBranch(stack.branch)
-			&& stack.parentBranch === "main"
+			&& typeof stack.parentBranch === "string" && (stack.parentBranch === "main" || STACK_PARENT.test(stack.parentBranch))
 			&& topology?.trunk === "main"
 			&& topology.branch === stack.branch
 			&& typeof topology.baseSha === "string" && SHA.test(topology.baseSha)
-		) result.stack = { id: stack.id, generation: job.generation, nodeId: "root", branch: stack.branch, parentBranch: "main", topology: { trunk: "main", branch: stack.branch, baseSha: topology.baseSha.toLowerCase() } };
+		) result.stack = { id: stack.id, generation: job.generation, nodeId: stack.nodeId, branch: stack.branch, parentBranch: stack.parentBranch, topology: { trunk: "main", branch: stack.branch, baseSha: topology.baseSha.toLowerCase() } };
 	}
 	return result;
 }
@@ -273,7 +297,7 @@ export class NativeGitRunner extends WorkerEntrypoint<Env> {
 		const job = safeJob(input, this.env);
 		const candidate = input.candidate === undefined ? null : safeCandidate(input.candidate);
 		if (!job || (input.candidate !== undefined && !candidate)) throw new Error("Native Git job is outside the runner contract.");
-		if (candidate && !isOneNodeStack(candidate, job.generation)) throw new Error("Native Git runner currently accepts only the durable one-node root stack plan.");
+		if (candidate && !isCanonicalStackNode(candidate, job.generation)) throw new Error("Native Git runner accepts only a canonical durable stack-node plan (root on main, or a dependent node on a pinned sibling with its expected order).");
 		const ids = await runIds(job);
 		// Model retirements are a recurring platform failure mode; an env var
 		// makes the swap a config redeploy instead of an image rebuild.

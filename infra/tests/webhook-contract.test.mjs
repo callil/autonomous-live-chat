@@ -90,6 +90,48 @@ assert.equal(extractGithubWebhookFact({ event: "pull_request", payload: { action
 assert.equal(extractGithubWebhookFact({ event: "pull_request", payload: { action: "closed", pull_request: { number: 55, html_url: "https://github.com/callil/autonomous-live-chat/pull/55", merged: true, merge_commit_sha: "short", head: { ref: "app-harness-os/42/g1", sha: SHA_A } } } }), null, "a merged fact requires a full merge commit SHA");
 assert.equal(extractGithubWebhookFact({ event: "pull_request", payload: { action: "closed", pull_request: { number: 55, html_url: "https://github.com/callil/autonomous-live-chat/pull/55", merged: true, merge_commit_sha: MERGE_SHA, head: { ref: "feature/other", sha: SHA_A } } } }), null, "merges outside the candidate branch namespace are dropped");
 
+// ---- native-stack membership facts: the 'stacked' action ----
+// GitHub's stack signal: the PR joined, moved within, or left a server-side
+// stack — and, after the node below merged, was retargeted to the stack's
+// base. The fact carries the PR identity plus its live base and coordinates.
+const stacked = extractGithubWebhookFact({
+	event: "pull_request",
+	payload: {
+		action: "stacked",
+		stack: { id: 900, number: 3, position: 2, size: 2 },
+		pull_request: { number: 56, html_url: "https://github.com/callil/autonomous-live-chat/pull/56", head: { ref: "app-harness-os/43/g1", sha: SHA_B }, base: { ref: "main" } },
+	},
+});
+assert.deepEqual(stacked, { kind: "stack", number: 56, branch: "app-harness-os/43/g1", headSha: SHA_B, base: "main", position: 2, size: 2 }, "a stacked delivery becomes a bounded membership fact carrying the live base — the retarget marker");
+assert.deepEqual(
+	extractGithubWebhookFact({
+		event: "pull_request",
+		payload: { action: "stacked", pull_request: { number: 56, html_url: "https://github.com/callil/autonomous-live-chat/pull/56", head: { ref: "app-harness-os/43/g1", sha: SHA_B }, base: { ref: "app-harness-os/42/g1" }, stack: { position: 2, size: 2 } } },
+	}),
+	{ kind: "stack", number: 56, branch: "app-harness-os/43/g1", headSha: SHA_B, base: "app-harness-os/42/g1", position: 2, size: 2 },
+	"the stack object is read from the pull request when the payload carries it there",
+);
+assert.equal(
+	extractGithubWebhookFact({ event: "pull_request", payload: { action: "stacked", pull_request: { number: 56, html_url: "https://github.com/callil/autonomous-live-chat/pull/56", head: { ref: "app-harness-os/43/g1", sha: SHA_B }, base: { ref: "main" } } } }),
+	null,
+	"a stacked delivery without a stack object carries no membership evidence",
+);
+assert.equal(
+	extractGithubWebhookFact({ event: "pull_request", payload: { action: "stacked", stack: { position: 0, size: 2 }, pull_request: { number: 56, html_url: "https://github.com/callil/autonomous-live-chat/pull/56", head: { ref: "app-harness-os/43/g1", sha: SHA_B }, base: { ref: "main" } } } }),
+	null,
+	"invalid stack coordinates never become evidence",
+);
+assert.equal(
+	extractGithubWebhookFact({ event: "pull_request", payload: { action: "stacked", stack: { position: 1, size: 1 }, pull_request: { number: 56, html_url: "https://github.com/callil/autonomous-live-chat/pull/56", head: { ref: "app-harness-os/43/g1", sha: SHA_B }, base: { ref: "-bad..base/" } } } }),
+	null,
+	"an unsafe base branch name is dropped, never trusted",
+);
+assert.equal(
+	extractGithubWebhookFact({ event: "pull_request", payload: { action: "stacked", stack: { position: 1, size: 1 }, pull_request: { number: 56, html_url: "https://github.com/callil/autonomous-live-chat/pull/56", head: { ref: "feature/other", sha: SHA_B }, base: { ref: "main" } } } }),
+	null,
+	"stack facts outside the candidate branch namespace are dropped",
+);
+
 const mainDeploy = extractGithubWebhookFact({
 	event: "workflow_run",
 	payload: { action: "completed", workflow_run: candidateRun({ path: ".github/workflows/deploy-demo-on-main.yml", event: "push", head_branch: "main", head_sha: MERGE_SHA }) },
@@ -100,9 +142,11 @@ assert.equal(extractGithubWebhookFact({ event: "workflow_run", payload: { action
 assert.equal(extractGithubWebhookFact({ event: "workflow_run", payload: { action: "completed", workflow_run: candidateRun({ path: ".github/workflows/deploy-demo-on-main.yml", event: "pull_request_target", head_branch: "main", head_sha: MERGE_SHA }) } }), null, "only push and workflow_dispatch deploy runs are trusted");
 
 // ---- boundary re-validation round-trips every extracted fact ----
-for (const fact of [validation, promotion, candidate, merged, mainDeploy]) {
+for (const fact of [validation, promotion, candidate, merged, mainDeploy, stacked]) {
 	assert.deepEqual(normalizeGithubWebhookFact(JSON.parse(JSON.stringify(fact))), fact, `${fact.kind} fact survives the service boundary`);
 }
+assert.equal(normalizeGithubWebhookFact({ ...stacked, position: 3 }), null, "stack coordinates outside the recorded size die at the boundary");
+assert.equal(normalizeGithubWebhookFact({ ...stacked, base: "-bad..base/" }), null, "an unsafe base dies at the boundary");
 assert.equal(normalizeGithubWebhookFact({ kind: "validation", runId: 900, url: RUN_URL, conclusion: "success", createdAt: "2026-08-06T20:00:00Z", headSha: "short" }), null);
 assert.equal(normalizeGithubWebhookFact({ kind: "promotion", runId: 900, url: RUN_URL, conclusion: "success", createdAt: "2026-08-06T20:00:00Z", dispatchKey: "bad key" }), null);
 assert.equal(normalizeGithubWebhookFact({ kind: "promotion", runId: 900, url: RUN_URL, conclusion: "success", createdAt: "2026-08-06T20:00:00Z", dispatchKey: null }), null, "an unresolved promotion identity dies at the ledger boundary: the bridge must resolve or drop");
@@ -123,6 +167,9 @@ assert.equal(matchGithubFactToWorkItem(candidate, items), "item-old", "candidate
 assert.equal(matchGithubFactToWorkItem(merged, items), "item-old", "a merged fact matches by the recorded candidate head revision");
 assert.equal(matchGithubFactToWorkItem({ ...merged, headSha: SHA_B }, items), "item-old", "a merged fact still matches by the plan branch when the head revision is unrecorded");
 assert.equal(matchGithubFactToWorkItem({ ...merged, headSha: SHA_B, branch: "app-harness-os/99/g1" }, items), null, "a merge outside every live identity is dropped");
+assert.equal(matchGithubFactToWorkItem(stacked, items), "item-new", "a stack fact matches by the plan branch");
+assert.equal(matchGithubFactToWorkItem({ ...stacked, branch: "app-harness-os/99/g1", headSha: SHA_A }, items), "item-old", "a stack fact also matches by the recorded candidate head revision");
+assert.equal(matchGithubFactToWorkItem({ ...stacked, branch: "app-harness-os/99/g1" }, items), null, "a stack fact outside every live identity is dropped");
 // A main deploy is evidence for every live item it provably contains: the
 // exact merge-commit join, plus containment by ordering — main history is
 // linear, so a successful run created after an item's merged fact deployed a
@@ -174,6 +221,13 @@ assert.deepEqual(withDeploy.mainDeploy, { runId: 900, url: RUN_URL, conclusion: 
 assert.equal(mergeGithubFact(withDeploy, mainDeploy, 9_000), null, "a redelivered identical deploy run adds nothing");
 assert.equal(mergeGithubFact(withDeploy, { ...mainDeploy, conclusion: null }, 9_000), null, "a null conclusion never downgrades recorded deploy evidence");
 assert.equal(mergeGithubFact(withDeploy, { ...mainDeploy, runId: 902, createdAt: "2026-08-06T22:00:00Z", conclusion: "failure" }, 9_000).mainDeploy.runId, 902, "a newer deploy run replaces the recorded one");
+
+// ---- stack membership merge: last coordinates win, idempotent per state ----
+const withStack = mergeGithubFact(withDeploy, stacked, 10_000);
+assert.deepEqual(withStack.stack, { number: 56, branch: "app-harness-os/43/g1", headSha: SHA_B, base: "main", position: 2, size: 2, at: 10_000 }, "stack membership records under its own key");
+assert.equal(withStack.merged.mergeCommitSha, MERGE_SHA, "the stack fact never disturbs recorded merge evidence");
+assert.equal(mergeGithubFact(withStack, stacked, 11_000), null, "a redelivered identical membership state adds nothing");
+assert.equal(mergeGithubFact(withStack, { ...stacked, position: 1, size: 1 }, 11_000).stack.position, 1, "changed coordinates (the retarget, or the stack shrinking) replace the recorded state");
 
 // ---- transport dedupe: delivery GUID markers with bounded retention ----
 assert.equal(normalizeGithubDeliveryId("72d3162e-cc78-11e3-81ab-4c9367dc0958"), "72d3162e-cc78-11e3-81ab-4c9367dc0958");

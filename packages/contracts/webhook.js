@@ -10,6 +10,11 @@
 const SHA = /^[0-9a-f]{40}$/u;
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,191}$/u;
 const DELIVERY_ID = /^[A-Za-z0-9][A-Za-z0-9-]{0,99}$/u;
+const BRANCH = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,159}$/u;
+
+function safeBaseBranch(value) {
+	return typeof value === "string" && BRANCH.test(value) && !value.includes("..") && !value.endsWith("/") && !value.startsWith("-") ? value : null;
+}
 
 export const GITHUB_CANDIDATE_WORKFLOW_PATH = ".github/workflows/os-stack-ci.yml";
 export const GITHUB_PROMOTION_WORKFLOW_PATH = ".github/workflows/os-stack-promote.yml";
@@ -134,6 +139,20 @@ export function extractGithubWebhookFact({ event, payload }) {
 			if (typeof pull.merge_commit_sha !== "string" || !SHA.test(pull.merge_commit_sha)) return null;
 			return { kind: "merged", number: pull.number, url, headSha: pull.head.sha, branch: pull.head.ref, mergeCommitSha: pull.merge_commit_sha };
 		}
+		if (payload.action === "stacked") {
+			// GitHub's native-stack membership signal: the PR joined, moved
+			// within, or left a server-side stack — and, after the node below
+			// merged, was retargeted to the stack's base without a rebase. The
+			// bounded fact carries the PR identity plus its live base and stack
+			// coordinates; the room compares the base to the node's recorded
+			// parent to mark a retargeted survivor.
+			const stack = payload.stack && typeof payload.stack === "object" ? payload.stack : pull.stack && typeof pull.stack === "object" ? pull.stack : null;
+			if (!stack) return null;
+			const base = safeBaseBranch(pull.base?.ref);
+			if (!base) return null;
+			if (!Number.isSafeInteger(stack.position) || stack.position < 1 || !Number.isSafeInteger(stack.size) || stack.size < stack.position) return null;
+			return { kind: "stack", number: pull.number, branch: pull.head.ref, headSha: pull.head.sha, base, position: stack.position, size: stack.size };
+		}
 		return null;
 	}
 	return null;
@@ -151,6 +170,14 @@ export function normalizeGithubWebhookFact(value) {
 			return typeof value.dispatchKey === "string" && IDENTIFIER.test(value.dispatchKey) ? { kind: "promotion", ...base, dispatchKey: value.dispatchKey } : null;
 		}
 		return typeof value.headSha === "string" && SHA.test(value.headSha) ? { kind: value.kind, ...base, headSha: value.headSha } : null;
+	}
+	if (value.kind === "stack") {
+		const base = safeBaseBranch(value.base);
+		if (!Number.isSafeInteger(value.number) || value.number < 1 || !base) return null;
+		if (typeof value.branch !== "string" || !value.branch.startsWith(GITHUB_CANDIDATE_BRANCH_PREFIX)) return null;
+		if (typeof value.headSha !== "string" || !SHA.test(value.headSha)) return null;
+		if (!Number.isSafeInteger(value.position) || value.position < 1 || !Number.isSafeInteger(value.size) || value.size < value.position) return null;
+		return { kind: "stack", number: value.number, branch: value.branch, headSha: value.headSha, base, position: value.position, size: value.size };
 	}
 	if (value.kind === "candidate" || value.kind === "merged") {
 		const url = githubHtmlUrl(value.url);
@@ -185,9 +212,9 @@ export function matchGithubFactToWorkItem(fact, items, promotions = []) {
 	if (fact.kind === "candidate") {
 		return ordered.find((item) => item.plan?.branch === fact.branch)?.id ?? null;
 	}
-	if (fact.kind === "merged") {
-		// The merged PR carries both immutable candidate identities: prefer the
-		// recorded candidate head revision, fall back to the plan branch.
+	if (fact.kind === "merged" || fact.kind === "stack") {
+		// The pull request carries both immutable candidate identities: prefer
+		// the recorded candidate head revision, fall back to the plan branch.
 		return ordered.find((item) => item.artifacts?.candidate?.headSha === fact.headSha || item.plan?.branch === fact.branch)?.id ?? null;
 	}
 	return null;
@@ -249,6 +276,13 @@ export function mergeGithubFact(existing, fact, now) {
 		// Idempotent per merge commit: a candidate merges exactly once.
 		if (facts.merged && facts.merged.mergeCommitSha === fact.mergeCommitSha) return null;
 		return { ...facts, merged: { number: fact.number, url: fact.url, headSha: fact.headSha, branch: fact.branch, mergeCommitSha: fact.mergeCommitSha, at: now } };
+	}
+	if (fact.kind === "stack") {
+		// Last coordinates win, idempotent per exact membership state: only a
+		// changed base, position, size, or head is new evidence.
+		const current = facts.stack;
+		if (current && current.headSha === fact.headSha && current.base === fact.base && current.position === fact.position && current.size === fact.size) return null;
+		return { ...facts, stack: { number: fact.number, branch: fact.branch, headSha: fact.headSha, base: fact.base, position: fact.position, size: fact.size, at: now } };
 	}
 	return null;
 }

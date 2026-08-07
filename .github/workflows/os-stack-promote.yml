@@ -8,6 +8,7 @@ on:
       stack_id: { required: true, type: string }
       generation: { required: true, type: string }
       issue_number: { required: true, type: string }
+      node_id: { required: true, type: string }
       parent_branch: { required: true, type: string }
       head_sha: { required: true, type: string }
       dispatch_key: { required: true, type: string }
@@ -47,16 +48,23 @@ jobs:
       EXPECTED_ISSUE: ${{ inputs.issue_number }}
       EXPECTED_GENERATION: ${{ inputs.generation }}
       EXPECTED_STACK: ${{ inputs.stack_id }}
+      EXPECTED_NODE: ${{ inputs.node_id }}
       # Promotion verifies against the server-side stack object: the candidate
       # must be the bottom open member of its stack, so the cascade merge below
       # can only ever land exactly this one pull request.
       REQUIRE_BOTTOM: "true"
     steps:
-      - name: Require the currently supported one-node stack promotion policy
+      - name: Require the canonical stack promotion policy
         env:
           CI_PROFILE: ${{ inputs.ci_profile }}
         run: |
-          test "$EXPECTED_PARENT" = main
+          # The bottom node's parent is main; a retargeted survivor's recorded
+          # parent is a canonical sibling node branch. Nothing else promotes.
+          case "$EXPECTED_PARENT" in
+            main) ;;
+            app-harness-os/*/g*) ;;
+            *) echo "Unsupported stack parent: $EXPECTED_PARENT"; exit 1 ;;
+          esac
           case "$CI_PROFILE" in
             visual|content|behavior|data|infrastructure) ;;
             *) echo "Unsupported CI profile: $CI_PROFILE"; exit 1 ;;
@@ -152,6 +160,7 @@ jobs:
       EXPECTED_ISSUE: ${{ inputs.issue_number }}
       EXPECTED_GENERATION: ${{ inputs.generation }}
       EXPECTED_STACK: ${{ inputs.stack_id }}
+      EXPECTED_NODE: ${{ inputs.node_id }}
       CURRENT_MAIN: ${{ needs.prepare.outputs.current_main_sha }}
       ALREADY_MERGED: ${{ needs.prepare.outputs.already_merged }}
       RECORDED_MERGE_SHA: ${{ needs.prepare.outputs.merge_sha }}

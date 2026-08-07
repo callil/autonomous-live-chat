@@ -59,6 +59,11 @@ export async function executeCommand(env: ExecuteEnv, workItem: LedgerWorkItem, 
 						parentBaseSha: workItem.plan.parentBaseSha,
 						pullRequestBase: workItem.plan.pullRequestBase,
 						issueNumber: workItem.plan.issueNumber,
+						// The room-stack order beneath this node, loop-supplied
+						// from the ledger snapshot (never model-typed): the
+						// runner asserts the server-side stack shows exactly
+						// these branches under the new node.
+						expectedOrder: command.expectedOrder ?? [],
 					},
 				},
 			});
@@ -74,7 +79,7 @@ export async function executeCommand(env: ExecuteEnv, workItem: LedgerWorkItem, 
 			return { disposition: started.disposition, implementationRunId: command.runId, ledger: workItemReceipt(started.item), runner };
 		}
 		case "record-candidate": {
-			await postIssueStatus(env, workItem, "candidate", `### Pull request ready\n\n[PR #${command.pullRequestNumber}](${command.pullRequestUrl}) is the root node of this request's one-node stack. Candidate CI is running against immutable head \`${command.headSha}\`.`);
+			await postIssueStatus(env, workItem, "candidate", `### Pull request ready\n\n[PR #${command.pullRequestNumber}](${command.pullRequestUrl}) is this request's node in the room's merge train. Candidate CI is running against immutable head \`${command.headSha}\`.`);
 			return workItemReceipt(await env.LEDGER.recordCandidate({ workItemId: workItem.id, runId: command.runId, branch: command.branch, headSha: command.headSha, pullRequestNumber: command.pullRequestNumber, pullRequestUrl: command.pullRequestUrl, message: command.message }));
 		}
 		case "promote": {
@@ -84,6 +89,9 @@ export async function executeCommand(env: ExecuteEnv, workItem: LedgerWorkItem, 
 				stackId: workItem.plan.stackId,
 				generation: workItem.plan.generation,
 				issueNumber: workItem.plan.issueNumber,
+				// The durable node identity rides the dispatch so the trusted
+				// gate can pin the PR's node provenance marker (EXPECTED_NODE).
+				nodeId: workItem.plan.nodeId,
 				parentBranch: workItem.plan.parentBranch,
 				headSha: command.headSha,
 				dispatchKey: command.dispatchKey,
