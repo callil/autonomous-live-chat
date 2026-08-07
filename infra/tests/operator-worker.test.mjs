@@ -77,8 +77,8 @@ assert.throws(() => commandFor("inventedMethod", {}, ctx), /Unknown operator sta
 // ---- operator worker: event-driven turns with adaptive budgets ----
 assert.match(operatorWorker, /snapshotWorkItem\(\{ workItemId \}\)/u, "each turn reads a fresh authoritative ledger snapshot at start");
 assert.match(operatorWorker, /stageOperatorAction\(\{ workItemId: turn\.workItemId, expectedVersion: turn\.version, command \}\)/u, "every command is durably staged before execution");
-assert.match(operatorWorker, /beginOperatorAction/u);
-assert.match(operatorWorker, /completeOperatorAction/u);
+assert.match(operatorWorker, /beginOperatorAction\(\{ workItemId: turn\.workItemId, actionId: staged\.id \}\)/u, "action execution addresses the per-item action key space");
+assert.match(operatorWorker, /completeOperatorAction\(\{ workItemId: turn\.workItemId, actionId: staged\.id/u);
 assert.match(operatorWorker, /rejectOperatorAction/u, "execution failure is recorded as a ledger rejection the model sees in-turn");
 assert.doesNotMatch(operatorWorker, /recordOperatorNote|wakeKey|responseLease|NOTE_RETRY|leaseId/u, "the note/wake settlement protocol died with the wake records");
 assert.match(operatorWorker, /TURN_ENVELOPE_MS = 10 \* 60_000/u, "the generous outer envelope replaces the fixed turn wall clock");
@@ -119,6 +119,9 @@ assert.match(demoWorker, /this\.ctx\.waitUntil/u, "pokes are fire-and-forget, ne
 assert.match(demoWorker, /SWEEP_INTERVAL_MS = 2 \* 60_000/u, "one slow ledger-side sweep is the final safety net");
 assert.match(demoWorker, /OPERATOR_POKE_CAP = 200/u, "the lifetime poke budget is the runaway brake");
 assert.match(demoWorker, /needs_review/u, "the poke cap parks to needs_review instead of spinning");
+assert.match(demoWorker, /origin: "event" \| "sweep" = "event"/u, "a poke declares its origin");
+assert.match(demoWorker, /if \(origin === "event"\) \{/u, "only event-driven pokes consume the lifetime cap");
+assert.match(demoWorker, /this\.pokeOperator\(item, "sweep"\)/u, "sweep re-pokes are free: they measure time queued, not activity, so queueing alone can never park healthy work");
 assert.doesNotMatch(demoWorker, /WakeRecord|queueOperatorWakeRecord|beginOperatorWakeDelivery|settleOperatorWakeRecord|operatorWakeDeliveryExhausted|ledger-wake|recordOperatorNote|requireLease|leaseId|resumeAt/u, "no wake-record or lease machinery survives in the ledger");
 assert.match(demoConfig, /"binding": "OPERATOR"/u);
 assert.match(demoConfig, /"service": "app-harness-operator"/u);
@@ -133,9 +136,9 @@ assert.match(SYSTEM_PROMPT, /phase retryable \(the failed run was already cleare
 assert.match(SYSTEM_PROMPT, /never wait for a cleared run/u, "the wedge — waiting on a dead generation — is named and forbidden");
 
 // ---- fast-lane facts: honest joins in the ledger and snapshot ----
-assert.match(demoWorker, /matchGithubFactToWorkItem\(parsed\.fact, live, promotions, merges\)/u, "main-deploy matching receives the per-item merge commits");
+assert.match(demoWorker, /matchGithubMainDeployToWorkItems\(fact, live, merges\)/u, "main-deploy matching receives the per-item merge commits and may match several contained merges");
 assert.match(demoWorker, /facts\?\.merged\?\.mergeCommitSha/u, "the merge join key comes from each live item's recorded merged fact");
-assert.match(demoWorker, /facts\.mainDeploy\.headSha === merged\.mergeCommitSha/u, "the snapshot only ever shows a deploy of this item's own merge commit");
+assert.match(demoWorker, /facts\.mainDeploy\.headSha === merged\.mergeCommitSha \|\| \(facts\.mainDeploy\.conclusion === "success" && Date\.parse\(facts\.mainDeploy\.createdAt\) > merged\.at\)/u, "the snapshot shows a deploy of this item's merge commit exactly, or a later successful deploy that provably contains it");
 assert.match(demoWorker, /candidateArtifact\?\.headSha === facts\.merged\.headSha/u, "the merged fact is gated by the recorded candidate's immutable head revision");
 
 // ---- user-visible source label: never "cloudflare os" ----

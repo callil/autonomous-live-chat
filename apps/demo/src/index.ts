@@ -25,6 +25,7 @@ import {
 	GITHUB_DELIVERY_MARKER_PREFIX,
 	githubDeliveryMarkerKey,
 	matchGithubFactToWorkItem,
+	matchGithubMainDeployToWorkItems,
 	mergeGithubFact,
 	normalizeGithubDeliveryId,
 	normalizeGithubWebhookFact,
@@ -205,9 +206,9 @@ export class LedgerService extends WorkerEntrypoint<RuntimeEnv> {
 	recordExternalState(input: { workItemId: string; phase: Extract<LedgerPhase, "validating" | "promoting" | "deployed" | "completed" | "retryable" | "needs_review" | "rejected">; artifacts?: Record<string, unknown>; message: string; source: LedgerEvent["source"] }): Promise<StoredWorkItem> { return this.room().recordExternalState(input); }
 	recordArtifacts(input: { workItemId: string; artifacts: Record<string, unknown>; message: string; source: LedgerEvent["source"] }): Promise<StoredWorkItem> { return this.room().recordArtifacts(input); }
 	stageOperatorAction(input: { workItemId: string; expectedVersion: number; command: OperatorCommand }): Promise<StoredOperatorAction> { return this.room().stageOperatorAction(input); }
-	beginOperatorAction(input: { actionId: number }): Promise<{ disposition: "execute" | "busy" | "applied" | "rejected" | "stale"; action: StoredOperatorAction; workItem: StoredWorkItem; executionToken?: string }> { return this.room().beginOperatorAction(input); }
-	completeOperatorAction(input: { actionId: number; idempotencyKey: string; executionToken: string; result: unknown }): Promise<StoredOperatorAction> { return this.room().completeOperatorAction(input); }
-	rejectOperatorAction(input: { actionId: number; executionToken: string; error?: string }): Promise<StoredOperatorAction> { return this.room().rejectOperatorAction(input); }
+	beginOperatorAction(input: { workItemId: string; actionId: number }): Promise<{ disposition: "execute" | "busy" | "applied" | "rejected" | "stale"; action: StoredOperatorAction; workItem: StoredWorkItem; executionToken?: string }> { return this.room().beginOperatorAction(input); }
+	completeOperatorAction(input: { workItemId: string; actionId: number; idempotencyKey: string; executionToken: string; result: unknown }): Promise<StoredOperatorAction> { return this.room().completeOperatorAction(input); }
+	rejectOperatorAction(input: { workItemId: string; actionId: number; executionToken: string; error?: string }): Promise<StoredOperatorAction> { return this.room().rejectOperatorAction(input); }
 	ingestExternalFact(input: unknown): Promise<{ accepted: boolean }> { return this.room().ingestExternalFact(input); }
 }
 
@@ -393,7 +394,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		const key = operatorActionEffectKey(workItem.id, input.command);
 		const existingId = await this.ctx.storage.get<number>(`${ACTION_KEY_PREFIX}${key}`);
 		if (existingId !== undefined) {
-			const existing = await this.ctx.storage.get<StoredOperatorAction>(`${ACTION_PREFIX}${existingId}`);
+			const existing = await this.ctx.storage.get<StoredOperatorAction>(this.actionKey(workItem.id, existingId));
 			// A rejected action produced no external effect, so its semantic key is
 			// free again: the operator may stage a corrected command in its place.
 			if (existing && existing.status !== "rejected") return existing;
@@ -406,19 +407,19 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 			assertOperatorCommandAllowed(current, input.command);
 			const duplicateId = await txn.get<number>(`${ACTION_KEY_PREFIX}${key}`);
 			if (duplicateId !== undefined) {
-				const duplicate = await txn.get<StoredOperatorAction>(`${ACTION_PREFIX}${duplicateId}`);
+				const duplicate = await txn.get<StoredOperatorAction>(this.actionKey(current.id, duplicateId));
 				if (duplicate && duplicate.status !== "rejected") return duplicate;
 			}
 			const activeId = await txn.get<number>(`${ACTION_ACTIVE_PREFIX}${current.id}`);
 			if (activeId !== undefined) {
-				const active = await txn.get<StoredOperatorAction>(`${ACTION_PREFIX}${activeId}`);
+				const active = await txn.get<StoredOperatorAction>(this.actionKey(current.id, activeId));
 				if (active && !["applied", "rejected"].includes(active.status)) throw new Error(`Operator action ${active.id} must reconcile before another mutation can be staged.`);
 			}
 			const id = ((await txn.get<number>(ACTION_COUNTER_KEY)) ?? 0) + 1;
 			if (!Number.isSafeInteger(id)) throw new Error("Operator action counter is exhausted.");
 			const now = Date.now();
 			const action: StoredOperatorAction = { id, workItemId: current.id, expectedVersion: current.version, idempotencyKey: key, command: input.command, status: "staged", attempts: 0, createdAt: now, updatedAt: now };
-			await Promise.all([txn.put(ACTION_COUNTER_KEY, id), txn.put(`${ACTION_PREFIX}${id}`, action), txn.put(`${ACTION_KEY_PREFIX}${key}`, id), txn.put(`${ACTION_ACTIVE_PREFIX}${current.id}`, id)]);
+			await Promise.all([txn.put(ACTION_COUNTER_KEY, id), txn.put(this.actionKey(current.id, id), action), txn.put(`${ACTION_KEY_PREFIX}${key}`, id), txn.put(`${ACTION_ACTIVE_PREFIX}${current.id}`, id)]);
 			return action;
 		});
 		await this.appendActionEvent(workItem.id, workItem.phase, `The operator staged ${action.command.kind.replaceAll("-", " ")}.`);
@@ -427,17 +428,20 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 
 	async listOperatorActions(input: { workItemId: string }): Promise<StoredOperatorAction[]> {
 		if (!isUuid(input.workItemId)) throw new Error("Operator action work-item ID is invalid.");
+		// Actions are keyed per work item, so this scan reads only this item's
+		// records — never the room's whole action history.
 		const actions: StoredOperatorAction[] = [];
-		for await (const page of this.storagePages<StoredOperatorAction>(ACTION_PREFIX)) {
-			for (const action of page.values()) if (action.workItemId === input.workItemId) actions.push(action);
+		for await (const page of this.storagePages<StoredOperatorAction>(`${ACTION_PREFIX}${input.workItemId}:`)) {
+			for (const action of page.values()) actions.push(action);
 		}
 		return actions.toSorted((left, right) => left.id - right.id);
 	}
 
-	async beginOperatorAction(input: { actionId: number }): Promise<{ disposition: "execute" | "busy" | "applied" | "rejected" | "stale"; action: StoredOperatorAction; workItem: StoredWorkItem; executionToken?: string }> {
+	async beginOperatorAction(input: { workItemId: string; actionId: number }): Promise<{ disposition: "execute" | "busy" | "applied" | "rejected" | "stale"; action: StoredOperatorAction; workItem: StoredWorkItem; executionToken?: string }> {
+		if (!isUuid(input.workItemId)) throw new Error("Operator action work-item ID is invalid.");
 		if (!Number.isSafeInteger(input.actionId) || input.actionId < 1) throw new Error("Operator action ID is invalid.");
 		const begun = await this.ctx.storage.transaction(async (txn) => {
-			const action = await txn.get<StoredOperatorAction>(`${ACTION_PREFIX}${input.actionId}`);
+			const action = await txn.get<StoredOperatorAction>(this.actionKey(input.workItemId, input.actionId));
 			if (!action) throw new Error("Unknown operator action.");
 			const workItem = await txn.get<StoredWorkItem>(this.workItemKey(action.workItemId));
 			if (!workItem) throw new Error("Operator action lost its work item.");
@@ -445,7 +449,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 			if (action.status === "rejected") return { disposition: "rejected" as const, action, workItem };
 			if (action.status === "needs_reconciliation" && operatorCommandEffectSatisfied(workItem, action.command)) {
 				const reconciled: StoredOperatorAction = { ...action, status: "applied", result: { reconciled: true, workItemVersion: workItem.version }, executionToken: undefined, leaseExpiresAt: undefined, updatedAt: Date.now() };
-				await Promise.all([txn.put(`${ACTION_PREFIX}${action.id}`, reconciled), txn.delete(`${ACTION_ACTIVE_PREFIX}${action.workItemId}`)]);
+				await Promise.all([txn.put(this.actionKey(action.workItemId, action.id), reconciled), txn.delete(`${ACTION_ACTIVE_PREFIX}${action.workItemId}`)]);
 				return { disposition: "applied" as const, action: reconciled, workItem };
 			}
 			const now = Date.now();
@@ -454,7 +458,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 			try { assertOperatorCommandAllowed(workItem, action.command); } catch { return { disposition: "stale" as const, action, workItem }; }
 			const executionToken = crypto.randomUUID();
 			const applying: StoredOperatorAction = { ...action, status: "applying", attempts: action.attempts + 1, executionToken, leaseExpiresAt: now + ACTION_APPLY_LEASE_MS, updatedAt: now };
-			await txn.put(`${ACTION_PREFIX}${action.id}`, applying);
+			await txn.put(this.actionKey(action.workItemId, action.id), applying);
 			return { disposition: "execute" as const, action: applying, workItem, executionToken };
 		});
 		if (begun.disposition === "execute") {
@@ -463,17 +467,18 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		return begun;
 	}
 
-	async completeOperatorAction(input: { actionId: number; idempotencyKey: string; executionToken: string; result: unknown }): Promise<StoredOperatorAction> {
+	async completeOperatorAction(input: { workItemId: string; actionId: number; idempotencyKey: string; executionToken: string; result: unknown }): Promise<StoredOperatorAction> {
+		if (!isUuid(input.workItemId)) throw new Error("Operator action work-item ID is invalid.");
 		const completed = await this.ctx.storage.transaction(async (txn) => {
-			const action = await txn.get<StoredOperatorAction>(`${ACTION_PREFIX}${input.actionId}`);
+			const action = await txn.get<StoredOperatorAction>(this.actionKey(input.workItemId, input.actionId));
 			if (!action || action.idempotencyKey !== input.idempotencyKey) throw new Error("Operator action completion does not match its durable reservation.");
 			if (action.status === "applied") return action;
 			if (action.executionToken !== input.executionToken) throw new Error("Operator action completion lost its execution lease.");
 			if (action.status !== "applying") throw new Error("Only an applying operator action can complete.");
 			if ((action.leaseExpiresAt ?? 0) <= Date.now()) throw new Error("Operator action execution lease expired before completion.");
 			const completed: StoredOperatorAction = { ...action, status: "applied", result: input.result, executionToken: undefined, leaseExpiresAt: undefined, updatedAt: Date.now() };
-			if (!fitsDurableRecord(`${ACTION_PREFIX}${action.id}`, completed)) throw new Error("Operator action result exceeds one durable record.");
-			await Promise.all([txn.put(`${ACTION_PREFIX}${action.id}`, completed), txn.delete(`${ACTION_ACTIVE_PREFIX}${action.workItemId}`)]);
+			if (!fitsDurableRecord(this.actionKey(action.workItemId, action.id), completed)) throw new Error("Operator action result exceeds one durable record.");
+			await Promise.all([txn.put(this.actionKey(action.workItemId, action.id), completed), txn.delete(`${ACTION_ACTIVE_PREFIX}${action.workItemId}`)]);
 			return completed;
 		});
 		const workItem = await this.loadWorkItem(completed.workItemId);
@@ -481,15 +486,16 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		return completed;
 	}
 
-	async rejectOperatorAction(input: { actionId: number; executionToken: string; error?: string }): Promise<StoredOperatorAction> {
+	async rejectOperatorAction(input: { workItemId: string; actionId: number; executionToken: string; error?: string }): Promise<StoredOperatorAction> {
+		if (!isUuid(input.workItemId)) throw new Error("Operator action work-item ID is invalid.");
 		const failure = typeof input.error === "string" && input.error.trim() ? input.error.trim().replace(/\s+/gu, " ").slice(0, 500) : undefined;
 		const rejected = await this.ctx.storage.transaction(async (txn) => {
-			const action = await txn.get<StoredOperatorAction>(`${ACTION_PREFIX}${input.actionId}`);
+			const action = await txn.get<StoredOperatorAction>(this.actionKey(input.workItemId, input.actionId));
 			if (!action) throw new Error("Unknown operator action.");
 			if (action.status === "applied") throw new Error("Applied operator actions cannot be rejected.");
 			if (action.status !== "applying" || action.executionToken !== input.executionToken || (action.leaseExpiresAt ?? 0) <= Date.now()) throw new Error("Operator action rejection lost its execution lease.");
 			const rejected: StoredOperatorAction = { ...action, status: "rejected", ...(failure ? { result: { error: failure } } : {}), executionToken: undefined, leaseExpiresAt: undefined, updatedAt: Date.now() };
-			await Promise.all([txn.put(`${ACTION_PREFIX}${action.id}`, rejected), txn.delete(`${ACTION_ACTIVE_PREFIX}${action.workItemId}`)]);
+			await Promise.all([txn.put(this.actionKey(action.workItemId, action.id), rejected), txn.delete(`${ACTION_ACTIVE_PREFIX}${action.workItemId}`)]);
 			return rejected;
 		});
 		const workItem = await this.loadWorkItem(rejected.workItemId);
@@ -591,37 +597,57 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 				for (const action of page.values()) if (action.command.kind === "promote") promotions.push({ workItemId: action.workItemId, dispatchKey: action.command.dispatchKey });
 			}
 		}
-		const merges: Array<{ workItemId: string; mergeCommitSha: string }> = [];
+		const merges: Array<{ workItemId: string; mergeCommitSha: string; mergedAt: number }> = [];
 		if (parsed.fact.kind === "main-deploy") {
 			// A main deploy run deploys whatever main is; the recorded merged
-			// fact's merge commit is the only honest join to a work item.
+			// fact's merge commit is the honest join to a work item — exactly,
+			// or by containment: main history is linear, so a successful run
+			// created after an item's merged fact deployed a descendant of that
+			// item's merge commit. One deploy run is therefore evidence for
+			// every merged item it contains, not just the last merge it shipped.
 			for (const item of live) {
 				const facts = await this.ctx.storage.get<ExternalFacts>(`${EXTERNAL_FACT_PREFIX}${item.id}`);
-				if (facts?.merged?.mergeCommitSha) merges.push({ workItemId: item.id, mergeCommitSha: facts.merged.mergeCommitSha });
+				if (facts?.merged?.mergeCommitSha) merges.push({ workItemId: item.id, mergeCommitSha: facts.merged.mergeCommitSha, mergedAt: facts.merged.at });
 			}
 		}
-		const workItemId = matchGithubFactToWorkItem(parsed.fact, live, promotions, merges);
-		if (!workItemId) return { accepted: false };
+		const fact = parsed.fact;
+		const workItemIds = fact.kind === "main-deploy"
+			? matchGithubMainDeployToWorkItems(fact, live, merges)
+			: [matchGithubFactToWorkItem(fact, live, promotions)].filter((id): id is string => id !== null);
+		if (!workItemIds.length) return { accepted: false };
 		const merged = await this.ctx.storage.transaction(async (txn) => {
-			if (await txn.get(githubDeliveryMarkerKey(parsed.deliveryId))) return { fresh: false };
-			const item = await txn.get<StoredWorkItem>(this.workItemKey(workItemId));
-			if (!item || TERMINAL_PHASES.has(item.phase)) return undefined;
+			if (await txn.get(githubDeliveryMarkerKey(parsed.deliveryId))) return { freshIds: [] };
 			const now = Date.now();
-			const key = `${EXTERNAL_FACT_PREFIX}${item.id}`;
-			const facts = mergeGithubFact(await txn.get<ExternalFacts>(key), parsed.fact, now);
-			await Promise.all([
-				txn.put(githubDeliveryMarkerKey(parsed.deliveryId), { at: now }),
-				...(facts ? [txn.put(key, facts)] : []),
-			]);
-			return { fresh: facts !== null };
+			const freshIds: string[] = [];
+			const writes: Array<Promise<void>> = [];
+			for (const workItemId of workItemIds) {
+				const item = await txn.get<StoredWorkItem>(this.workItemKey(workItemId));
+				if (!item || TERMINAL_PHASES.has(item.phase)) continue;
+				const key = `${EXTERNAL_FACT_PREFIX}${item.id}`;
+				const facts = mergeGithubFact(await txn.get<ExternalFacts>(key), parsed.fact, now);
+				if (facts) {
+					writes.push(txn.put(key, facts));
+					freshIds.push(item.id);
+				}
+			}
+			if (!writes.length && workItemIds.length === 1) {
+				const only = await txn.get<StoredWorkItem>(this.workItemKey(workItemIds[0]));
+				// Preserve the single-item contract: a delivery whose only match is
+				// gone or terminal is refused without consuming its delivery marker.
+				if (!only || TERMINAL_PHASES.has(only.phase)) return undefined;
+			}
+			writes.push(txn.put(githubDeliveryMarkerKey(parsed.deliveryId), { at: now }));
+			await Promise.all(writes);
+			return { freshIds };
 		});
 		if (!merged) return { accepted: false };
 		await this.pruneGithubDeliveryMarkers(Date.now());
-		if (!merged.fresh) return { accepted: true };
-		const current = await this.loadWorkItem(workItemId);
-		if (current) {
-			await this.appendActionEvent(current.id, current.phase, githubFactMessage(parsed.fact), "github");
-			this.pokeOperator(current);
+		for (const workItemId of merged.freshIds) {
+			const current = await this.loadWorkItem(workItemId);
+			if (current) {
+				await this.appendActionEvent(current.id, current.phase, githubFactMessage(parsed.fact), "github");
+				this.pokeOperator(current);
+			}
 		}
 		return { accepted: true };
 	}
@@ -812,9 +838,16 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 					this.workItemKey(item.id),
 					`${EXTERNAL_FACT_PREFIX}${item.id}`,
 					`${POKE_COUNT_PREFIX}${item.id}`,
+					`${ACTION_ACTIVE_PREFIX}${item.id}`,
 					...(item.sequence ? [this.orderKey(WORK_ITEM_ORDER_PREFIX, item.sequence, item.id)] : []),
 				];
 				for (let sequence = 1; sequence <= item.eventSequence; sequence += 1) keys.push(this.eventKey(item.id, sequence));
+				// The purge takes the item's action history with it: action records
+				// and effect-key records are per-item prefixes, so a purged item
+				// leaves nothing behind for future snapshot scans to pay for.
+				for (const prefix of [`${ACTION_PREFIX}${item.id}:`, `${ACTION_KEY_PREFIX}${item.id}:`]) {
+					for await (const page of this.storagePages<unknown>(prefix)) keys.push(...page.keys());
+				}
 				for (const batch of storageDeleteBatches(keys)) await this.ctx.storage.delete(batch);
 				purged += 1;
 			}
@@ -824,20 +857,27 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		return purged;
 	}
 
-	private pokeOperator(item: StoredWorkItem): void {
+	private pokeOperator(item: StoredWorkItem, origin: "event" | "sweep" = "event"): void {
 		if (TERMINAL_PHASES.has(item.phase) || this.env.OPERATOR_PAUSED === "true") return;
 		this.ctx.waitUntil((async () => {
-			const key = `${POKE_COUNT_PREFIX}${item.id}`;
-			const pokes = ((await this.ctx.storage.get<number>(key)) ?? 0) + 1;
-			if (pokes > OPERATOR_POKE_CAP) {
-				const current = await this.loadWorkItem(item.id);
-				if (current && !TERMINAL_PHASES.has(current.phase)) {
-					const parked = { ...current, phase: "needs_review" as const, version: current.version + 1, activeImplementation: null, updatedAt: Date.now() };
-					await this.persistTransition(current.version, parked, `The operator consumed its lifetime budget of ${OPERATOR_POKE_CAP} wakes without reaching a terminal state. Work is parked for review with its ledger and artifacts intact.`, "system");
+			// The lifetime cap bounds event-driven pokes only: those track real
+			// ledger activity, so exhausting them means non-convergence. Sweep
+			// re-pokes are periodic and proportional to wall-clock time queued,
+			// not to progress — counting them would park healthy-but-queued work
+			// on a schedule instead of on behavior.
+			if (origin === "event") {
+				const key = `${POKE_COUNT_PREFIX}${item.id}`;
+				const pokes = ((await this.ctx.storage.get<number>(key)) ?? 0) + 1;
+				if (pokes > OPERATOR_POKE_CAP) {
+					const current = await this.loadWorkItem(item.id);
+					if (current && !TERMINAL_PHASES.has(current.phase)) {
+						const parked = { ...current, phase: "needs_review" as const, version: current.version + 1, activeImplementation: null, updatedAt: Date.now() };
+						await this.persistTransition(current.version, parked, `The operator consumed its lifetime budget of ${OPERATOR_POKE_CAP} wakes without reaching a terminal state. Work is parked for review with its ledger and artifacts intact.`, "system");
+					}
+					return;
 				}
-				return;
+				await this.ctx.storage.put(key, pokes);
 			}
-			await this.ctx.storage.put(key, pokes);
 			const result = await (this.env.OPERATOR as OperatorGatewayTransport).submitWake({ workItemId: item.id });
 			if (!result.accepted) console.warn("The operator worker declined a wake.", { workItemId: item.id, message: result.message });
 		})().catch((error) => {
@@ -849,8 +889,9 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 
 	/**
 	 * The slow safety net behind event pokes. It recovers interrupted action
-	 * executions and re-pokes every live work item, so no failure mode short
-	 * of the poke cap can silently strand work.
+	 * executions and re-pokes every live work item, so no failure mode can
+	 * silently strand work. Sweep re-pokes never consume the lifetime poke
+	 * cap: the cap bounds event-driven activity, not time spent queued.
 	 */
 	private async sweep(): Promise<void> {
 		if (this.env.OPERATOR_PAUSED === "true") return;
@@ -859,10 +900,10 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 			for (const action of page.values()) {
 				if (action.status !== "applying" || !action.leaseExpiresAt || action.leaseExpiresAt > now) continue;
 				const expired = await this.ctx.storage.transaction(async (txn) => {
-					const current = await txn.get<StoredOperatorAction>(`${ACTION_PREFIX}${action.id}`);
+					const current = await txn.get<StoredOperatorAction>(this.actionKey(action.workItemId, action.id));
 					if (!current || current.status !== "applying" || (current.leaseExpiresAt ?? 0) > now) return undefined;
 					const next: StoredOperatorAction = { ...current, status: "needs_reconciliation", executionToken: undefined, leaseExpiresAt: undefined, updatedAt: now };
-					await txn.put(`${ACTION_PREFIX}${current.id}`, next);
+					await txn.put(this.actionKey(current.workItemId, current.id), next);
 					return next;
 				});
 				if (!expired) continue;
@@ -892,7 +933,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 					}
 					continue;
 				}
-				this.pokeOperator(item);
+				this.pokeOperator(item, "sweep");
 			}
 		}
 	}
@@ -949,6 +990,8 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 	private messageKey(id: string): string { return `${MESSAGE_PREFIX}${id}`; }
 	private annotationKey(id: string): string { return `${ANNOTATION_PREFIX}${id}`; }
 	private workItemKey(id: string): string { return `${WORK_ITEM_PREFIX}${id}`; }
+	/** Actions are keyed per work item so every per-item read is a bounded prefix scan and the purge can delete an item's whole action history. */
+	private actionKey(workItemId: string, id: number): string { return `${ACTION_PREFIX}${workItemId}:${String(id).padStart(12, "0")}`; }
 	private eventKey(id: string, sequence: number): string { return `${EVENT_PREFIX}${id}:${String(sequence).padStart(12, "0")}`; }
 
 	private async projectWorkItem(item: StoredWorkItem): Promise<PublicWorkItem> {
@@ -1126,10 +1169,14 @@ function operatorSnapshot(item: StoredWorkItem | undefined, actions: StoredOpera
 	const candidate = facts?.candidate && item.phase === "implementing" && item.plan && facts.candidate.branch === item.plan.branch ? facts.candidate : undefined;
 	// Auto-merge fast lane facts: the merged fact is gated by the recorded
 	// candidate's immutable head revision (or the plan branch), and the main
-	// deploy run only ever rides alongside the merged fact whose merge commit
-	// it deployed — a deploy of someone else's merge can never masquerade.
+	// deploy run rides alongside a merged fact whose merge commit it contains:
+	// exactly (the run's head IS the merge commit), or by descent — main
+	// history is linear, so a successful run created after the merged fact was
+	// recorded deployed a descendant of the merge commit. Back-to-back merges
+	// whose own queued deploy run GitHub canceled still complete on the fast
+	// lane instead of falling back to a full promotion run.
 	const merged = facts?.merged && (candidateArtifact?.headSha === facts.merged.headSha || (item.plan && facts.merged.branch === item.plan.branch)) ? facts.merged : undefined;
-	const mainDeploy = merged && facts?.mainDeploy && facts.mainDeploy.headSha === merged.mergeCommitSha ? facts.mainDeploy : undefined;
+	const mainDeploy = merged && facts?.mainDeploy && (facts.mainDeploy.headSha === merged.mergeCommitSha || (facts.mainDeploy.conclusion === "success" && Date.parse(facts.mainDeploy.createdAt) > merged.at)) ? facts.mainDeploy : undefined;
 	// Surface a stalled implementation run as a fact: the disposable runner
 	// derives its own process identity, so a re-staged implement command with
 	// a fresh runId starts a clean isolated run instead of resuming a corpse.
@@ -1454,6 +1501,13 @@ function roomName(pathname: string): string | null {
 export default {
 	async fetch(request, env): Promise<Response> {
 		const pathname = new URL(request.url).pathname;
+		if (pathname.startsWith("/api/admin/")) {
+			// The maintenance levers park or delete work: they require the
+			// ADMIN_TOKEN worker secret as a bearer credential and fail closed
+			// when the secret is not provisioned.
+			const token = (env as { ADMIN_TOKEN?: string }).ADMIN_TOKEN;
+			if (!token || request.headers.get("Authorization") !== `Bearer ${token}`) return new Response("Unauthorized", { status: 401 });
+		}
 		if (pathname === "/api/admin/purge-terminal") {
 			// Prototype maintenance lever: delete parked and rejected items
 			// outright (completed ones stay - they are the record of shipped

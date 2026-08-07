@@ -84,9 +84,9 @@ export interface AppHarnessLedger {
 	recordCandidate(input: { workItemId: string; runId: string; branch: string; headSha: string; pullRequestNumber: number; pullRequestUrl: string; message: string }): Promise<LedgerWorkItem>;
 	recordExternalState(input: { workItemId: string; phase: ExternalPhase; artifacts?: Record<string, unknown>; message: string; source: EventSource }): Promise<LedgerWorkItem>;
 	stageOperatorAction(input: { workItemId: string; expectedVersion: number; command: OperatorCommand }): Promise<StagedOperatorAction>;
-	beginOperatorAction(input: { actionId: number }): Promise<BeginOperatorAction>;
-	completeOperatorAction(input: { actionId: number; idempotencyKey: string; executionToken: string; result: unknown }): Promise<StagedOperatorAction>;
-	rejectOperatorAction(input: { actionId: number; executionToken: string; error?: string }): Promise<StagedOperatorAction>;
+	beginOperatorAction(input: { workItemId: string; actionId: number }): Promise<BeginOperatorAction>;
+	completeOperatorAction(input: { workItemId: string; actionId: number; idempotencyKey: string; executionToken: string; result: unknown }): Promise<StagedOperatorAction>;
+	rejectOperatorAction(input: { workItemId: string; actionId: number; executionToken: string; error?: string }): Promise<StagedOperatorAction>;
 }
 
 /** Disposable Cloudflare Sandbox direct-agent implementation surface. */

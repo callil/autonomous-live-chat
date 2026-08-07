@@ -50,6 +50,12 @@ assert.match(worker, /item\.activeImplementation\?\.runId !== parsed\.runId/u, "
 assert.match(worker, /await this\.ctx\.storage\.deleteAlarm\(\)/u, "paused mode removes its alarm instead of spinning in the background");
 assert.match(worker, /executionToken/u, "operator action completion is fenced to its current execution lease");
 assert.match(worker, /listOperatorActions/u, "a later operator turn can reconcile prior staged or applied actions");
+assert.match(worker, /private actionKey\(workItemId: string, id: number\)/u, "operator actions are keyed per work item, never one room-wide namespace");
+assert.match(worker, /\$\{ACTION_PREFIX\}\$\{input\.workItemId\}:/u, "listing an item's actions is a bounded per-item prefix scan, not a scan of every action ever staged");
+assert.match(worker, /\$\{ACTION_PREFIX\}\$\{item\.id\}:/u, "purging an item deletes its action records");
+assert.match(worker, /\$\{ACTION_KEY_PREFIX\}\$\{item\.id\}:/u, "purging an item deletes its action effect-key records");
+assert.match(worker, /request\.headers\.get\("Authorization"\) !== `Bearer \$\{token\}`/u, "the admin maintenance routes require the ADMIN_TOKEN bearer secret");
+assert.match(worker, /if \(!token \|\|/u, "admin routes fail closed when the ADMIN_TOKEN secret is not provisioned");
 assert.match(worker, /harness:work-item:history/u, "each durable work item exposes paginated public activity");
 assert.match(worker, /if \(room !== "main"\)/u, "the only configured ledger room cannot create orphaned side ledgers");
 assert.doesNotMatch(worker, /CoordinatorJob|CoordinatorEffect|GITHUB_AUTOMATION_TOKEN|AUTONOMY_CALLBACK_SECRET|\/api\/autonomy\/callback|api\.github\.com/u);

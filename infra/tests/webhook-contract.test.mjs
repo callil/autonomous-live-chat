@@ -5,6 +5,7 @@ import {
 	GITHUB_DELIVERY_RETENTION_MS,
 	githubDeliveryMarkerKey,
 	matchGithubFactToWorkItem,
+	matchGithubMainDeployToWorkItems,
 	mergeGithubFact,
 	normalizeGithubDeliveryId,
 	normalizeGithubWebhookFact,
@@ -101,9 +102,25 @@ assert.equal(matchGithubFactToWorkItem(candidate, items), "item-old", "candidate
 assert.equal(matchGithubFactToWorkItem(merged, items), "item-old", "a merged fact matches by the recorded candidate head revision");
 assert.equal(matchGithubFactToWorkItem({ ...merged, headSha: SHA_B }, items), "item-old", "a merged fact still matches by the plan branch when the head revision is unrecorded");
 assert.equal(matchGithubFactToWorkItem({ ...merged, headSha: SHA_B, branch: "app-harness-os/99/g1" }, items), null, "a merge outside every live identity is dropped");
-assert.equal(matchGithubFactToWorkItem(mainDeploy, items, [], [{ workItemId: "item-old", mergeCommitSha: MERGE_SHA }]), "item-old", "a main deploy matches by head revision against the recorded merge commit");
-assert.equal(matchGithubFactToWorkItem(mainDeploy, items, [], [{ workItemId: "item-old", mergeCommitSha: SHA_B }]), null, "a deploy of someone else's merge commit never matches");
-assert.equal(matchGithubFactToWorkItem(mainDeploy, items, [], [{ workItemId: "item-gone", mergeCommitSha: MERGE_SHA }]), null, "a main deploy for a non-live work item is dropped");
+// A main deploy is evidence for every live item it provably contains: the
+// exact merge-commit join, plus containment by ordering — main history is
+// linear, so a successful run created after an item's merged fact deployed a
+// descendant of that item's merge commit.
+const DEPLOY_RUN_AT = Date.parse(mainDeploy.createdAt);
+assert.deepEqual(matchGithubMainDeployToWorkItems(mainDeploy, items, [{ workItemId: "item-old", mergeCommitSha: MERGE_SHA, mergedAt: DEPLOY_RUN_AT + 60_000 }]), ["item-old"], "a main deploy matches by head revision against the recorded merge commit regardless of ordering");
+assert.deepEqual(matchGithubMainDeployToWorkItems(mainDeploy, items, [{ workItemId: "item-old", mergeCommitSha: SHA_B, mergedAt: DEPLOY_RUN_AT - 60_000 }]), ["item-old"], "a successful deploy run created after an item merged deploys a descendant of its merge commit");
+assert.deepEqual(
+	matchGithubMainDeployToWorkItems(mainDeploy, items, [
+		{ workItemId: "item-new", mergeCommitSha: MERGE_SHA, mergedAt: DEPLOY_RUN_AT + 60_000 },
+		{ workItemId: "item-old", mergeCommitSha: SHA_B, mergedAt: DEPLOY_RUN_AT - 60_000 },
+	]),
+	["item-new", "item-old"],
+	"one deploy run completes every merged item it contains, not only the last merge it shipped",
+);
+assert.deepEqual(matchGithubMainDeployToWorkItems(mainDeploy, items, [{ workItemId: "item-old", mergeCommitSha: SHA_B, mergedAt: DEPLOY_RUN_AT + 60_000 }]), [], "a deploy run created before the merge proves nothing about it");
+assert.deepEqual(matchGithubMainDeployToWorkItems({ ...mainDeploy, conclusion: "failure" }, items, [{ workItemId: "item-old", mergeCommitSha: SHA_B, mergedAt: DEPLOY_RUN_AT - 60_000 }]), [], "only a successful run is containment evidence for other items' merges");
+assert.deepEqual(matchGithubMainDeployToWorkItems({ ...mainDeploy, conclusion: "failure" }, items, [{ workItemId: "item-old", mergeCommitSha: MERGE_SHA, mergedAt: DEPLOY_RUN_AT - 60_000 }]), ["item-old"], "the exact join still carries a failed run: an item's own deploy failing is real evidence");
+assert.deepEqual(matchGithubMainDeployToWorkItems(mainDeploy, items, [{ workItemId: "item-gone", mergeCommitSha: MERGE_SHA, mergedAt: DEPLOY_RUN_AT - 60_000 }]), [], "a main deploy for a non-live work item is dropped");
 
 // ---- merge: monotonic, never downgrades recorded evidence ----
 const first = mergeGithubFact({ runnerResult: { runId: "run-1" } }, validation, 1_000);
