@@ -1089,6 +1089,15 @@ const OPERATOR_STATE_MAX_CHARS = 6_000;
  */
 function operatorWakeState(item: StoredWorkItem | undefined, actions: StoredOperatorAction[]): string {
 	if (!item) return "null";
+	// Surface a recorded plan the runner would refuse as a fact, so the
+	// bounded model stages a revised plan instead of retrying implement.
+	let planProblem: string | undefined;
+	if (item.plan && !item.activeImplementation) {
+		const canonical = `app-harness-os/${item.plan.issueNumber}/g${item.plan.generation}`;
+		if (item.plan.nodeId !== "root" || item.plan.parentBranch !== "main" || item.plan.pullRequestBase !== "main" || item.plan.parentBaseSha === null || item.plan.branch !== canonical) {
+			planProblem = `The recorded plan is invalid for the one-node runner: nodeId must be root, parentBranch and pullRequestBase main, parentBaseSha = baseSha, branch exactly ${canonical}. Stage a revised plan with revision ${item.plan.revision + 1} before implementation.`;
+		}
+	}
 	const snapshot = {
 		workItemId: item.id,
 		phase: item.phase,
@@ -1097,6 +1106,7 @@ function operatorWakeState(item: StoredWorkItem | undefined, actions: StoredOper
 		request: String(item.request ?? "").slice(0, 600),
 		classification: item.classification,
 		plan: item.plan,
+		...(planProblem ? { planProblem } : {}),
 		activeImplementation: item.activeImplementation,
 		artifacts: item.artifacts,
 		actions: actions.slice(-OPERATOR_STATE_ACTION_LIMIT).map((action) => ({
