@@ -15,6 +15,8 @@ export type StageContext = {
 	activeRunId: string;
 	planBranch: string;
 	issueNumber: number;
+	candidatePr: number;
+	candidateHeadSha: string;
 };
 
 export const SYSTEM_PROMPT: string;
