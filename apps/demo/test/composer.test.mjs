@@ -13,6 +13,7 @@ assert.match(clientScript, /event\.type === 'chat:snapshot'\) \{ renderMessageSn
 
 assert.doesNotMatch(html, /maxlength=/u);
 assert.doesNotMatch(html, /message-count/u);
+assert.match(html, /<span class="room-title"[^>]*>Live Main room<\/span>/u);
 assert.match(html, /<h1>Shape this app together<\/h1>/u);
 const browserSafeTextPolicy = html.match(/TARGET_SAFE_TEXT_CHARACTERS = (\d+)/u);
 assert.equal(Number(browserSafeTextPolicy?.[1]), AUTHORING_ENVELOPE_POLICY.safeTextCharacters, "the no-build demo mirrors the shared privacy envelope exactly");
