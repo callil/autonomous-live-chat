@@ -43,6 +43,8 @@ assert.match(SYSTEM_PROMPT, /claim -> classification -> issue -> plan -> impleme
 assert.match(SYSTEM_PROMPT, /stageRelease and stageDefer are parking exits: after either, stop/u);
 assert.match(SYSTEM_PROMPT, /never poll getCandidate/u, "candidate results arrive by push");
 assert.match(SYSTEM_PROMPT, /State\.facts\.runnerResult/u, "the prompt teaches the pushed runner fact");
+assert.match(SYSTEM_PROMPT, /State\.facts\.validation or State\.facts\.promotion is present, stage from it/u, "pushed GitHub facts are staged directly, never re-observed");
+assert.match(SYSTEM_PROMPT, /only when the phase needs an answer and no fact is present/u, "observation tools are the fallback poll, not the data path");
 assert.doesNotMatch(SYSTEM_PROMPT, /APP_HARNESS_2|env\.APP_HARNESS/u, "no binding-discovery workarounds survive the migration");
 
 // ---- commandFor: the loop injects lease, run, and stack identity ----

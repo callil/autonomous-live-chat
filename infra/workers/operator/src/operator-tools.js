@@ -13,13 +13,13 @@ const ISSUE_CLASSIFICATIONS = ["triage", "agent", "needs-review", "rejected", "d
 export const OPERATOR_LEASE_MS = 900_000;
 
 export const SYSTEM_PROMPT =
-	"You operate the App Harness ledger for one work item. State (the user message) is authoritative; do not re-read. "
-	+ "Progress steps in order: claim -> classification -> issue -> plan -> implementation -> candidate -> validating -> promotion -> deployed -> completed. "
-	+ "If State.leaseId is null, stageClaim first. One tool per step; keep advancing while the ledger accepts. On rejected, the error says why: correct once or stop. "
-	+ "Results arrive by push, so never poll getCandidate or re-stage implementation while implementing: when State.facts.runnerResult reports pull-request-opened, stageCandidate from it; on a failure fact or implementationProblem, stageImplementation again or replan; if waiting, stageDefer 60000. "
-	+ "In validating, observeCandidateValidation; on success stageState validating with its artifacts, then stagePromotion with a fresh dispatchKey. "
+	"You operate the App Harness ledger for one work item. State is authoritative; do not re-read. "
+	+ "Order: claim -> classification -> issue -> plan -> implementation -> candidate -> validating -> promotion -> deployed -> completed. "
+	+ "If State.leaseId is null, stageClaim first. One tool per step; advance while the ledger accepts; on rejected, correct once or stop. "
+	+ "Results arrive by push: never poll getCandidate or re-stage implementation while implementing. stageCandidate from a pull-request-opened State.facts.runnerResult; on failure or implementationProblem, stageImplementation again or replan; waiting: stageDefer 60000. "
+	+ "When State.facts.validation or State.facts.promotion is present, stage from it. On validation success stageState validating with its artifacts, then stagePromotion with a fresh dispatchKey; promotion success: stageState deployed, then completed. "
 	+ "On validation or promotion failure, restack: stagePlan with the next generation and a fresh getMainSha baseSha. "
-	+ "When the promotion run succeeds (findPromotionRun/inspectPromotionRun), stageState deployed, then completed. "
+	+ "Observe only when the phase needs an answer and no fact is present; waiting: stageDefer 300000. "
 	+ "stageRelease and stageDefer are parking exits: after either, stop. Reply exactly PROGRESSED, PARKED:<code>, or COMPLETE.";
 
 function tool(name, description, properties) {
@@ -40,11 +40,11 @@ export const TOOLS = [
 		branch: { type: "string" },
 		pullRequestBase: { type: "string" },
 	}),
-	tool("observeCandidateValidation", "Read the trusted candidate CI run bound to an exact pull request and immutable head revision.", {
+	tool("observeCandidateValidation", "Read the trusted candidate CI run bound to an exact pull request and immutable head revision. Fallback only: the result normally arrives by push in State.facts.validation.", {
 		pullRequest: { type: "integer" },
 		headSha: { type: "string" },
 	}),
-	tool("findPromotionRun", "Read the deterministic GitHub Actions promotion run for a dispatch key.", {
+	tool("findPromotionRun", "Read the deterministic GitHub Actions promotion run for a dispatch key. Fallback only: the result normally arrives by push in State.facts.promotion.", {
 		dispatchKey: { type: "string" },
 		createdAfter: { type: ["string", "null"] },
 	}),
