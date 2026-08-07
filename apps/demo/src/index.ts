@@ -179,6 +179,8 @@ const ACTION_APPLY_LEASE_MS = 60_000;
 const STAGED_ACTION_RECOVERY_MS = 90_000;
 const REJECTED_ACTION_PARK_THRESHOLD = 6;
 const STALLED_IMPLEMENTATION_MS = 20 * 60_000;
+const UNLEASED_REVIVAL_DELAY_MS = 45_000;
+const OPERATOR_TURN_HARD_BUDGET = 60;
 const READY_PHASES = new Set<LedgerPhase>(["submitted", "retryable"]);
 const TERMINAL_PHASES = new Set<LedgerPhase>(["completed", "needs_review", "rejected"]);
 const OPERATOR_ID = "cloudflare-os";
@@ -787,6 +789,12 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 					await txn.delete(key);
 					return { kind: "exhausted", item: currentItem } as const;
 				}
+				// The monotonic per-item turn counter doubles as a lifetime budget:
+				// an operator that keeps completing turns without converging parks.
+				if (((await txn.get<number>(this.wakeTurnKey(wake.workItemId))) ?? 0) >= OPERATOR_TURN_HARD_BUDGET) {
+					await txn.delete(key);
+					return { kind: "exhausted", item: currentItem } as const;
+				}
 				const marked = beginOperatorWakeDelivery(currentWake, { currentVersion: currentItem.version, terminal: TERMINAL_PHASES.has(currentItem.phase), now, responseLeaseMs: OPERATOR_TURN_RESPONSE_LEASE_MS });
 				if (!marked) {
 					await txn.delete(key);
@@ -846,9 +854,14 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 			for (const wake of page.values()) availableAt = availableAt === undefined ? wake.availableAt : Math.min(availableAt, wake.availableAt);
 		}
 		for await (const page of this.storagePages<StoredWorkItem>(WORK_ITEM_PREFIX)) {
-			// An already-expired lease still needs an immediate alarm: recovery is
-			// what re-queues the wake, and nothing else re-arms a dormant room.
-			for (const item of page.values()) if (!TERMINAL_PHASES.has(item.phase) && item.lease) { const at = Math.max(item.lease.expiresAt, Date.now()); availableAt = availableAt === undefined ? at : Math.min(availableAt, at); }
+			// An already-expired lease still needs an immediate alarm, and a live
+			// unleased item needs one too: recovery is what re-queues the wake,
+			// and nothing else re-arms a dormant room.
+			for (const item of page.values()) {
+				if (TERMINAL_PHASES.has(item.phase)) continue;
+				const at = item.lease ? Math.max(item.lease.expiresAt, Date.now()) : Date.now() + UNLEASED_REVIVAL_DELAY_MS;
+				availableAt = availableAt === undefined ? at : Math.min(availableAt, at);
+			}
 		}
 		for await (const page of this.storagePages<StoredOperatorAction>(ACTION_PREFIX)) {
 			for (const action of page.values()) {
@@ -863,7 +876,11 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		const now = Date.now();
 		for await (const page of this.storagePages<StoredWorkItem>(WORK_ITEM_PREFIX)) {
 			for (const item of page.values()) {
-				if (!TERMINAL_PHASES.has(item.phase) && item.lease && item.lease.expiresAt <= now) await this.queueOperatorWake(item);
+				if (TERMINAL_PHASES.has(item.phase)) continue;
+				if (item.lease && item.lease.expiresAt <= now) { await this.queueOperatorWake(item); continue; }
+				// A live, unleased item whose wake was consumed by a no-progress
+				// turn has no other revival path; pace its re-prompt gently.
+				if (!item.lease && !(await this.ctx.storage.get<WakeRecord>(`${WAKE_PREFIX}${item.id}`))) await this.queueOperatorWake(item, UNLEASED_REVIVAL_DELAY_MS);
 			}
 		}
 		for await (const page of this.storagePages<StoredOperatorAction>(ACTION_PREFIX)) {
