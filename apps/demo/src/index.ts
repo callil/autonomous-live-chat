@@ -400,6 +400,12 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 
 	async stageOperatorAction(input: { workItemId: string; expectedVersion: number; command: OperatorCommand }): Promise<StoredOperatorAction> {
 		const workItem = await this.requireWorkItem(input.workItemId);
+		// The operator decides that and what to plan (summary, CI profile, base
+		// revision); the ledger owns the mechanical one-node stack identity and
+		// derives it from its own durable facts before validation.
+		if (input.command.kind === "plan" && input.command.plan && typeof input.command.plan === "object") {
+			input.command = { ...input.command, plan: canonicalOneNodePlan(workItem, input.command.plan) };
+		}
 		validateOperatorCommand(input.command);
 		const key = operatorActionEffectKey(workItem.id, input.command);
 		const existingId = await this.ctx.storage.get<number>(`${ACTION_KEY_PREFIX}${key}`);
@@ -1075,6 +1081,30 @@ function legacyPhase(value: unknown): LedgerPhase {
 	if (value === "building") return "implementing";
 	if (value === "triaged" || value === "queued") return "classified";
 	return "submitted";
+}
+
+/**
+ * Derive the mechanical one-node stack identity from durable ledger facts.
+ * The model's decisions (summary, ciProfile, baseSha it read from GitHub)
+ * pass through; everything else is the platform's own naming contract.
+ */
+function canonicalOneNodePlan(item: StoredWorkItem, plan: LedgerPlan): LedgerPlan {
+	const issue = item.artifacts?.issue as { number?: number } | undefined;
+	const issueNumber = Number.isSafeInteger(issue?.number) && issue!.number! >= 1 ? issue!.number! : plan.issueNumber;
+	const generation = Number.isSafeInteger(plan.generation) && plan.generation >= 1 ? plan.generation : 1;
+	const baseSha = typeof plan.baseSha === "string" ? plan.baseSha : "";
+	return {
+		...plan,
+		revision: item.plan ? item.plan.revision + 1 : 1,
+		generation,
+		issueNumber,
+		nodeId: "root",
+		parentBranch: "main",
+		pullRequestBase: "main",
+		parentBaseSha: baseSha,
+		branch: `app-harness-os/${issueNumber}/g${generation}`,
+		stackId: typeof plan.stackId === "string" && plan.stackId.trim() ? plan.stackId : `stack-${item.id.slice(0, 8)}`,
+	};
 }
 
 const OPERATOR_STATE_ACTION_LIMIT = 10;
