@@ -1,6 +1,6 @@
 // Wrangler's generated module declaration omits the documented runtime symbol.
 // @ts-expect-error Cloudflare OS exercises restore for persistent RPC callbacks.
-import { DurableObject, RpcTarget, WorkerEntrypoint, restore } from "cloudflare:workers";
+import { DurableObject, RpcTarget, WorkerEntrypoint, restore, type RpcStub } from "cloudflare:workers";
 import {
 	AUTHORING_ENVELOPE_POLICY,
 	DELIVERY_POLICY,
@@ -103,7 +103,7 @@ type ClientEvent =
 	| { type: "harness:annotations:clear" };
 
 type RecordPage<T> = { records: T[]; hasMore: boolean; beforeSequence?: number };
-type WakeRecord = { id: string; workItemId: string; version: number; attempts: number; availableAt: number };
+type WakeRecord = { id: string; workItemId: string; version: number; turn: number; state: "pending" | "in_flight"; attempts: number; availableAt: number };
 type StorageTransactionLike = DurableObjectTransaction;
 type OperatorCommand =
 	| { kind: "claim"; leaseId: string; leaseMs: number }
@@ -130,7 +130,7 @@ type StoredOperatorAction = {
 	createdAt: number;
 	updatedAt: number;
 };
-type OperatorNoteRestore = { type: "operator-note"; workItemId: string };
+type OperatorNoteRestore = { type: "operator-note"; workItemId: string; expectedVersion: number; turn: number };
 type OperatorResponse = { text: string; idempotencyKey: string };
 
 type OsWorkspaceGateway = {
@@ -141,7 +141,7 @@ type OsWorkspaceGateway = {
 		messageKey: string;
 		prompt: string;
 		gadgetTitle: string;
-		chatGatewayRpcTarget: RpcTarget;
+		chatGatewayRpcTarget: RpcStub<OperatorNoteTarget>;
 	}): Promise<{ accepted: true; chatPath: string } | { accepted: false; message: string }>;
 };
 
@@ -165,6 +165,7 @@ const WORK_ITEM_SEQUENCE_KEY = "sequence:work-item";
 const LEDGER_MIGRATION_KEY = "migration:ledger-only:v1";
 const WAKE_BATCH_SIZE = 16;
 const WAKE_RETRY_BASE_MS = 1_000;
+const OPERATOR_TURN_RESPONSE_LEASE_MS = 2 * 60_000;
 const OPERATOR_LEASE_MAX_MS = 15 * 60_000;
 const ACTION_APPLY_LEASE_MS = 60_000;
 const READY_PHASES = new Set<LedgerPhase>(["submitted", "retryable"]);
@@ -175,9 +176,14 @@ const GITHUB_REPOSITORY = "callil/autonomous-live-chat";
 const PRODUCTION_DEPLOYMENT_HOST = "autonomous-live-chat.coda-a.workers.dev";
 
 class OperatorNoteTarget extends RpcTarget {
-	constructor(private readonly room: ChatRoom, private readonly workItemId: string) { super(); }
+	constructor(
+		private readonly room: ChatRoom,
+		private readonly workItemId: string,
+		private readonly expectedVersion: number,
+		private readonly turn: number,
+	) { super(); }
 	async onGadgetResponse(response: OperatorResponse): Promise<void> {
-		await this.room.recordOperatorNote(this.workItemId, response);
+		await this.room.recordOperatorNote(this.workItemId, this.expectedVersion, this.turn, response);
 	}
 }
 
@@ -223,8 +229,8 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 
 	[restore](params: unknown): RpcTarget {
 		const candidate = params as Partial<OperatorNoteRestore> | null;
-		if (!candidate || candidate.type !== "operator-note" || typeof candidate.workItemId !== "string" || !isUuid(candidate.workItemId)) throw new TypeError("Unknown App Harness restore target.");
-		return new OperatorNoteTarget(this, candidate.workItemId);
+		if (!candidate || candidate.type !== "operator-note" || typeof candidate.workItemId !== "string" || !isUuid(candidate.workItemId) || !Number.isSafeInteger(candidate.expectedVersion) || candidate.expectedVersion! < 1 || !Number.isSafeInteger(candidate.turn) || candidate.turn! < 1) throw new TypeError("Unknown App Harness restore target.");
+		return new OperatorNoteTarget(this, candidate.workItemId, candidate.expectedVersion!, candidate.turn!);
 	}
 
 	async fetch(request: Request): Promise<Response> {
@@ -443,7 +449,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 			const applying: StoredOperatorAction = { ...action, status: "applying", attempts: action.attempts + 1, executionToken, leaseExpiresAt: now + ACTION_APPLY_LEASE_MS, updatedAt: now };
 			await Promise.all([
 				txn.put(`${ACTION_PREFIX}${action.id}`, applying),
-				txn.put(this.actionWakeKey(action.id), { id: `action:${action.id}`, workItemId: workItem.id, version: workItem.version, attempts: 0, availableAt: applying.leaseExpiresAt! }),
+				txn.put(this.actionWakeKey(action.id), { id: `action:${action.id}`, workItemId: workItem.id, version: workItem.version, turn: 1, state: "pending", attempts: 0, availableAt: applying.leaseExpiresAt! }),
 			]);
 			await this.scheduleAlarmInTransaction(txn, applying.leaseExpiresAt!);
 			return { disposition: "execute" as const, action: applying, workItem, executionToken };
@@ -498,23 +504,41 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		return rejected;
 	}
 
-	async recordOperatorNote(workItemId: string, response: OperatorResponse): Promise<void> {
+	async recordOperatorNote(workItemId: string, expectedVersion: number, turn: number, response: OperatorResponse): Promise<void> {
 		if (!isUuid(workItemId) || !response || typeof response.text !== "string") return;
 		const message = normalizeOperatorMessage(response.text);
 		const key = normalizeOperatorNoteKey(response.idempotencyKey) ?? crypto.randomUUID();
 		const item = await this.ctx.storage.transaction(async (txn) => {
 			const current = await txn.get<StoredWorkItem>(this.workItemKey(workItemId));
 			if (!current) return undefined;
+			const wakeKey = `${WAKE_PREFIX}${current.id}`;
+			const wake = await txn.get<WakeRecord>(wakeKey);
+			if (!wake || wake.version !== expectedVersion || (wake.turn ?? 1) !== turn) return undefined;
+			if (current.version !== expectedVersion || TERMINAL_PHASES.has(current.phase)) {
+				await txn.delete(wakeKey);
+				return undefined;
+			}
 			const noteKey = `ledger-operator-note:${current.id}:${key}`;
 			if (await txn.get(noteKey)) return undefined;
 			const at = Date.now();
 			const eventSequence = current.eventSequence + 1;
 			const event: LedgerEvent = { id: `${current.id}:${eventSequence}`, workItemId: current.id, sequence: eventSequence, phase: current.phase, message, source: "cloudflare-os", at };
 			const updated = { ...current, eventSequence, latestEvent: event, updatedAt: at };
-			await Promise.all([txn.put(noteKey, { workItemId: current.id, message, at }), txn.put(this.workItemKey(updated.id), updated), txn.put(this.eventKey(updated.id, eventSequence), event)]);
+			const nextTurn = Math.max(1, turn) + 1;
+			const retryDelay = Math.min(WAKE_RETRY_BASE_MS * 2 ** Math.min(nextTurn, 8), 5 * 60_000);
+			await Promise.all([
+				txn.put(noteKey, { workItemId: current.id, message, at }),
+				txn.put(this.workItemKey(updated.id), updated),
+				txn.put(this.eventKey(updated.id, eventSequence), event),
+				txn.put(wakeKey, { id: current.id, workItemId: current.id, version: current.version, turn: nextTurn, state: "pending", attempts: 0, availableAt: at + retryDelay } satisfies WakeRecord),
+				this.scheduleAlarmInTransaction(txn, at + retryDelay),
+			]);
 			return updated;
 		});
-		if (item) await this.broadcastWorkItem(item);
+		if (item) {
+			await this.broadcastWorkItem(item);
+			await this.scheduleWakeAlarm();
+		}
 	}
 
 	private requireActionLease(workItem: StoredWorkItem, command: OperatorCommand, now: number): void {
@@ -678,8 +702,8 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		const availableAt = now + Math.max(0, delayMs);
 		const existing = await txn.get<WakeRecord>(key);
 		const wake: WakeRecord = existing && existing.version === item.version
-			? { ...existing, availableAt: Math.min(existing.availableAt, availableAt) }
-			: { id: item.id, workItemId: item.id, version: item.version, attempts: 0, availableAt };
+			? { ...existing, turn: existing.turn ?? 1, state: existing.state ?? "pending", availableAt: (existing.state ?? "pending") === "in_flight" ? existing.availableAt : Math.min(existing.availableAt, availableAt) }
+			: { id: item.id, workItemId: item.id, version: item.version, turn: 1, state: "pending", attempts: 0, availableAt };
 		await txn.put(key, wake);
 		await this.scheduleAlarmInTransaction(txn, wake.availableAt);
 	}
@@ -698,28 +722,38 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		}
 		const wakes = due.toSorted((left, right) => left[1].availableAt - right[1].availableAt).slice(0, WAKE_BATCH_SIZE);
 		for (const [key, wake] of wakes) {
-			const responseTarget = await this.ctx.restore({ type: "operator-note", workItemId: wake.workItemId });
+			const inFlight = await this.ctx.storage.transaction(async (txn) => {
+				const currentWake = await txn.get<WakeRecord>(key);
+				const currentItem = await txn.get<StoredWorkItem>(this.workItemKey(wake.workItemId));
+				if (!currentWake || currentWake.version !== wake.version || currentWake.availableAt > now) return undefined;
+				if (!currentItem || currentItem.version !== currentWake.version || TERMINAL_PHASES.has(currentItem.phase)) {
+					await txn.delete(key);
+					return undefined;
+				}
+				const marked: WakeRecord = { ...currentWake, turn: currentWake.turn ?? 1, state: "in_flight", availableAt: now + OPERATOR_TURN_RESPONSE_LEASE_MS };
+				await txn.put(key, marked);
+				await this.scheduleAlarmInTransaction(txn, marked.availableAt);
+				return marked;
+			});
+			if (!inFlight) continue;
+			const responseTarget = await this.ctx.restore({ type: "operator-note", workItemId: inFlight.workItemId, expectedVersion: inFlight.version, turn: inFlight.turn }) as RpcStub<OperatorNoteTarget>;
 			try {
 				const result = await (this.env.OS_WORKSPACE as OsWorkspaceGateway).submitExternalMessage({
 					callerEmail: OPERATOR_EMAIL,
 					gadgetKey: "callil-autonomous-live-chat",
 					chatKey: "operator-main",
-					messageKey: `ledger-event:${wake.id}:v${wake.version}`,
-					prompt: `App Harness ledger work item ${wake.workItemId} changed to revision ${wake.version}. Read the authoritative APP_HARNESS ledger and its staged/applied actions, reconcile any existing artifact before retrying, and produce only the next missing artifact. The production origin is https://${PRODUCTION_DEPLOYMENT_HOST}. Continue until blocked or complete.`,
+					messageKey: `ledger-event:${inFlight.id}:v${inFlight.version}:t${inFlight.turn}`,
+					prompt: `App Harness ledger work item ${inFlight.workItemId} changed to revision ${inFlight.version}. Read the authoritative APP_HARNESS ledger and its staged/applied actions, reconcile any existing artifact before retrying, and produce only the next missing artifact. The production origin is https://${PRODUCTION_DEPLOYMENT_HOST}. Continue until blocked or complete.`,
 					gadgetTitle: "App Harness operator",
 					chatGatewayRpcTarget: responseTarget,
 				});
 				if (!result.accepted) throw new Error(`Cloudflare OS rejected the durable wake: ${result.message}`);
-				await this.ctx.storage.transaction(async (txn) => {
-					const current = await txn.get<WakeRecord>(key);
-					if (current?.version === wake.version) await txn.delete(key);
-				});
 			} catch (error) {
-				console.error("Failed to deliver the durable ledger wake to Cloudflare OS.", { workItemId: wake.workItemId, version: wake.version, error });
-				const attempts = wake.attempts + 1;
+				console.error("Failed to deliver the durable ledger wake to Cloudflare OS.", { workItemId: inFlight.workItemId, version: inFlight.version, turn: inFlight.turn, error });
+				const attempts = inFlight.attempts + 1;
 				await this.ctx.storage.transaction(async (txn) => {
 					const current = await txn.get<WakeRecord>(key);
-					if (current?.version === wake.version) await txn.put(key, { ...wake, attempts, availableAt: now + Math.min(WAKE_RETRY_BASE_MS * 2 ** Math.min(attempts, 8), 5 * 60_000) });
+					if (current?.version === inFlight.version && (current.turn ?? 1) === inFlight.turn) await txn.put(key, { ...inFlight, state: "pending", attempts, availableAt: now + Math.min(WAKE_RETRY_BASE_MS * 2 ** Math.min(attempts, 8), 5 * 60_000) });
 				});
 			} finally {
 				responseTarget[Symbol.dispose]();
