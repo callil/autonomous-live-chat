@@ -37,7 +37,14 @@ const BRANCH = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,159}$/u;
 const SHA = /^[0-9a-f]{40}$/iu;
 const RUNNER_IMAGE_REVISION = "nc031-async010";
 const NANOCODEX_EXECUTION_TIMEOUT_MS = 720_000;
+// The Worker's own backstop, past every in-container watchdog. If a process is
+// still non-terminal this long after it started, the container-side deadlines
+// have all failed to fire and the run is wedged for good.
+const RUNNER_DEADLINE_GRACE_MS = 120_000;
 const SANDBOX_CLEANUP_TIMEOUT_MS = 5_000;
+// Generous cap: the artifact is the last thing written after a potentially
+// chatty run, and a low cap silently discarded it.
+const MAX_ARTIFACT_STDOUT_CHARS = 200_000;
 const TERMINAL_PROCESS_STATUSES = new Set(["completed", "failed", "killed", "error"]);
 const TERMINAL_RUN_STATES = new Set(["checked-out", "needs-restack", "checkout-failed", "candidate-failed", "pull-request-opened"]);
 const encoder = new TextEncoder();
@@ -59,6 +66,23 @@ async function runIds(job: SafeJob): Promise<RunIds> {
 		checkoutDirectory: `/workspace/${stable}-repository`,
 		requestPath: `/tmp/${stable}-request.json`,
 	};
+}
+
+function startedMarkerPath(ids: RunIds): string {
+	return `${ids.requestPath}.started`;
+}
+
+/**
+ * Age of the run in milliseconds, derived from the marker startRun persisted.
+ * Returns null when the marker is missing or unparseable so a missing marker
+ * can never be mistaken for an infinitely old run.
+ */
+async function runAgeMs(session: { readFile(path: string): Promise<{ success: boolean; content?: string }> }, ids: RunIds): Promise<number | null> {
+	const marker = await session.readFile(startedMarkerPath(ids)).catch(() => null);
+	if (!marker?.success || typeof marker.content !== "string") return null;
+	const startedAt = Date.parse(marker.content.trim());
+	if (!Number.isFinite(startedAt)) return null;
+	return Math.max(0, Date.now() - startedAt);
 }
 
 function safeJob(input: NativeGitJob, env: Env): SafeJob | null {
@@ -146,37 +170,56 @@ async function destroySandboxSafely(sandbox: ReturnType<typeof getSandbox>, sess
 }
 
 function parseTerminalArtifact(stdout: string, job: SafeJob, model: string): Record<string, unknown> | null {
-	if (stdout.length > 32_000) return null;
-	const line = stdout.trim().split("\n").at(-1);
-	if (!line) return null;
+	if (stdout.length > MAX_ARTIFACT_STDOUT_CHARS) return null;
+	// Scan backwards for the last parseable artifact rather than demanding the
+	// very last line be JSON: a trailing newline, a stray banner, or any late
+	// non-JSON output would otherwise discard a perfectly good terminal
+	// artifact and mislabel the run as producing invalid output.
+	const lines = stdout.trim().split("\n");
+	for (let index = lines.length - 1; index >= 0; index -= 1) {
+		const line = lines[index].trim();
+		if (!line.startsWith("{")) continue;
+		const parsed = parseArtifactLine(line, job, model);
+		if (parsed) return parsed;
+	}
+	return null;
+}
+
+function parseArtifactLine(line: string, job: SafeJob, model: string): Record<string, unknown> | null {
+	const raw = safeParse(line);
+	if (!raw) return null;
+	if (raw.jobId !== job.jobId || typeof raw.state !== "string" || !TERMINAL_RUN_STATES.has(raw.state)) return null;
+	const result: Record<string, unknown> = { jobId: job.jobId, state: raw.state };
+	for (const key of ["baseSha", "headSha"] as const) if (typeof raw[key] === "string" && SHA.test(raw[key])) result[key] = raw[key];
+	if (typeof raw.classification === "string") result.classification = safeAgentFailure(raw.classification);
+	if (raw.agent && typeof raw.agent === "object") {
+		const agent = normalizeAgentSummary(raw.agent, model) as AgentSummary | null;
+		if (agent) result.agent = agent;
+	}
+	if (raw.pullRequest && typeof raw.pullRequest === "object") {
+		const pullRequest = raw.pullRequest as Record<string, unknown>;
+		if (typeof pullRequest.number === "number" && Number.isSafeInteger(pullRequest.number) && pullRequest.number > 0 && typeof pullRequest.url === "string" && /^https:\/\/github\.com\//u.test(pullRequest.url)) result.pullRequest = { number: pullRequest.number, url: pullRequest.url };
+	}
+	if (raw.stack && typeof raw.stack === "object") {
+		const stack = raw.stack as Record<string, unknown>;
+		const topology = stack.topology as Record<string, unknown> | undefined;
+		if (
+			typeof stack.id === "string" && JOB_ID.test(stack.id)
+			&& stack.nodeId === "root"
+			&& typeof stack.branch === "string" && safeBranch(stack.branch)
+			&& stack.parentBranch === "main"
+			&& topology?.trunk === "main"
+			&& topology.branch === stack.branch
+			&& typeof topology.baseSha === "string" && SHA.test(topology.baseSha)
+		) result.stack = { id: stack.id, generation: job.generation, nodeId: "root", branch: stack.branch, parentBranch: "main", topology: { trunk: "main", branch: stack.branch, baseSha: topology.baseSha.toLowerCase() } };
+	}
+	return result;
+}
+
+function safeParse(line: string): Record<string, unknown> | null {
 	try {
-		const raw = JSON.parse(line) as Record<string, unknown>;
-		if (raw.jobId !== job.jobId || typeof raw.state !== "string" || !TERMINAL_RUN_STATES.has(raw.state)) return null;
-		const result: Record<string, unknown> = { jobId: job.jobId, state: raw.state };
-		for (const key of ["baseSha", "headSha"] as const) if (typeof raw[key] === "string" && SHA.test(raw[key])) result[key] = raw[key];
-		if (typeof raw.classification === "string") result.classification = safeAgentFailure(raw.classification);
-		if (raw.agent && typeof raw.agent === "object") {
-			const agent = normalizeAgentSummary(raw.agent, model) as AgentSummary | null;
-			if (agent) result.agent = agent;
-		}
-		if (raw.pullRequest && typeof raw.pullRequest === "object") {
-			const pullRequest = raw.pullRequest as Record<string, unknown>;
-			if (typeof pullRequest.number === "number" && Number.isSafeInteger(pullRequest.number) && pullRequest.number > 0 && typeof pullRequest.url === "string" && /^https:\/\/github\.com\//u.test(pullRequest.url)) result.pullRequest = { number: pullRequest.number, url: pullRequest.url };
-		}
-		if (raw.stack && typeof raw.stack === "object") {
-			const stack = raw.stack as Record<string, unknown>;
-			const topology = stack.topology as Record<string, unknown> | undefined;
-			if (
-				typeof stack.id === "string" && JOB_ID.test(stack.id)
-				&& stack.nodeId === "root"
-				&& typeof stack.branch === "string" && safeBranch(stack.branch)
-				&& stack.parentBranch === "main"
-				&& topology?.trunk === "main"
-				&& topology.branch === stack.branch
-				&& typeof topology.baseSha === "string" && SHA.test(topology.baseSha)
-			) result.stack = { id: stack.id, generation: job.generation, nodeId: "root", branch: stack.branch, parentBranch: "main", topology: { trunk: "main", branch: stack.branch, baseSha: topology.baseSha.toLowerCase() } };
-		}
-		return result;
+		const value = JSON.parse(line) as unknown;
+		return value && typeof value === "object" ? value as Record<string, unknown> : null;
 	} catch {
 		return null;
 	}
@@ -237,6 +280,10 @@ export class NativeGitRunner extends WorkerEntrypoint<Env> {
 		const request = { job, candidate, model, runId: ids.runId, checkoutDirectory: ids.checkoutDirectory, instructions };
 		const write = await session.writeFile(ids.requestPath, JSON.stringify(request));
 		if (!write.success) return { jobId: job.jobId, runId: ids.runId, state: "runner-unavailable", classification: "runner-input-write-failed" };
+		// Persist the start marker so inspectRun can derive run age. A failed
+		// write is not fatal: it only costs the Worker-side backstop, and the
+		// in-container watchdogs still bound the run.
+		await session.writeFile(startedMarkerPath(ids), new Date().toISOString()).catch(() => null);
 		const env: Record<string, string> = {
 			...gitAuthorizationEnv(token),
 			OPENAI_API_KEY: this.env.OPENAI_API_KEY,
@@ -272,7 +319,23 @@ export class NativeGitRunner extends WorkerEntrypoint<Env> {
 			const session = await sandbox.getSession(ids.sessionId);
 			const process = await session.getProcess(ids.runId);
 			if (!process) return { jobId: job.jobId, runId: ids.runId, state: "runner-unavailable", classification: "sandbox-process-missing" };
-			if (!TERMINAL_PROCESS_STATUSES.has(process.status)) return { jobId: job.jobId, runId: ids.runId, state: "running" };
+			if (!TERMINAL_PROCESS_STATUSES.has(process.status)) {
+				// Backstop: past this age every in-container watchdog has failed to
+				// fire, so the run is wedged. Kill it and report the truth rather than
+				// reporting "running" forever. SIGKILL and this branch are both
+				// idempotent: a repeat inspection kills an already-dead process
+				// harmlessly and returns the same terminal answer.
+				const age = await runAgeMs(session, ids);
+				if (age === null || age <= NANOCODEX_EXECUTION_TIMEOUT_MS + RUNNER_DEADLINE_GRACE_MS) return { jobId: job.jobId, runId: ids.runId, state: "running" };
+				await process.kill("SIGKILL").catch(() => null);
+				// Reclaim the container slot. wrangler.jsonc pins max_instances to 2
+				// and startProcess runs with autoCleanup: false, so two wedged
+				// sandboxes would otherwise exhaust runner capacity permanently. The
+				// artifact was already read from a killed process, so destroying the
+				// sandbox here costs nothing and is safe to repeat.
+				await destroySandboxSafely(sandbox, ids.sessionId).catch(() => undefined);
+				return { jobId: job.jobId, runId: ids.runId, state: "candidate-failed", classification: "runner-deadline-enforced" };
+			}
 			const logs = await process.getLogs();
 			const artifact = parseTerminalArtifact(logs.stdout, job, NANOCODEX_DEFAULT_MODEL);
 			return artifact ? { ...artifact, runId: ids.runId } : { jobId: job.jobId, runId: ids.runId, state: "candidate-failed", classification: "nanocodex-output-invalid" };
