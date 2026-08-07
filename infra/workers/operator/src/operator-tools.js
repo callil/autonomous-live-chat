@@ -19,7 +19,7 @@ export const SYSTEM_PROMPT =
 	+ "stagePromotion is the fallback if no merged fact arrives after a long wait. "
 	+ "On validation or promotion failure, or phase retryable (the failed run was already cleared), restack: stagePlan with the next generation and a fresh getMainSha baseSha; never wait for a cleared run. "
 	+ "Observe only when the phase needs an answer and no fact is present. "
-	+ "Reply WAITING when only an external result can advance; reply exactly PROGRESSED, WAITING, PARKED:<code>, or COMPLETE.";
+	+ "When only an external result can advance, reply WAITING. Reply exactly PROGRESSED, WAITING, PARKED:<code>, or COMPLETE.";
 
 function tool(name, description, properties) {
 	return {
