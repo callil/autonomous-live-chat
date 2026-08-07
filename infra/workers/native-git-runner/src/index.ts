@@ -1,6 +1,6 @@
 import { getSandbox, isDurableObjectCodeUpdateReset, isPlatformTransientError, type Sandbox } from "@cloudflare/sandbox";
 import { WorkerEntrypoint } from "cloudflare:workers";
-import { buildNanocodexInstructions, NANOCODEX_DEFAULT_MODEL, normalizeAgentSummary, safeAgentFailure } from "./runner-contract.js";
+import { AGENT_DEFAULT_MODEL, buildAgentInstructions, normalizeAgentSummary, safeAgentFailure } from "./runner-contract.js";
 
 export { Sandbox } from "@cloudflare/sandbox";
 
@@ -36,12 +36,24 @@ type RunIds = { sandboxId: string; sessionId: string; runId: string; checkoutDir
 const JOB_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/u;
 const BRANCH = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,159}$/u;
 const SHA = /^[0-9a-f]{40}$/iu;
-const RUNNER_IMAGE_REVISION = "nc031-async010";
-const NANOCODEX_EXECUTION_TIMEOUT_MS = 300_000;
+const RUNNER_IMAGE_REVISION = "da052-async011";
+// The SDK-side process timeout. This MUST sit strictly above the in-container
+// RUN_DEADLINE_MS (300s) plus the watchdog's emit-and-callback grace (~17s):
+// when the two were equal, the platform SIGKILL always beat the in-container
+// watchdog and every over-budget run died with no artifact, no callback, and
+// no deadline classification — the exact silent-failure signature this
+// revision removes.
+const AGENT_EXECUTION_TIMEOUT_MS = 330_000;
 // The Worker's own backstop, past every in-container watchdog. If a process is
 // still non-terminal this long after it started, the container-side deadlines
 // have all failed to fire and the run is wedged for good.
 const RUNNER_DEADLINE_GRACE_MS = 120_000;
+// The job writes `<requestPath>.boot` before any other work. startRun polls
+// for it so a job process that dies before its first line is an immediate,
+// classified implement-time error rather than a silent five-minute hang.
+const BOOT_VERIFICATION_TIMEOUT_MS = 15_000;
+const BOOT_POLL_INTERVAL_MS = 1_000;
+const BOOT_DIAGNOSTIC_TAIL_CHARS = 400;
 const SANDBOX_CLEANUP_TIMEOUT_MS = 5_000;
 // Generous cap: the artifact is the last thing written after a potentially
 // chatty run, and a low cap silently discarded it.
@@ -71,6 +83,10 @@ async function runIds(job: SafeJob): Promise<RunIds> {
 
 function startedMarkerPath(ids: RunIds): string {
 	return `${ids.requestPath}.started`;
+}
+
+function bootMarkerPath(ids: RunIds): string {
+	return `${ids.requestPath}.boot`;
 }
 
 /**
@@ -145,7 +161,7 @@ function gitAuthorizationEnv(token: string): Record<string, string> {
 
 async function createOrResumeSession(sandbox: ReturnType<typeof getSandbox>, ids: RunIds) {
 	try {
-		return await sandbox.createSession({ id: ids.sessionId, cwd: "/workspace", commandTimeoutMs: NANOCODEX_EXECUTION_TIMEOUT_MS });
+		return await sandbox.createSession({ id: ids.sessionId, cwd: "/workspace", commandTimeoutMs: AGENT_EXECUTION_TIMEOUT_MS });
 	} catch (error) {
 		if (!/already exists|session.*exist/iu.test(error instanceof Error ? error.message : "")) throw error;
 		return sandbox.getSession(ids.sessionId);
@@ -236,8 +252,8 @@ const internalHandler = {
 		const sandbox = getSandbox(env.Sandbox, await deterministicId("probe"), { enableDefaultSession: false });
 		try {
 			const session = await sandbox.createSession({ id: "probe", cwd: "/workspace", commandTimeoutMs: 20_000 });
-			const result = await session.exec("git --version && nanocodex --version && gh stack --help >/dev/null", { timeout: 20_000 });
-			return Response.json({ ok: result.success, exitCode: result.exitCode, stdout: result.stdout.trim().slice(0, 200), runner: "cloudflare-sandbox-nanocodex" });
+			const result = await session.exec("git --version && node --version && gh stack --help >/dev/null", { timeout: 20_000 });
+			return Response.json({ ok: result.success, exitCode: result.exitCode, stdout: result.stdout.trim().slice(0, 200), runner: "cloudflare-sandbox-direct-agent" });
 		} catch (error) {
 			return Response.json({ ok: false, state: "runner-unavailable", classification: classifySandboxFailure(error) }, { status: 503 });
 		} finally {
@@ -258,7 +274,7 @@ export class NativeGitRunner extends WorkerEntrypoint<Env> {
 		if (!job || (input.candidate !== undefined && !candidate)) throw new Error("Native Git job is outside the runner contract.");
 		if (candidate && !isOneNodeStack(candidate, job.generation)) throw new Error("Native Git runner currently accepts only the durable one-node root stack plan.");
 		const ids = await runIds(job);
-		const model = NANOCODEX_DEFAULT_MODEL;
+		const model = AGENT_DEFAULT_MODEL;
 		if (this.env.NATIVE_GIT_ENABLED !== "true" || !this.env.OPENAI_API_KEY) return { jobId: job.jobId, runId: ids.runId, state: "credential-bridge-required" };
 
 		const sandbox = getSandbox(this.env.Sandbox, ids.sandboxId, { enableDefaultSession: false });
@@ -277,7 +293,7 @@ export class NativeGitRunner extends WorkerEntrypoint<Env> {
 		} catch {
 			return { jobId: job.jobId, runId: ids.runId, state: "checkout-failed", classification: "github-installation-unavailable" };
 		}
-		const instructions = candidate ? buildNanocodexInstructions({ repository: job.repository, issueNumber: candidate.stack.issueNumber, branch: candidate.stack.branch, stackId: candidate.stack.stackId, generation: job.generation }) : "Inspect the repository checkout only.";
+		const instructions = candidate ? buildAgentInstructions({ repository: job.repository, issueNumber: candidate.stack.issueNumber, branch: candidate.stack.branch, stackId: candidate.stack.stackId, generation: job.generation }) : "Inspect the repository checkout only.";
 		// The ledger's per-run identifier rides into the container as the bearer
 		// credential for the completion callback; a run without one stays silent.
 		const ledgerRunId = typeof input.ledgerRunId === "string" && JOB_ID.test(input.ledgerRunId) ? input.ledgerRunId : null;
@@ -306,14 +322,49 @@ export class NativeGitRunner extends WorkerEntrypoint<Env> {
 				env,
 				processId: ids.runId,
 				autoCleanup: false,
-				timeout: NANOCODEX_EXECUTION_TIMEOUT_MS,
+				timeout: AGENT_EXECUTION_TIMEOUT_MS,
 			});
-			return { jobId: job.jobId, runId: ids.runId, state: "running" };
 		} catch (error) {
 			const existing = await session.getProcess(ids.runId).catch(() => null);
 			if (existing) return { jobId: job.jobId, runId: ids.runId, state: TERMINAL_PROCESS_STATUSES.has(existing.status) ? "finished" : "running" };
 			return { jobId: job.jobId, runId: ids.runId, state: "runner-unavailable", classification: classifySandboxFailure(error) };
 		}
+
+		// Boot verification: the job writes `<requestPath>.boot` before ANY other
+		// work, so a process that never produces the marker died before its first
+		// line (or never spawned). That is reported here, immediately, as a
+		// classified failure with whatever the SDK exposes about the process —
+		// never as a silent run that hangs until a five-minute backstop.
+		const bootDeadline = Date.now() + BOOT_VERIFICATION_TIMEOUT_MS;
+		let bootProcessStatus = "unknown";
+		while (Date.now() < bootDeadline) {
+			const marker = await session.readFile(bootMarkerPath(ids)).catch(() => null);
+			if (marker?.success) return { jobId: job.jobId, runId: ids.runId, state: "running" };
+			const process = await session.getProcess(ids.runId).catch(() => null);
+			bootProcessStatus = process?.status ?? "missing";
+			// A terminal process with no boot marker can never boot later: stop
+			// polling and report the diagnostics right away.
+			if (!process || TERMINAL_PROCESS_STATUSES.has(process.status)) break;
+			await new Promise((resolve) => setTimeout(resolve, BOOT_POLL_INTERVAL_MS));
+		}
+		const dead = await session.getProcess(ids.runId).catch(() => null);
+		const logs = dead ? await dead.getLogs().catch(() => null) : null;
+		await dead?.kill("SIGKILL").catch(() => null);
+		// Reclaim the container slot immediately: a sandbox whose job cannot even
+		// boot will never produce an artifact, and max_instances is 2.
+		await destroySandboxSafely(sandbox, ids.sessionId).catch(() => undefined);
+		return {
+			jobId: job.jobId,
+			runId: ids.runId,
+			state: "candidate-failed",
+			classification: "job-boot-failed",
+			boot: {
+				processStatus: dead?.status ?? bootProcessStatus,
+				exitCode: dead?.exitCode ?? null,
+				stdoutTail: (logs?.stdout ?? "").slice(-BOOT_DIAGNOSTIC_TAIL_CHARS),
+				stderrTail: (logs?.stderr ?? "").slice(-BOOT_DIAGNOSTIC_TAIL_CHARS),
+			},
+		};
 	}
 
 	async inspectRun(input: { jobId: string; generation: number; runId: string }): Promise<Record<string, unknown>> {
@@ -333,7 +384,7 @@ export class NativeGitRunner extends WorkerEntrypoint<Env> {
 				// idempotent: a repeat inspection kills an already-dead process
 				// harmlessly and returns the same terminal answer.
 				const age = await runAgeMs(session, ids);
-				if (age === null || age <= NANOCODEX_EXECUTION_TIMEOUT_MS + RUNNER_DEADLINE_GRACE_MS) return { jobId: job.jobId, runId: ids.runId, state: "running" };
+				if (age === null || age <= AGENT_EXECUTION_TIMEOUT_MS + RUNNER_DEADLINE_GRACE_MS) return { jobId: job.jobId, runId: ids.runId, state: "running" };
 				await process.kill("SIGKILL").catch(() => null);
 				// Reclaim the container slot. wrangler.jsonc pins max_instances to 2
 				// and startProcess runs with autoCleanup: false, so two wedged
@@ -344,8 +395,8 @@ export class NativeGitRunner extends WorkerEntrypoint<Env> {
 				return { jobId: job.jobId, runId: ids.runId, state: "candidate-failed", classification: "runner-deadline-enforced" };
 			}
 			const logs = await process.getLogs();
-			const artifact = parseTerminalArtifact(logs.stdout, job, NANOCODEX_DEFAULT_MODEL);
-			return artifact ? { ...artifact, runId: ids.runId } : { jobId: job.jobId, runId: ids.runId, state: "candidate-failed", classification: "nanocodex-output-invalid" };
+			const artifact = parseTerminalArtifact(logs.stdout, job, AGENT_DEFAULT_MODEL);
+			return artifact ? { ...artifact, runId: ids.runId } : { jobId: job.jobId, runId: ids.runId, state: "candidate-failed", classification: "agent-output-invalid" };
 		} catch (error) {
 			return { jobId: job.jobId, runId: ids.runId, state: "runner-unavailable", classification: classifySandboxFailure(error) };
 		}

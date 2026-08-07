@@ -1,4 +1,15 @@
 import { spawn } from "node:child_process";
+import { writeFileSync } from "node:fs";
+
+// Boot heartbeat: written before ANY other work — the first observable line of
+// this process. startRun polls for this file for up to 15 seconds; its absence
+// means the job process died before its first line (or never spawned), which
+// becomes an immediate, classified "job-boot-failed" error at implement time
+// instead of a silent five-minute hang.
+const bootRequestPath = process.argv[2];
+if (typeof bootRequestPath === "string" && bootRequestPath.startsWith("/tmp/")) {
+	try { writeFileSync(`${bootRequestPath}.boot`, new Date().toISOString()); } catch { /* startRun classifies the missing marker */ }
+}
 
 const SHA = /^[0-9a-f]{40}$/iu;
 const EVENT_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/u;
@@ -70,9 +81,24 @@ const AGENT_TIMEOUT_MS = 260_000;
 const GH_STACK_TIMEOUT_MS = 120_000;
 const GITHUB_FETCH_TIMEOUT_MS = 30_000;
 const CALLBACK_TIMEOUT_MS = 15_000;
+const HEARTBEAT_TIMEOUT_MS = 5_000;
 const RUN_DEADLINE_MS = 300_000;
 const WATCHDOG_INTERVAL_MS = 5_000;
 const KILL_GRACE_MS = 2_000;
+const MAX_TAIL_CHARS = 16_000;
+
+// Every step transition is appended here and rides along on the terminal
+// callback, so a failed run reports exactly how far it got.
+const progress = [];
+function appendProgress(step) {
+	progress.push({ step, at: Date.now() });
+}
+
+// Bounded observability tails from the agent step, carried on the terminal
+// callback. The ledger persists only its whitelisted fields; these tails are
+// transport-level diagnostics.
+let agentTranscriptTail = "";
+let agentStderrTail = "";
 
 // Every live child is tracked so the run deadline can SIGKILL all of them. A
 // surviving grandchild holds the sandbox process entry open and is exactly what
@@ -113,8 +139,11 @@ function run(command, args, options = {}) {
 				finish({ success: false, exitCode: 124, stdout, stderr: "step-timeout" });
 			}, options.timeoutMs);
 		}
-		child.stdout.on("data", (chunk) => { if (stdout.length < 16_000) stdout += chunk; });
-		child.stderr.on("data", (chunk) => { if (stderr.length < 16_000) stderr += chunk; });
+		// Bounded TAILS, not heads: for a chatty child (the agent transcript)
+		// the last lines carry the summary and the failure, so the tail is the
+		// only part worth keeping.
+		child.stdout.on("data", (chunk) => { stdout = `${stdout}${chunk}`.slice(-MAX_TAIL_CHARS); });
+		child.stderr.on("data", (chunk) => { stderr = `${stderr}${chunk}`.slice(-MAX_TAIL_CHARS); });
 		child.stdout.on("error", () => {});
 		child.stderr.on("error", () => {});
 		child.stdin.on("error", () => {});
@@ -148,7 +177,7 @@ function provenanceBody(existing, request, headSha) {
 		`- Node: \`${candidate.stack.nodeId}\``,
 		`- Parent base: \`${candidate.stack.parentBranch}\`${candidate.stack.parentBaseSha ? ` at \`${candidate.stack.parentBaseSha}\`` : ""}`,
 		`- Candidate head: \`${headSha}\``,
-		"- Operator: NanoCodex",
+		"- Operator: App Harness direct coding agent",
 		"- CI is the merge and production deployment authority.",
 		end,
 	].join("\n");
@@ -161,7 +190,7 @@ async function findAndAnnotatePullRequest(request, headSha) {
 		Accept: "application/vnd.github+json",
 		Authorization: `Bearer ${process.env.GH_TOKEN}`,
 		"Content-Type": "application/json",
-		"User-Agent": "app-harness-nanocodex",
+		"User-Agent": "app-harness-runner",
 		"X-GitHub-Api-Version": "2026-03-10",
 	};
 	try {
@@ -218,6 +247,21 @@ function stderrTail(result) {
 	return tail ? { stderrTail: tail } : {};
 }
 
+// The last parseable JSONL line with a boolean "ok" is the agent summary; the
+// lines before it are the bounded transcript.
+function parseAgentSummary(stdout) {
+	const lines = typeof stdout === "string" ? stdout.trim().split("\n") : [];
+	for (let index = lines.length - 1; index >= 0; index -= 1) {
+		const line = lines[index].trim();
+		if (!line.startsWith("{")) continue;
+		try {
+			const parsed = JSON.parse(line);
+			if (parsed && typeof parsed === "object" && typeof parsed.ok === "boolean") return parsed;
+		} catch { /* keep scanning */ }
+	}
+	return null;
+}
+
 // Report the terminal artifact to the ledger by push, so the operator wakes on
 // completion instead of polling. Failure here is non-fatal: the artifact was
 // already emitted, and the ledger's stalled-implementation fact is the backstop.
@@ -229,22 +273,52 @@ async function postCallback(result) {
 		await fetch(terminalCallback.url, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ workItemId: terminalCallback.workItemId, runId: terminalCallback.runId, artifact: result }),
+			body: JSON.stringify({
+				workItemId: terminalCallback.workItemId,
+				runId: terminalCallback.runId,
+				artifact: {
+					...result,
+					progress,
+					...(agentTranscriptTail ? { transcriptTail: agentTranscriptTail.slice(-MAX_TAIL_CHARS) } : {}),
+					...(agentStderrTail ? { agentStderrTail: agentStderrTail.slice(-MAX_TAIL_CHARS) } : {}),
+				},
+			}),
 			signal: AbortSignal.timeout(CALLBACK_TIMEOUT_MS),
 		});
 	} catch { /* best effort by design */ }
 }
 
+// Small live-state heartbeats at each major step. Fire-and-forget by design:
+// a slow ledger must never spend the run budget. The ledger records these under
+// a separate progress fact, so they can never mask the terminal artifact.
+function postHeartbeat(step) {
+	appendProgress(step);
+	if (!terminalCallback) return;
+	fetch(terminalCallback.url, {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({
+			workItemId: terminalCallback.workItemId,
+			runId: terminalCallback.runId,
+			artifact: { progress: true, state: "implementing", step, at: Date.now() },
+		}),
+		signal: AbortSignal.timeout(HEARTBEAT_TIMEOUT_MS),
+	}).catch(() => { /* best effort by design */ });
+}
+
 async function main() {
+	appendProgress("booted");
 	const request = safeRequest(await readRequest());
 	if (!request) throw new Error("input-invalid");
 	terminalCallback = request.callback;
+	appendProgress("request-validated");
 	const cloneBranch = request.candidate?.stack.parentBranch ?? "main";
 	const clone = await run("git", ["clone", "--branch", cloneBranch, `https://github.com/${request.job.repository}.git`, request.checkoutDirectory], { timeoutMs: CLONE_TIMEOUT_MS });
 	if (!clone.success) return artifact(request, "checkout-failed", { exitCode: clone.exitCode, classification: classifyGitTransportFailure(clone.stderr), ...stderrTail(clone) });
 	const base = await run("git", ["-C", request.checkoutDirectory, "rev-parse", "HEAD"], { timeoutMs: GIT_TIMEOUT_MS });
 	const baseSha = base.stdout.trim();
 	if (!base.success || !SHA.test(baseSha)) return artifact(request, "checkout-failed", { classification: "checkout-head-unavailable" });
+	postHeartbeat("cloned");
 	if (!request.candidate) return artifact(request, "checked-out", { baseSha, headSha: baseSha });
 	if (request.candidate.stack.parentBaseSha && request.candidate.stack.parentBaseSha !== baseSha) return artifact(request, "needs-restack", { baseSha, classification: "parent-base-sha-mismatch", stack: { id: request.candidate.stack.stackId, nodeId: request.candidate.stack.nodeId, branch: request.candidate.stack.branch, parentBranch: request.candidate.stack.parentBranch } });
 
@@ -255,12 +329,29 @@ async function main() {
 		? await run("git", ["-C", request.checkoutDirectory, "fetch", "origin", `refs/heads/${request.candidate.stack.branch}:refs/remotes/origin/${request.candidate.stack.branch}`], { timeoutMs: GIT_TIMEOUT_MS }).then(async (fetchResult) => fetchResult.success ? run("git", ["-C", request.checkoutDirectory, "checkout", "-B", request.candidate.stack.branch, `refs/remotes/origin/${request.candidate.stack.branch}`], { timeoutMs: GIT_TIMEOUT_MS }) : fetchResult)
 		: await run("git", ["-C", request.checkoutDirectory, "checkout", "-b", request.candidate.stack.branch], { timeoutMs: GIT_TIMEOUT_MS });
 	if (!checkout.success) return artifact(request, "candidate-failed", { classification: "candidate-branch-failed" });
+	appendProgress("branch-ready");
 
+	postHeartbeat("agent-started");
 	const agentInput = JSON.stringify({ prompt: `Implement the linked repository task exactly as requested: ${request.candidate.change.request}`, instructions: request.instructions, cwd: request.checkoutDirectory, model: request.model });
 	const agentExecution = await run("node", ["/opt/app-harness/agent-entrypoint.mjs"], { cwd: request.checkoutDirectory, input: agentInput, timeoutMs: AGENT_TIMEOUT_MS });
-	let agent = null;
-	try { agent = JSON.parse(agentExecution.stdout.trim()); } catch { agent = null; }
-	if (!agentExecution.success || !agent?.ok) return artifact(request, "candidate-failed", { classification: typeof agent?.classification === "string" ? agent.classification : agentExecution.exitCode === 124 ? "nanocodex-step-timeout" : "nanocodex-output-invalid", agent: agent && typeof agent === "object" ? agent : undefined, ...stderrTail(agentExecution) });
+	agentTranscriptTail = agentExecution.stdout;
+	agentStderrTail = agentExecution.stderr;
+	const agent = parseAgentSummary(agentExecution.stdout);
+	postHeartbeat("agent-done");
+	if (!agentExecution.success || !agent?.ok) return artifact(request, "candidate-failed", { classification: typeof agent?.classification === "string" ? agent.classification : agentExecution.exitCode === 124 ? "agent-step-timeout" : "agent-output-invalid", agent: agent && typeof agent === "object" ? agent : undefined, ...stderrTail(agentExecution) });
+
+	// The direct agent stages file contents only; this entrypoint owns Git. The
+	// commit needs an explicit identity — no global Git config exists in the
+	// container image, and an identityless commit fails outright.
+	const identityEmail = await run("git", ["-C", request.checkoutDirectory, "config", "user.email", "app-harness-os[bot]@users.noreply.github.com"], { timeoutMs: GIT_TIMEOUT_MS });
+	const identityName = await run("git", ["-C", request.checkoutDirectory, "config", "user.name", "App Harness OS"], { timeoutMs: GIT_TIMEOUT_MS });
+	if (!identityEmail.success || !identityName.success) return artifact(request, "candidate-failed", { classification: "candidate-identity-failed", agent });
+	const staged = await run("git", ["-C", request.checkoutDirectory, "add", "-A"], { timeoutMs: GIT_TIMEOUT_MS });
+	if (!staged.success) return artifact(request, "candidate-failed", { classification: "candidate-stage-failed", agent });
+	const commitTitle = request.candidate.change.request.split("\n")[0].slice(0, 72);
+	const committed = await run("git", ["-C", request.checkoutDirectory, "commit", "-m", `${commitTitle}\n\nRefs #${request.candidate.stack.issueNumber}`], { timeoutMs: GIT_TIMEOUT_MS });
+	if (!committed.success) return artifact(request, "candidate-failed", { classification: "candidate-commit-failed", agent, ...stderrTail(committed) });
+	appendProgress("committed");
 
 	const status = await run("git", ["-C", request.checkoutDirectory, "status", "--porcelain"], { timeoutMs: GIT_TIMEOUT_MS });
 	const head = await run("git", ["-C", request.checkoutDirectory, "rev-parse", "HEAD"], { timeoutMs: GIT_TIMEOUT_MS });
@@ -269,8 +360,10 @@ async function main() {
 	if (!head.success || !SHA.test(headSha) || headSha === baseSha) return artifact(request, "candidate-failed", { classification: "candidate-head-unavailable", agent });
 	const submitted = await submitOneNodeStack(request, headSha);
 	if ("classification" in submitted) return artifact(request, "candidate-failed", { classification: submitted.classification, agent });
+	postHeartbeat("pushed");
 	const pullRequest = await findAndAnnotatePullRequest(request, headSha);
 	if ("classification" in pullRequest) return artifact(request, "candidate-failed", { classification: pullRequest.classification, agent });
+	appendProgress("pull-request-annotated");
 	return artifact(request, "pull-request-opened", { baseSha, headSha, pullRequest, stack: { id: request.candidate.stack.stackId, nodeId: request.candidate.stack.nodeId, branch: request.candidate.stack.branch, parentBranch: request.candidate.stack.parentBranch, topology: submitted.topology }, agent });
 }
 
@@ -283,6 +376,10 @@ async function main() {
 // without ever emitting the deadline artifact. A ref'd interval keeps the loop
 // alive and re-checks a wall-clock deadline, so it still fires even if one tick
 // is delayed.
+//
+// The Worker-side SDK process timeout MUST sit strictly above RUN_DEADLINE_MS
+// plus this watchdog's emit grace: when the two were equal, the SDK SIGKILL
+// always won the race and no deadline artifact was ever observable.
 const startedAt = Date.now();
 const watchdog = setInterval(async () => {
 	if (Date.now() - startedAt < RUN_DEADLINE_MS) return;
@@ -298,7 +395,7 @@ const watchdog = setInterval(async () => {
 	// The push callback rides the same race: the operator relies on pushed
 	// terminal facts, so a deadline-exceeded run must wake it too, not wait
 	// for the stalled-run backstop.
-	const deadline = { jobId: terminalCallback?.workItemId ?? "unknown", state: "candidate-failed", classification: "nanocodex-deadline-exceeded" };
+	const deadline = { jobId: terminalCallback?.workItemId ?? "unknown", state: "candidate-failed", classification: "agent-deadline-exceeded" };
 	await Promise.race([
 		emit(deadline).then(() => postCallback(deadline)),
 		new Promise((resolve) => setTimeout(resolve, KILL_GRACE_MS + CALLBACK_TIMEOUT_MS)),
