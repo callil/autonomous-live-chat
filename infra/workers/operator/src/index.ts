@@ -291,7 +291,7 @@ export class OperatorTurn extends DurableObject<Env> {
 		}
 		if (staged.status === "rejected") return summarizeAction(staged);
 		// 2. Claim execution under the ledger's bounded per-action lease.
-		const begun = await this.env.LEDGER.beginOperatorAction({ actionId: staged.id });
+		const begun = await this.env.LEDGER.beginOperatorAction({ workItemId: turn.workItemId, actionId: staged.id });
 		if (begun.disposition !== "execute" || !begun.executionToken) {
 			if (begun.action.status === "applied") await this.absorbAppliedAction(turn, command, begun.action);
 			return summarizeAction(begun.action);
@@ -299,7 +299,7 @@ export class OperatorTurn extends DurableObject<Env> {
 		// 3. Execute against the private capabilities, then record the truth.
 		try {
 			const result = await executeCommand(this.env, begun.workItem, begun.action.command);
-			const done = await this.env.LEDGER.completeOperatorAction({ actionId: staged.id, idempotencyKey: begun.action.idempotencyKey, executionToken: begun.executionToken, result });
+			const done = await this.env.LEDGER.completeOperatorAction({ workItemId: turn.workItemId, actionId: staged.id, idempotencyKey: begun.action.idempotencyKey, executionToken: begun.executionToken, result });
 			this.absorbReceipt(turn, command, result);
 			await this.ctx.storage.put("turn", turn);
 			return summarizeAction(done);
@@ -307,7 +307,7 @@ export class OperatorTurn extends DurableObject<Env> {
 			// The rejection carries the reason into the ledger and back to the
 			// model in the same turn.
 			const message = error instanceof Error ? error.message : String(error);
-			const rejected = await this.env.LEDGER.rejectOperatorAction({ actionId: staged.id, executionToken: begun.executionToken, error: message });
+			const rejected = await this.env.LEDGER.rejectOperatorAction({ workItemId: turn.workItemId, actionId: staged.id, executionToken: begun.executionToken, error: message });
 			return summarizeAction(rejected);
 		}
 	}

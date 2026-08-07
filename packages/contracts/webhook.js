@@ -155,7 +155,7 @@ export function normalizeGithubWebhookFact(value) {
  * candidate/validation artifacts, so an old-generation head revision no longer
  * matches anything and the event drops on the floor.
  */
-export function matchGithubFactToWorkItem(fact, items, promotions = [], merges = []) {
+export function matchGithubFactToWorkItem(fact, items, promotions = []) {
 	const ordered = [...items].toSorted((left, right) => (left.createdAt ?? 0) - (right.createdAt ?? 0));
 	if (fact.kind === "validation") {
 		return ordered.find((item) => item.artifacts?.candidate?.headSha === fact.headSha)?.id ?? null;
@@ -172,14 +172,31 @@ export function matchGithubFactToWorkItem(fact, items, promotions = [], merges =
 		// recorded candidate head revision, fall back to the plan branch.
 		return ordered.find((item) => item.artifacts?.candidate?.headSha === fact.headSha || item.plan?.branch === fact.branch)?.id ?? null;
 	}
-	if (fact.kind === "main-deploy") {
-		// A main deploy run deploys whatever main is; the only honest join is
-		// its head revision against a recorded merged fact's merge commit,
-		// which the caller supplies from the per-item fact records.
-		const live = new Set(ordered.map((item) => item.id));
-		return merges.find((entry) => entry.mergeCommitSha === fact.headSha && live.has(entry.workItemId))?.workItemId ?? null;
-	}
 	return null;
+}
+
+/**
+ * A main deploy run deploys whatever main is, so one completed run is deploy
+ * evidence for EVERY live item whose merge commit its head contains. The exact
+ * join is head revision === recorded merge commit. Containment is the
+ * descendant relation, and main history is linear (squash merges only), so a
+ * SUCCESSFUL run created after an item's merged fact was recorded provably
+ * deployed a descendant of that item's merge commit — that temporal join keeps
+ * back-to-back merges (whose queued deploy runs GitHub cancels) on the fast
+ * lane instead of forcing the heavyweight promotion fallback.
+ */
+export function matchGithubMainDeployToWorkItems(fact, items, merges = []) {
+	const live = new Set(items.map((item) => item.id));
+	const matched = [];
+	for (const entry of merges) {
+		if (!live.has(entry.workItemId)) continue;
+		if (entry.mergeCommitSha === fact.headSha) {
+			matched.push(entry.workItemId);
+		} else if (fact.conclusion === "success" && Number.isFinite(entry.mergedAt) && Date.parse(fact.createdAt) > entry.mergedAt) {
+			matched.push(entry.workItemId);
+		}
+	}
+	return matched;
 }
 
 /**

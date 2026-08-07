@@ -37,6 +37,10 @@ export function matchGithubFactToWorkItem(
 	fact: GithubWebhookFact,
 	items: readonly GithubFactWorkItemView[],
 	promotions?: readonly { workItemId: string; dispatchKey: string }[],
-	merges?: readonly { workItemId: string; mergeCommitSha: string }[],
 ): string | null;
+export function matchGithubMainDeployToWorkItems(
+	fact: Extract<GithubWebhookFact, { kind: "main-deploy" }>,
+	items: readonly GithubFactWorkItemView[],
+	merges?: readonly { workItemId: string; mergeCommitSha: string; mergedAt?: number }[],
+): string[];
 export function mergeGithubFact<T extends GithubFactRecord>(existing: T | undefined, fact: GithubWebhookFact, now: number): T | null;
