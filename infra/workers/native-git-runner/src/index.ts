@@ -42,12 +42,6 @@ const TERMINAL_PROCESS_STATUSES = new Set(["completed", "failed", "killed", "err
 const TERMINAL_RUN_STATES = new Set(["checked-out", "needs-restack", "checkout-failed", "candidate-failed", "pull-request-opened"]);
 const encoder = new TextEncoder();
 
-function base64Url(bytes: Uint8Array): string {
-	let binary = "";
-	for (const byte of bytes) binary += String.fromCharCode(byte);
-	return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/u, "");
-}
-
 async function deterministicId(scope: string): Promise<string> {
 	const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", encoder.encode(`${RUNNER_IMAGE_REVISION}:${scope}`)));
 	// Sandbox IDs are DNS labels: lowercase hex only, so the identifier can
