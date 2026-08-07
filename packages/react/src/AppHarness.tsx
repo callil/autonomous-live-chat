@@ -1,4 +1,4 @@
-import { FormEvent, ReactNode, useEffect, useId, useState } from "react";
+import { FormEvent, KeyboardEvent, ReactNode, useEffect, useId, useState } from "react";
 import { AppHarnessTarget, targetFromElement } from "./target.js";
 
 export type AppHarnessSubmission = {
@@ -70,10 +70,17 @@ export function AppHarness({ children, onRequest, onOpenActivity, activityCount 
     setStatus("submitting");
     try {
       await onRequest({ request: normalized, target });
+      setRequest("");
       setStatus("submitted");
     } catch {
       setStatus("error");
     }
+  };
+
+  const submitWithShortcut = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key !== "Enter" || (!event.metaKey && !event.ctrlKey)) return;
+    event.preventDefault();
+    event.currentTarget.form?.requestSubmit();
   };
 
   return <>
@@ -87,8 +94,8 @@ export function AppHarness({ children, onRequest, onOpenActivity, activityCount 
           {onOpenActivity && <button className="ah-activity" type="button" aria-label={`Open activity (${activityCount})`} data-app-harness-id="activity-control" data-app-harness-label="Activity control" onClick={onOpenActivity}><i aria-hidden="true" /><span>{activityCount}</span></button>}
         </div> : <form aria-labelledby={composerId} onSubmit={submit}>
           <label id={composerId} htmlFor={`${composerId}-request`}>Target: {target.label ?? target.targetId}</label>
-          <textarea id={`${composerId}-request`} autoFocus value={request} onChange={(event) => setRequest(event.target.value)} placeholder="Describe the change" />
-          <div className="ah-form-meta"><button type="submit" disabled={!request.trim() || status === "submitting"}>{status === "submitting" ? "Submitting…" : "Submit"}</button></div>
+          <textarea id={`${composerId}-request`} autoFocus value={request} onChange={(event) => setRequest(event.target.value)} onKeyDown={submitWithShortcut} placeholder="Describe the change" aria-describedby={`${composerId}-hint`} />
+          <div className="ah-form-meta"><span id={`${composerId}-hint`}>⌘ Enter to send</span><button type="submit" disabled={!request.trim() || status === "submitting"}>{status === "submitting" ? "Submitting…" : "Submit"}</button></div>
           {status === "submitted" && <p role="status">Request submitted.</p>}
           {status === "error" && <p role="alert">The request could not be submitted.</p>}
           <button className="ah-back" type="button" onClick={() => { setTarget(undefined); setRequest(""); setStatus("idle"); }}>Choose another target</button>
