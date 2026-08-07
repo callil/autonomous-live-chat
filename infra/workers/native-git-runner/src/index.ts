@@ -37,7 +37,7 @@ type RunIds = { sandboxId: string; sessionId: string; runId: string; checkoutDir
 const JOB_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/u;
 const BRANCH = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,159}$/u;
 const SHA = /^[0-9a-f]{40}$/iu;
-const RUNNER_IMAGE_REVISION = "da052-async013";
+const RUNNER_IMAGE_REVISION = "da052-async014";
 // The SDK-side process timeout. This MUST sit strictly above the in-container
 // RUN_DEADLINE_MS (300s) plus the watchdog's emit-and-callback grace (~17s):
 // when the two were equal, the platform SIGKILL always beat the in-container
@@ -308,7 +308,11 @@ export class NativeGitRunner extends WorkerEntrypoint<Env> {
 		const callback = ledgerRunId && this.env.LEDGER_CALLBACK_URL?.startsWith("https://")
 			? { url: this.env.LEDGER_CALLBACK_URL, workItemId: job.jobId, runId: ledgerRunId }
 			: null;
-		const request = { job, candidate, model, runId: processId, checkoutDirectory: ids.checkoutDirectory, instructions, callback };
+		// The checkout is per-attempt, like the process: a killed attempt leaves
+		// a non-empty clone behind in the same deterministic sandbox, and git
+		// refuses to clone into it - the retry must get a fresh directory.
+		const checkoutDirectory = `/workspace/${processId}-repository`;
+		const request = { job, candidate, model, runId: processId, checkoutDirectory, instructions, callback };
 		const write = await session.writeFile(ids.requestPath, JSON.stringify(request));
 		if (!write.success) return { jobId: job.jobId, runId: processId, state: "runner-unavailable", classification: "runner-input-write-failed" };
 		// Persist the start marker so inspectRun can derive run age. A failed
