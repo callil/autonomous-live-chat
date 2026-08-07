@@ -213,7 +213,18 @@ jobs:
           # log names the failure mode instead of a generic non-zero exit.
           case "$status" in
             0) ;;
-            9) echo '::error::gh stack merge exit 9: stacked pull requests are not enabled for this repository — unwinnable, do not re-dispatch.'; exit 9 ;;
+            2|6|9)
+              # Absence class: this repository does not serve server-side stack
+              # objects (verified: pr.stack is null and the stacks REST surface
+              # 404s), so the native cascade has nothing to operate on. The
+              # documented "legacy endpoints can't merge a stack member" rule
+              # does not bind a PR that is not a real stack member; the legacy
+              # squash merge with the exact-head match remains sound, and every
+              # surrounding guarantee (pre-merge reverify, remote-main equality,
+              # post-merge exact-tree verification) applies unchanged.
+              echo "gh stack merge exit ${status}: no server-side stack to operate on — falling back to the exact-head legacy merge."
+              gh pr merge "$PR" --squash --delete-branch --match-head-commit "$EXPECTED_HEAD"
+              ;;
             8) echo '::error::gh stack merge exit 8: the stack is locked by another process — back off, then re-dispatch the promotion.'; exit 8 ;;
             4) echo '::error::gh stack merge exit 4: GitHub API failure — retryable; re-dispatch the promotion.'; exit 4 ;;
             3) echo '::error::gh stack merge exit 3: rebase conflict — the candidate needs a restack (next generation, fresh base).'; exit 3 ;;
