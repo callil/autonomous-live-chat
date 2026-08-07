@@ -65,6 +65,7 @@ export function operatorCommandEffectSatisfied(workItem, command) {
 	if (command.kind === "record-candidate") return workItem.artifacts.candidate?.runId === command.runId;
 	if (command.kind === "promote") return false;
 	if (command.kind === "record-state") {
+		if (workItem.phase === command.phase) return true;
 		const current = PHASE_ORDER.indexOf(workItem.phase);
 		const expected = PHASE_ORDER.indexOf(command.phase);
 		return current >= 0 && expected >= 0 && current >= expected;

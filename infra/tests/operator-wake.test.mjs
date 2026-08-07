@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { beginOperatorWakeDelivery, queueOperatorWakeRecord, settleOperatorWakeRecord } from "../../packages/contracts/wake.js";
+import { beginOperatorWakeDelivery, operatorWakeDeliveryExhausted, queueOperatorWakeRecord, settleOperatorWakeRecord } from "../../packages/contracts/wake.js";
 
 const pending = queueOperatorWakeRecord(undefined, { id: "work-1", workItemId: "work-1", version: 1, now: 100, delayMs: 0 });
 const inFlight = beginOperatorWakeDelivery(pending, { currentVersion: 1, terminal: false, now: 100, responseLeaseMs: 1_000 });
@@ -23,5 +23,7 @@ assert.equal(recovered.turn, 2);
 assert.equal(recovered.state, "in_flight");
 assert.equal(recovered.attempts, 2, "a missing callback produces one explicit recovery attempt after the full response lease");
 assert.equal(beginOperatorWakeDelivery(afterResponse, { currentVersion: 2, terminal: true, now: 130, responseLeaseMs: 1_000 }), null, "terminal work deletes pending wakes");
+assert.equal(operatorWakeDeliveryExhausted({ ...pending, state: "pending", attempts: 3 }, 3), true, "immediate delivery failures are capped even after the wake returns to pending");
+assert.equal(operatorWakeDeliveryExhausted({ ...inFlight, attempts: 2 }, 3), false, "the final bounded delivery remains available");
 
 console.log("operator wake barrier and no-progress contracts passed");
