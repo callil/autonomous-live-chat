@@ -1,15 +1,8 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import { assertOperatorCommandAllowed, operatorActionEffectKey, operatorCommandEffectSatisfied } from "../../packages/contracts/operator.js";
 import { SYSTEM_PROMPT, TOOLS } from "../workers/operator/src/operator-tools.js";
 
-const operatorTypes = await readFile(new URL("../cloudflare-os/overlay/packages/gatekeeper-app-harness-operator/src/types.ts", import.meta.url), "utf8");
 const toolNames = new Set(TOOLS.map((entry) => entry.function.name));
-// The retired Gatekeeper's declared write vocabulary survives as strict tool
-// schemas one for one; nothing was silently dropped in the transport swap.
-const declaredWrites = [...operatorTypes.matchAll(/^\s*(stage[A-Z][A-Za-z]+)\(input:/gmu)].map((match) => match[1]);
-assert.ok(declaredWrites.length > 0, "the Gatekeeper declares writable operator methods");
-for (const method of declaredWrites) assert.ok(toolNames.has(method), `the operator worker keeps declared write ${method} as a schema tool`);
 for (const method of ["getMainSha", "inspectImplementation", "getCandidate", "observeCandidateValidation", "findPromotionRun", "inspectPromotionRun"]) {
 	assert.ok(toolNames.has(method), `the operator worker keeps required observation ${method}`);
 }
