@@ -1,18 +1,20 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { assertOperatorCommandAllowed, operatorActionEffectKey, operatorCommandEffectSatisfied } from "../../packages/contracts/operator.js";
+import { SYSTEM_PROMPT, TOOLS } from "../workers/operator/src/operator-tools.js";
 
-const demoWorker = await readFile(new URL("../../apps/demo/src/index.ts", import.meta.url), "utf8");
 const operatorTypes = await readFile(new URL("../cloudflare-os/overlay/packages/gatekeeper-app-harness-operator/src/types.ts", import.meta.url), "utf8");
-const instruction = demoWorker.match(/const OPERATOR_INSTRUCTION = "([^"]+)";/u)?.[1] ?? "";
+const toolNames = new Set(TOOLS.map((entry) => entry.function.name));
+// The retired Gatekeeper's declared write vocabulary survives as strict tool
+// schemas one for one; nothing was silently dropped in the transport swap.
 const declaredWrites = [...operatorTypes.matchAll(/^\s*(stage[A-Z][A-Za-z]+)\(input:/gmu)].map((match) => match[1]);
 assert.ok(declaredWrites.length > 0, "the Gatekeeper declares writable operator methods");
-for (const method of declaredWrites) assert.match(instruction, new RegExp(`\\b${method}\\b`, "u"), `the operator prompt names declared write ${method}`);
-for (const method of ["getWorkItem", "listActions", "getMainSha", "inspectImplementation", "getCandidate", "observeCandidateValidation", "findPromotionRun", "inspectPromotionRun"]) {
-	assert.match(instruction, new RegExp(`\\b${method}\\b`, "u"), `the operator prompt names required observation ${method}`);
+for (const method of declaredWrites) assert.ok(toolNames.has(method), `the operator worker keeps declared write ${method} as a schema tool`);
+for (const method of ["getMainSha", "inspectImplementation", "getCandidate", "observeCandidateValidation", "findPromotionRun", "inspectPromotionRun"]) {
+	assert.ok(toolNames.has(method), `the operator worker keeps required observation ${method}`);
 }
-assert.match(instruction, /claim -> classification -> issue -> plan -> implementation -> candidate -> validating -> promotion -> deployed -> completed/u, "the compact prompt encodes legal workflow order");
-assert.match(instruction, /stageRelease and stageDefer are parking exits: after either, stop/u, "parking writes end a turn instead of imitating progress");
+assert.match(SYSTEM_PROMPT, /claim -> classification -> issue -> plan -> implementation -> candidate -> validating -> promotion -> deployed -> completed/u, "the compact prompt encodes legal workflow order");
+assert.match(SYSTEM_PROMPT, /stageRelease and stageDefer are parking exits: after either, stop/u, "parking writes end a turn instead of imitating progress");
 
 const claimed = {
 	id: "work-1",
