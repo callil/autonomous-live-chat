@@ -275,38 +275,46 @@ export class NativeGitRunner extends WorkerEntrypoint<Env> {
 		if (candidate && !isOneNodeStack(candidate, job.generation)) throw new Error("Native Git runner currently accepts only the durable one-node root stack plan.");
 		const ids = await runIds(job);
 		const model = AGENT_DEFAULT_MODEL;
-		if (this.env.NATIVE_GIT_ENABLED !== "true" || !this.env.OPENAI_API_KEY) return { jobId: job.jobId, runId: ids.runId, state: "credential-bridge-required" };
+		// The sandbox and branch identities stay deterministic (idempotency lives
+		// in the ledger), but every attempt gets its OWN process identity: the
+		// sandbox DO persists process records, so a deterministic process id made
+		// retries attach to a prior attempt's corpse instead of spawning at all.
+		const ledgerRunId = typeof input.ledgerRunId === "string" && JOB_ID.test(input.ledgerRunId) ? input.ledgerRunId : null;
+		const processId = `p-${(ledgerRunId ?? crypto.randomUUID()).toLowerCase()}`;
+		if (this.env.NATIVE_GIT_ENABLED !== "true" || !this.env.OPENAI_API_KEY) return { jobId: job.jobId, runId: processId, state: "credential-bridge-required" };
 
 		const sandbox = getSandbox(this.env.Sandbox, ids.sandboxId, { enableDefaultSession: false });
 		let session;
 		try {
 			session = await createOrResumeSession(sandbox, ids);
-			const existing = await session.getProcess(ids.runId).catch(() => null);
-			if (existing) return { jobId: job.jobId, runId: ids.runId, state: TERMINAL_PROCESS_STATUSES.has(existing.status) ? "finished" : "running" };
+			const existing = await session.getProcess(processId).catch(() => null);
+			if (existing) return { jobId: job.jobId, runId: processId, state: TERMINAL_PROCESS_STATUSES.has(existing.status) ? "finished" : "running" };
 		} catch (error) {
-			return { jobId: job.jobId, runId: ids.runId, state: "runner-unavailable", classification: classifySandboxFailure(error) };
+			return { jobId: job.jobId, runId: processId, state: "runner-unavailable", classification: classifySandboxFailure(error) };
 		}
 
 		let token: string;
 		try {
 			({ token } = await this.env.GITHUB_APP.createRunnerToken({ repository: job.repository, jobId: job.jobId, generation: job.generation }));
 		} catch {
-			return { jobId: job.jobId, runId: ids.runId, state: "checkout-failed", classification: "github-installation-unavailable" };
+			return { jobId: job.jobId, runId: processId, state: "checkout-failed", classification: "github-installation-unavailable" };
 		}
 		const instructions = candidate ? buildAgentInstructions({ repository: job.repository, issueNumber: candidate.stack.issueNumber, branch: candidate.stack.branch, stackId: candidate.stack.stackId, generation: job.generation }) : "Inspect the repository checkout only.";
 		// The ledger's per-run identifier rides into the container as the bearer
 		// credential for the completion callback; a run without one stays silent.
-		const ledgerRunId = typeof input.ledgerRunId === "string" && JOB_ID.test(input.ledgerRunId) ? input.ledgerRunId : null;
 		const callback = ledgerRunId && this.env.LEDGER_CALLBACK_URL?.startsWith("https://")
 			? { url: this.env.LEDGER_CALLBACK_URL, workItemId: job.jobId, runId: ledgerRunId }
 			: null;
-		const request = { job, candidate, model, runId: ids.runId, checkoutDirectory: ids.checkoutDirectory, instructions, callback };
+		const request = { job, candidate, model, runId: processId, checkoutDirectory: ids.checkoutDirectory, instructions, callback };
 		const write = await session.writeFile(ids.requestPath, JSON.stringify(request));
-		if (!write.success) return { jobId: job.jobId, runId: ids.runId, state: "runner-unavailable", classification: "runner-input-write-failed" };
+		if (!write.success) return { jobId: job.jobId, runId: processId, state: "runner-unavailable", classification: "runner-input-write-failed" };
 		// Persist the start marker so inspectRun can derive run age. A failed
 		// write is not fatal: it only costs the Worker-side backstop, and the
 		// in-container watchdogs still bound the run.
 		await session.writeFile(startedMarkerPath(ids), new Date().toISOString()).catch(() => null);
+		// A prior attempt in this sandbox may have left its marker behind; an
+		// empty overwrite means only THIS attempt's write can satisfy boot.
+		await session.writeFile(bootMarkerPath(ids), "").catch(() => null);
 		const env: Record<string, string> = {
 			...gitAuthorizationEnv(token),
 			OPENAI_API_KEY: this.env.OPENAI_API_KEY,
@@ -320,14 +328,14 @@ export class NativeGitRunner extends WorkerEntrypoint<Env> {
 			await session.startProcess(`node /opt/app-harness/job-entrypoint.mjs ${ids.requestPath}`, {
 				cwd: "/workspace",
 				env,
-				processId: ids.runId,
+				processId,
 				autoCleanup: false,
 				timeout: AGENT_EXECUTION_TIMEOUT_MS,
 			});
 		} catch (error) {
-			const existing = await session.getProcess(ids.runId).catch(() => null);
-			if (existing) return { jobId: job.jobId, runId: ids.runId, state: TERMINAL_PROCESS_STATUSES.has(existing.status) ? "finished" : "running" };
-			return { jobId: job.jobId, runId: ids.runId, state: "runner-unavailable", classification: classifySandboxFailure(error) };
+			const existing = await session.getProcess(processId).catch(() => null);
+			if (existing) return { jobId: job.jobId, runId: processId, state: TERMINAL_PROCESS_STATUSES.has(existing.status) ? "finished" : "running" };
+			return { jobId: job.jobId, runId: processId, state: "runner-unavailable", classification: classifySandboxFailure(error) };
 		}
 
 		// Boot verification: the job writes `<requestPath>.boot` before ANY other
@@ -339,23 +347,26 @@ export class NativeGitRunner extends WorkerEntrypoint<Env> {
 		let bootProcessStatus = "unknown";
 		while (Date.now() < bootDeadline) {
 			const marker = await session.readFile(bootMarkerPath(ids)).catch(() => null);
-			if (marker?.success) return { jobId: job.jobId, runId: ids.runId, state: "running" };
-			const process = await session.getProcess(ids.runId).catch(() => null);
+			if (marker?.success && marker.content) return { jobId: job.jobId, runId: processId, state: "running" };
+			const process = await session.getProcess(processId).catch(() => null);
 			bootProcessStatus = process?.status ?? "missing";
 			// A terminal process with no boot marker can never boot later: stop
 			// polling and report the diagnostics right away.
 			if (!process || TERMINAL_PROCESS_STATUSES.has(process.status)) break;
 			await new Promise((resolve) => setTimeout(resolve, BOOT_POLL_INTERVAL_MS));
 		}
-		const dead = await session.getProcess(ids.runId).catch(() => null);
+		const dead = await session.getProcess(processId).catch(() => null);
 		const logs = dead ? await dead.getLogs().catch(() => null) : null;
 		await dead?.kill("SIGKILL").catch(() => null);
 		// Reclaim the container slot immediately: a sandbox whose job cannot even
 		// boot will never produce an artifact, and max_instances is 2.
 		await destroySandboxSafely(sandbox, ids.sessionId).catch(() => undefined);
+		// The dead process's own words are the diagnosis: put them on the tail
+		// stream where an operator (human or agent) can actually read them.
+		console.log(JSON.stringify({ event: "job-boot-failed", processId, bootProcessStatus, exitCode: dead?.exitCode ?? null, stdout: logs?.stdout?.slice(-BOOT_DIAGNOSTIC_TAIL_CHARS) ?? null, stderr: logs?.stderr?.slice(-BOOT_DIAGNOSTIC_TAIL_CHARS) ?? null }));
 		return {
 			jobId: job.jobId,
-			runId: ids.runId,
+			runId: processId,
 			state: "candidate-failed",
 			classification: "job-boot-failed",
 			boot: {
@@ -371,7 +382,6 @@ export class NativeGitRunner extends WorkerEntrypoint<Env> {
 		const job = safeJob({ jobId: input.jobId, repository: this.env.ALLOWED_REPOSITORY, generation: input.generation }, this.env);
 		if (!job) throw new Error("Native Git inspection is outside the runner contract.");
 		const ids = await runIds(job);
-		if (input.runId !== ids.runId) throw new Error("Native Git inspection does not match the deterministic run identifier.");
 		const sandbox = getSandbox(this.env.Sandbox, ids.sandboxId, { enableDefaultSession: false });
 		try {
 			const session = await sandbox.getSession(ids.sessionId);
@@ -406,7 +416,6 @@ export class NativeGitRunner extends WorkerEntrypoint<Env> {
 		const job = safeJob({ jobId: input.jobId, repository: this.env.ALLOWED_REPOSITORY, generation: input.generation }, this.env);
 		if (!job) throw new Error("Native Git cancellation is outside the runner contract.");
 		const ids = await runIds(job);
-		if (input.runId !== ids.runId) throw new Error("Native Git cancellation does not match the deterministic run identifier.");
 		const sandbox = getSandbox(this.env.Sandbox, ids.sandboxId, { enableDefaultSession: false });
 		const session = await sandbox.getSession(ids.sessionId);
 		const process = await session.getProcess(ids.runId);

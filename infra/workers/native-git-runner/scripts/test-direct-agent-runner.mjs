@@ -54,7 +54,7 @@ assert.match(source, /kind: "repository-task"/u);
 assert.match(source, /node \/opt\/app-harness\/job-entrypoint\.mjs/u);
 assert.match(source, /session\.writeFile\(ids\.requestPath, JSON\.stringify/u);
 assert.match(source, /session\.startProcess/u);
-assert.match(source, /processId: ids\.runId/u);
+assert.match(source, /const processId = `p-\$\{\(ledgerRunId \?\? crypto\.randomUUID\(\)\)/u, "every attempt gets its own process identity so retries can never attach to a prior attempt's record");
 assert.match(source, /autoCleanup: false/u);
 assert.match(source, /timeout: AGENT_EXECUTION_TIMEOUT_MS/u);
 assert.match(source, /state: "runner-unavailable"/u);
