@@ -49,8 +49,13 @@ assert.equal(implementationKey(planned), `work-1:p1:g1:${SHA}`);
 
 const started = startLedgerImplementation(planned, { runId: "run-1", now: 5 });
 assert.equal(started.disposition, "started");
-const duplicate = startLedgerImplementation(started.item, { runId: "run-2", now: 6 });
-assert.equal(duplicate.disposition, "resume", "the same accepted plan must resume instead of spawning duplicate coding-agent work");
+const duplicate = startLedgerImplementation(started.item, { runId: "run-1", now: 6 });
+assert.equal(duplicate.disposition, "resume", "replaying the same attempt resumes instead of spawning duplicate coding-agent work");
+// A FRESH runId is a deliberate restart: a dead or platform-killed run must be
+// replaceable in place without waiting for a phase transition.
+const restarted = startLedgerImplementation(started.item, { runId: "run-2", now: 7 });
+assert.equal(restarted.disposition, "started", "a fresh runId restarts the implementation in place");
+assert.equal(restarted.item.activeImplementation.runId, "run-2");
 
 const candidate = recordLedgerCandidate(started.item, {
 	runId: "run-1",

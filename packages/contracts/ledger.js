@@ -167,7 +167,11 @@ export function startLedgerImplementation(item, { runId, now }) {
 	if (!item.plan) throw new Error("A plan is required before implementation.");
 	if (!["delegated", "implementing", "candidate"].includes(item.phase)) throw new Error("Only delegated work can start implementation.");
 	const key = implementationKey(item);
-	if (item.activeImplementation?.key === key) {
+	// Resume is for idempotent replay of the SAME attempt only. A fresh runId
+	// is a deliberate restart - a dead or platform-killed run must be
+	// replaceable in place, and the runner derives fresh process identity per
+	// attempt so nothing resumes a corpse.
+	if (item.activeImplementation?.key === key && item.activeImplementation.runId === runId) {
 		return { disposition: "resume", item };
 	}
 	if (item.artifacts?.candidate?.implementationKey === key) {
