@@ -410,6 +410,11 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		if (input.command.kind === "plan" && input.command.plan && typeof input.command.plan === "object") {
 			input.command = { ...input.command, plan: canonicalOneNodePlan(workItem, input.command.plan) };
 		}
+		// A candidate can only ever belong to the active implementation run; the
+		// operator decides to record it, the ledger owns the run identity.
+		if (input.command.kind === "record-candidate" && workItem.activeImplementation) {
+			input.command = { ...input.command, runId: workItem.activeImplementation.runId };
+		}
 		validateOperatorCommand(input.command);
 		const key = operatorActionEffectKey(workItem.id, input.command);
 		const existingId = await this.ctx.storage.get<number>(`${ACTION_KEY_PREFIX}${key}`);
