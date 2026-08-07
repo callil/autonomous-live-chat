@@ -67,6 +67,24 @@
       }
     },
     {
+      "id": "workshop-external-message-ambient-capsules-v1",
+      "kind": "text-replacement",
+      "destination": "packages/workshop-backend/src/overseer.ts",
+      "baseCommit": "0eaec6c5e8fc6b3298ea1aa73bf5c3e47b923c7f",
+      "expectedSha256": "e11ee9479c995cc6219a0deac0ed5382550b2c2c0642b5cd943ddd76d0ec96f6",
+      "search": "    // Find the external conversation's chat if it exists.\n",
+      "replace": "    // External messages bypass open(), so provision the owner's ambient singleton\n    // capabilities before the first chat freezes its binding seed. Idempotent on retries.\n    await this.impl.ensureAmbientCapsules();\n\n    // Find the external conversation's chat if it exists.\n",
+      "expectedMatches": 1,
+      "review": {
+        "status": "ready-for-maintainer-review",
+        "securityInvariants": [
+          "External messages receive only ambient singleton capabilities already enabled by the Workshop administrator policy.",
+          "Provisioning happens before a new chat freezes its binding seed and is idempotent for reused workspaces.",
+          "The external gateway does not receive credentials or directly construct a Gatekeeper session."
+        ]
+      }
+    },
+    {
       "id": "workshop-app-harness-forced-provisioning-v1",
       "kind": "text-replacement",
       "destination": "packages/workshop-backend/src/provisioning-policy.ts",

@@ -35,13 +35,23 @@ for (const patch of manifest.patches.filter((candidate) => candidate.kind === "d
   console.log(`applied ${patch.id} -> ${patch.destination}`);
 }
 
+const replacementFiles = new Map();
 for (const patch of manifest.patches.filter((candidate) => candidate.kind === "text-replacement")) {
   const destination = path.join(checkout, patch.destination);
-  const source = await readFile(destination, "utf8");
-  const actual = createHash("sha256").update(source).digest("hex");
-  if (actual !== patch.expectedSha256) throw new Error(`Refusing ${patch.id}: pinned upstream text does not match the reviewed source hash.`);
-  const parts = source.split(patch.search);
+  let replacementFile = replacementFiles.get(destination);
+  if (!replacementFile) {
+    const source = await readFile(destination, "utf8");
+    const baseSha256 = createHash("sha256").update(source).digest("hex");
+    replacementFile = { source, baseSha256 };
+    replacementFiles.set(destination, replacementFile);
+  }
+  if (replacementFile.baseSha256 !== patch.expectedSha256) throw new Error(`Refusing ${patch.id}: pinned upstream text does not match the reviewed source hash.`);
+  const parts = replacementFile.source.split(patch.search);
   if (parts.length - 1 !== patch.expectedMatches) throw new Error(`Refusing ${patch.id}: expected ${patch.expectedMatches} reviewed text match(es).`);
-  await writeFile(destination, parts.join(patch.replace));
+  replacementFile.source = parts.join(patch.replace);
   console.log(`applied ${patch.id} -> ${patch.destination}`);
+}
+
+for (const [destination, replacementFile] of replacementFiles) {
+  await writeFile(destination, replacementFile.source);
 }

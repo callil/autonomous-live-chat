@@ -56,6 +56,10 @@ if (integration.schemaVersion !== 1 || integration.workshop?.gatekeeper?.binding
 if (!Array.isArray(integration.removeGatekeeperBindings) || !["GATEKEEPER_CUSTOM", "GATEKEEPER_GITHUB"].every((binding) => integration.removeGatekeeperBindings.includes(binding))) {
   fail("integration manifest must remove obsolete Gatekeeper bindings.");
 }
+const externalAmbientPatch = manifest.patches.find((patch) => patch.id === "workshop-external-message-ambient-capsules-v1");
+if (externalAmbientPatch?.kind !== "text-replacement" || !externalAmbientPatch.replace.includes("await this.impl.ensureAmbientCapsules();")) {
+  fail("external-message workspaces must provision ambient singleton capabilities before freezing chat bindings.");
+}
 const gatekeeperWrangler = JSON.parse(await readFile(path.join(root, "overlay/packages/gatekeeper-app-harness-operator/wrangler.jsonc"), "utf8"));
 for (const binding of ["LEDGER", "RUNNER", "GITHUB"]) {
   if (!gatekeeperWrangler.services?.some((service) => service.binding === binding)) fail(`Gatekeeper overlay must bind ${binding} as a private service.`);
