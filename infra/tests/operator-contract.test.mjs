@@ -29,5 +29,6 @@ assert.notEqual(operatorActionEffectKey("work-1", { kind: "plan", plan: { revisi
 assert.equal(operatorCommandEffectSatisfied(withIssue, { kind: "create-issue" }), true, "an interrupted issue action reconciles from its durable artifact");
 assert.equal(operatorCommandEffectSatisfied({ ...withIssue, plan: { revision: 1 } }, { kind: "plan", plan: { revision: 1 } }), true, "an interrupted plan action reconciles from the exact durable revision");
 assert.equal(operatorCommandEffectSatisfied(withIssue, { kind: "promote", dispatchKey: "dispatch-1" }), false, "an external dispatch is never guessed from ledger phase alone");
+assert.equal(operatorCommandEffectSatisfied({ ...withIssue, phase: "retryable" }, { kind: "record-state", phase: "retryable" }), true, "a lost receipt for an exact retryable transition reconciles without blocking the next claim");
 
 console.log("operator action ordering and semantic idempotency contracts passed");

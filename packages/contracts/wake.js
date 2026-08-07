@@ -24,3 +24,7 @@ export function beginOperatorWakeDelivery(wake, input) {
 	}
 	return { ...current, turn: current.turn ?? 1, state: "in_flight", attempts: current.attempts + 1, availableAt: input.now + input.responseLeaseMs, nextVersion: undefined };
 }
+
+export function operatorWakeDeliveryExhausted(wake, maximumAttempts) {
+	return Number.isSafeInteger(maximumAttempts) && maximumAttempts > 0 && wake.attempts >= maximumAttempts;
+}

@@ -25,7 +25,7 @@ import {
 	type LedgerWorkItem,
 } from "@app-harness/contracts/ledger";
 import { assertOperatorCommandAllowed, operatorActionEffectKey, operatorCommandEffectSatisfied } from "@app-harness/contracts/operator";
-import { beginOperatorWakeDelivery, queueOperatorWakeRecord, settleOperatorWakeRecord } from "@app-harness/contracts/wake";
+import { beginOperatorWakeDelivery, operatorWakeDeliveryExhausted, queueOperatorWakeRecord, settleOperatorWakeRecord } from "@app-harness/contracts/wake";
 
 type ChatMessage = {
 	id: string;
@@ -760,7 +760,7 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 					await txn.delete(key);
 					return undefined;
 				}
-				if (currentWake.state === "in_flight" && currentWake.attempts >= OPERATOR_TURN_DELIVERY_ATTEMPTS) {
+				if (operatorWakeDeliveryExhausted(currentWake, OPERATOR_TURN_DELIVERY_ATTEMPTS)) {
 					await txn.delete(key);
 					return { kind: "exhausted", item: currentItem } as const;
 				}
