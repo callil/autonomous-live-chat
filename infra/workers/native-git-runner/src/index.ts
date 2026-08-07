@@ -14,6 +14,7 @@ type Env = {
 	OPENAI_API_KEY: string;
 	SANDBOX_CLOUDFLARE_ACCOUNT_ID?: string;
 	LEDGER_CALLBACK_URL?: string;
+	AGENT_MODEL?: string;
 };
 
 type NativeGitJob = { jobId?: unknown; repository?: unknown; generation?: unknown; candidate?: unknown; ledgerRunId?: unknown };
@@ -36,7 +37,7 @@ type RunIds = { sandboxId: string; sessionId: string; runId: string; checkoutDir
 const JOB_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/u;
 const BRANCH = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,159}$/u;
 const SHA = /^[0-9a-f]{40}$/iu;
-const RUNNER_IMAGE_REVISION = "da052-async012";
+const RUNNER_IMAGE_REVISION = "da052-async013";
 // The SDK-side process timeout. This MUST sit strictly above the in-container
 // RUN_DEADLINE_MS (300s) plus the watchdog's emit-and-callback grace (~17s):
 // when the two were equal, the platform SIGKILL always beat the in-container
@@ -274,7 +275,9 @@ export class NativeGitRunner extends WorkerEntrypoint<Env> {
 		if (!job || (input.candidate !== undefined && !candidate)) throw new Error("Native Git job is outside the runner contract.");
 		if (candidate && !isOneNodeStack(candidate, job.generation)) throw new Error("Native Git runner currently accepts only the durable one-node root stack plan.");
 		const ids = await runIds(job);
-		const model = AGENT_DEFAULT_MODEL;
+		// Model retirements are a recurring platform failure mode; an env var
+		// makes the swap a config redeploy instead of an image rebuild.
+		const model = this.env.AGENT_MODEL ?? AGENT_DEFAULT_MODEL;
 		// The sandbox and branch identities stay deterministic (idempotency lives
 		// in the ledger), but every attempt gets its OWN process identity: the
 		// sandbox DO persists process records, so a deterministic process id made
