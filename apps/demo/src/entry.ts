@@ -28,6 +28,18 @@ const HARNESS_TOOLBAR_STYLES = `<style>
   .active-status-dot.working { animation: harness-status-pulse 1.35s ease-out infinite; }
   .authoring-notice { display: none !important; }
   .work-item[data-terminal="true"] { display: none; }
+  .comment-preview {
+    position: fixed; z-index: 3; width: min(18rem, calc(100vw - 2rem)); padding: .75rem 2rem .75rem .875rem;
+    border: 1px solid var(--color-border-strong); border-radius: var(--radius-control); background: var(--color-surface);
+    box-shadow: var(--shadow-overlay); color: var(--color-text); font-size: var(--type-label); line-height: var(--leading-body);
+    pointer-events: auto;
+  }
+  .comment-preview-dismiss {
+    position: absolute; top: .25rem; right: .25rem; width: 1.5rem; height: 1.5rem; padding: 0; border: 0;
+    border-radius: var(--radius-small); background: transparent; color: var(--color-text-secondary); cursor: pointer;
+  }
+  .comment-preview-dismiss:hover { background: var(--color-surface-hover); color: var(--color-text); }
+  .comment-pin { cursor: pointer; }
   /* Holding Shift removes nested hit targets so both target and comment modes can reach their containing target. */
   body.harness-parent-targeting [data-app-harness-id]:not(body) [data-app-harness-id] { pointer-events: none !important; }
   @keyframes harness-status-pulse { 0% { box-shadow: 0 0 0 0 rgba(101,217,150,.8); } 70%,100% { box-shadow: 0 0 0 .45rem rgba(101,217,150,0); } }
@@ -47,6 +59,8 @@ const HARNESS_TOOLBAR_SCRIPT = `<script>
   const requestForm = document.querySelector('#target-composer');
   const requestStatus = document.querySelector('#target-request-error');
   const done = document.querySelector('#done-target-request');
+  const annotationPanel = document.querySelector('#annotation-panel');
+  const commentLayer = document.querySelector('#comment-layer');
   if (!popover || !tools || !activity || !count) return;
 
   // Lucide's open-source line icons replace the original bespoke icon set.
@@ -99,6 +113,110 @@ const HARNESS_TOOLBAR_SCRIPT = `<script>
   if (list) {
     new MutationObserver(refreshActiveIssues).observe(list, { childList: true, subtree: true });
     refreshActiveIssues();
+  }
+
+  // Activity follows delivery work only; canvas annotation management does not belong in this feed.
+  if (annotationPanel) {
+    const canvasHeading = [...annotationPanel.querySelectorAll('.annotation-panel-header')]
+      .find(header => header.textContent?.includes('Canvas marks'));
+    annotationPanel.querySelector('.activity-divider')?.remove();
+    canvasHeading?.remove();
+    annotationPanel.querySelector('#annotation-list')?.remove();
+    annotationPanel.querySelector('#annotation-clear')?.remove();
+  }
+
+  // Comment dots preview on hover/focus and remain open after activation until explicitly dismissed.
+  if (commentLayer) {
+    const preview = document.createElement('aside');
+    preview.className = 'comment-preview';
+    preview.id = 'comment-preview';
+    preview.hidden = true;
+    preview.setAttribute('role', 'dialog');
+    preview.setAttribute('aria-label', 'Canvas comment');
+    const previewText = document.createElement('span');
+    const dismiss = document.createElement('button');
+    dismiss.className = 'comment-preview-dismiss';
+    dismiss.type = 'button';
+    dismiss.setAttribute('aria-label', 'Dismiss comment');
+    dismiss.textContent = '×';
+    preview.append(previewText, dismiss);
+    document.querySelector('.harness-frame')?.append(preview);
+    let activePin;
+    let pinned = false;
+    let hideTimer;
+    const preparePins = () => commentLayer.querySelectorAll('.comment-pin').forEach(pin => {
+      if (!pin.dataset.comment) pin.dataset.comment = pin.title;
+      pin.removeAttribute('title');
+      pin.tabIndex = 0;
+      pin.setAttribute('role', 'button');
+      pin.setAttribute('aria-label', 'Open comment: ' + pin.dataset.comment);
+      pin.setAttribute('aria-controls', preview.id);
+      pin.setAttribute('aria-expanded', pin === activePin && !preview.hidden ? 'true' : 'false');
+    });
+    const positionPreview = pin => {
+      const pinRect = pin.getBoundingClientRect();
+      const previewRect = preview.getBoundingClientRect();
+      const edge = 8;
+      preview.style.left = Math.max(edge, Math.min(pinRect.left, innerWidth - previewRect.width - edge)) + 'px';
+      preview.style.top = Math.max(edge, Math.min(pinRect.bottom + edge, innerHeight - previewRect.height - edge)) + 'px';
+    };
+    const showComment = (pin, keepOpen = false) => {
+      clearTimeout(hideTimer);
+      if (activePin && activePin !== pin) activePin.setAttribute('aria-expanded', 'false');
+      activePin = pin;
+      pinned = keepOpen || pinned;
+      previewText.textContent = pin.dataset.comment || '';
+      preview.hidden = false;
+      pin.setAttribute('aria-expanded', 'true');
+      positionPreview(pin);
+    };
+    const dismissComment = (restoreFocus = false) => {
+      clearTimeout(hideTimer);
+      const previousPin = activePin;
+      previousPin?.setAttribute('aria-expanded', 'false');
+      activePin = undefined;
+      pinned = false;
+      preview.hidden = true;
+      if (restoreFocus && previousPin?.isConnected) previousPin.focus();
+    };
+    const scheduleHide = () => {
+      clearTimeout(hideTimer);
+      hideTimer = setTimeout(() => { if (!pinned) dismissComment(); }, 80);
+    };
+    commentLayer.addEventListener('mouseover', event => {
+      const pin = event.target.closest?.('.comment-pin');
+      if (pin && !pin.contains(event.relatedTarget)) showComment(pin);
+    });
+    commentLayer.addEventListener('mouseout', event => {
+      const pin = event.target.closest?.('.comment-pin');
+      if (pin && !pin.contains(event.relatedTarget)) scheduleHide();
+    });
+    commentLayer.addEventListener('focusin', event => {
+      const pin = event.target.closest?.('.comment-pin');
+      if (pin) showComment(pin);
+    });
+    commentLayer.addEventListener('focusout', event => {
+      if (event.target.closest?.('.comment-pin')) scheduleHide();
+    });
+    commentLayer.addEventListener('click', event => {
+      const pin = event.target.closest?.('.comment-pin');
+      if (!pin) return;
+      event.preventDefault();
+      pinned = true;
+      showComment(pin, true);
+    });
+    preview.addEventListener('mouseenter', () => clearTimeout(hideTimer));
+    preview.addEventListener('mouseleave', scheduleHide);
+    dismiss.addEventListener('click', () => dismissComment(true));
+    document.addEventListener('pointerdown', event => {
+      if (pinned && !preview.contains(event.target) && !event.target.closest?.('.comment-pin')) dismissComment();
+    });
+    document.addEventListener('keydown', event => { if (event.key === 'Escape' && !preview.hidden) dismissComment(true); });
+    new MutationObserver(() => {
+      if (activePin && !activePin.isConnected) dismissComment();
+      preparePins();
+    }).observe(commentLayer, { childList: true });
+    preparePins();
   }
 
   requestForm?.addEventListener('keydown', event => {
