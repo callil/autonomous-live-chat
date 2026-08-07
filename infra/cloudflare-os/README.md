@@ -16,6 +16,11 @@ The Gatekeeper is deliberately stateless. It makes private Worker RPC calls to
 those services; it does not introduce a second database, queue, retry loop, or
 HTTP control plane.
 
+Its agent-facing RPC schema is exact and flat. Classification exposes every
+required field and allowed value directly; the operator never has to discover
+an opaque nested union by trial and error. The model selects commands, while
+the ledger enforces only state, lease, ordering, and idempotency invariants.
+
 ## Reproduce the integration
 
 Clone the exact upstream revision, apply the reviewed overlay, then generate

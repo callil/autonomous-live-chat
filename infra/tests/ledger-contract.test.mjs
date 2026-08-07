@@ -17,10 +17,11 @@ const claimed = claimLedgerWorkItem(base, { operatorId: "cloudflare-os", leaseId
 const classified = recordLedgerClassification(claimed, {
 	operatorId: "cloudflare-os",
 	leaseId: "lease-1",
-	classification: { decision: "eligible", risk: "low" },
+	classification: { decision: "eligible", changeType: "content", scope: "localized", risk: "low", affectedSurface: "copy", reversible: true, executionEligibility: "eligible", ciProfile: "content" },
 	now: 3,
 });
-const planned = recordLedgerPlan(classified, {
+const classifiedWithIssue = { ...classified, artifacts: { issue: { number: 1, url: "https://github.com/callil/autonomous-live-chat/issues/1" } } };
+const planned = recordLedgerPlan(classifiedWithIssue, {
 	operatorId: "cloudflare-os",
 	leaseId: "lease-1",
 	plan: {

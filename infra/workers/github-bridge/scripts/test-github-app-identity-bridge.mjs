@@ -19,6 +19,10 @@ globalThis.fetch = async (input, init = {}) => {
 	const method = init.method ?? (typeof input === "string" ? "GET" : input.method);
 	calls.push({ url, method, body: init.body });
 	if (url.includes("/access_tokens")) return Response.json({ token: "installation-token", expires_at: "2099-01-01T00:00:00Z" });
+	if (url.includes("/issues?state=all")) {
+		if (url.includes("never")) return Response.json([]);
+		return Response.json([{ number: 42, html_url: "https://github.com/callil/autonomous-live-chat/issues/42", body: "<!-- app-harness-event:event-1 -->" }]);
+	}
 	if (url.includes("/search/issues")) return Response.json(url.includes("event-markdown") || url.includes("event-long") ? { items: [] } : { items: [{ number: 42, html_url: "https://github.com/callil/autonomous-live-chat/issues/42" }] });
 	if (url === `${env.PRODUCTION_ORIGIN}/`) return new Response("live");
 	if (url.endsWith("/git/ref/heads/main")) return Response.json({ object: { sha: "a".repeat(40) } });
@@ -51,6 +55,7 @@ try {
 	const duplicate = await capability.createIssue({ eventId: "event-1", title: "A", body: "B", classification: "triage" });
 	assert.deepEqual(duplicate, { issueNumber: 42, issueUrl: "https://github.com/callil/autonomous-live-chat/issues/42", existing: true }, "retries return the issue carrying the stable event marker");
 	assert.equal(calls.filter((call) => call.url.endsWith("/issues") && call.method === "POST").length, 0, "a duplicate event never creates another issue");
+	assert.equal(calls.filter((call) => call.url.includes("/search/issues")).length, 0, "a just-created issue is reconciled from the read-after-write repository listing without waiting for search indexing");
 	const markdown = await capability.createIssue({ eventId: "event-markdown", title: "Targeted request", body: "Target: `message-input`\nSelector: `[data-target-id=\"message-input\"]`", classification: "agent" });
 	assert.deepEqual(markdown, { issueNumber: 43, issueUrl: "https://github.com/callil/autonomous-live-chat/issues/43" }, "Markdown issue bodies are accepted");
 	const longBody = `oversized-full-representation ${"x".repeat(100_000)}`;

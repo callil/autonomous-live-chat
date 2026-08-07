@@ -12,8 +12,8 @@
         { "path": "package.json", "sha256": "72b77a96640a650eea53c85293e05e017da46a75bacfcde8c77d26c68868b526" },
         { "path": "src/index.ts", "sha256": "33081fa0dcb05239b7b4ed04233916822d9dc8f9a96f58744ee324c915b9974e" },
         { "path": "src/operator-gatekeeper.contract.ts", "sha256": "533aa830e6bde2e4fdaa2289139d2456fa9b71951599a8a55803877f44cd62b3" },
-        { "path": "src/operator-gatekeeper.ts", "sha256": "5c1603092228b55fea7bfd11747c89a586e4254ca1a6811063efd2a04040ed30" },
-        { "path": "src/types.ts", "sha256": "35412a88a3ecf7685bd0e4040c87ece2ffd38ffb3189e9b8cd9abb45b604b428" },
+        { "path": "src/operator-gatekeeper.ts", "sha256": "410134657947509100e16bedb96355893f363c1d79779c0ac6c99ba9c244893f" },
+        { "path": "src/types.ts", "sha256": "a83ac546aabfa8ffbf65a49a18e93ac063119440d2f53644846d65de6f6814a5" },
         { "path": "tsconfig.json", "sha256": "bbe0bffb8d694925b20c3713dbcb5619df5f2ba480f4f93106e10a08e7d7304f" },
         { "path": "wrangler.jsonc", "sha256": "d806fa45be9998a4f4e90ea4a55c292a6bf0f0578407deb4b9ddacec468ec81e" }
       ],
