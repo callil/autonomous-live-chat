@@ -76,8 +76,8 @@ assert.match(source, /hex\.slice\(0, 32\)/u, "sandbox identifiers stay DNS-safe 
 assert.match(source, /const TERMINAL_PROCESS_STATUSES/u);
 assert.match(source, /parseTerminalArtifact/u);
 assert.match(source, /sandbox\.getSession\(ids\.sessionId\)/u);
-assert.match(source, /RUNNER_IMAGE_REVISION = "da052-async014"/u, "the image revision changes with the agent replacement so no run resumes a stale NanoCodex sandbox");
-assert.ok(`ah-da052-async014-${"x".repeat(32)}`.length <= 63, "derived Cloudflare Sandbox identities stay within the platform limit");
+assert.match(source, /RUNNER_IMAGE_REVISION = "da052-async015"/u, "the image revision changes with the agent replacement so no run resumes a stale NanoCodex sandbox");
+assert.ok(`ah-da052-async015-${"x".repeat(32)}`.length <= 63, "derived Cloudflare Sandbox identities stay within the platform limit");
 
 // The budget layering that silently killed four consecutive production runs:
 // the SDK-side process timeout must sit strictly ABOVE the in-container run

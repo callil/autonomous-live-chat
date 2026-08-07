@@ -19,7 +19,7 @@ type Env = {
 
 type NativeGitJob = { jobId?: unknown; repository?: unknown; generation?: unknown; candidate?: unknown; ledgerRunId?: unknown };
 type CandidatePlan = {
-	change: { kind: "repository-task"; request: string };
+	change: { kind: "repository-task"; request: string; ciProfile?: string };
 	stack: {
 		stackId: string;
 		nodeId: string;
@@ -37,7 +37,7 @@ type RunIds = { sandboxId: string; sessionId: string; runId: string; checkoutDir
 const JOB_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/u;
 const BRANCH = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,159}$/u;
 const SHA = /^[0-9a-f]{40}$/iu;
-const RUNNER_IMAGE_REVISION = "da052-async014";
+const RUNNER_IMAGE_REVISION = "da052-async015";
 // The SDK-side process timeout. This MUST sit strictly above the in-container
 // RUN_DEADLINE_MS (300s) plus the watchdog's emit-and-callback grace (~17s):
 // when the two were equal, the platform SIGKILL always beat the in-container
@@ -131,7 +131,7 @@ function safeCandidate(input: unknown): CandidatePlan | null {
 	if (!stackId || !nodeId || !branch || !parentBranch || !pullRequestBase || parentBaseSha === undefined || !Number.isInteger(issueNumber) || (issueNumber as number) < 1) return null;
 	if (pullRequestBase !== parentBranch || (parentBranch !== "main" && parentBaseSha === null)) return null;
 	return {
-		change: { kind: "repository-task", request: rawChange.request.trim() },
+		change: { kind: "repository-task", request: rawChange.request.trim(), ciProfile: typeof rawChange.ciProfile === "string" ? rawChange.ciProfile : undefined },
 		stack: { stackId, nodeId, branch, parentBranch, parentBaseSha, pullRequestBase, issueNumber: issueNumber as number },
 	};
 }
@@ -312,7 +312,10 @@ export class NativeGitRunner extends WorkerEntrypoint<Env> {
 		// a non-empty clone behind in the same deterministic sandbox, and git
 		// refuses to clone into it - the retry must get a fresh directory.
 		const checkoutDirectory = `/workspace/${processId}-repository`;
-		const request = { job, candidate, model, runId: processId, checkoutDirectory, instructions, callback };
+		// Simple copy and visual changes get a faster reasoning effort; the
+		// heavier profiles keep the default.
+		const effort = candidate && ["content", "visual"].includes(candidate.change?.ciProfile ?? "") ? "low" : "medium";
+		const request = { job, candidate, model, effort, runId: processId, checkoutDirectory, instructions, callback };
 		const write = await session.writeFile(ids.requestPath, JSON.stringify(request));
 		if (!write.success) return { jobId: job.jobId, runId: processId, state: "runner-unavailable", classification: "runner-input-write-failed" };
 		// Persist the start marker so inspectRun can derive run age. A failed

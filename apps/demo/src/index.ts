@@ -178,7 +178,7 @@ const REJECTED_ACTION_PARK_THRESHOLD = 14;
 const STALLED_IMPLEMENTATION_MS = 6 * 60_000;
 // The final safety net behind event pokes: one slow sweep re-pokes every live
 // work item, so a lost fire-and-forget poke costs minutes, never the item.
-const SWEEP_INTERVAL_MS = 5 * 60_000;
+const SWEEP_INTERVAL_MS = 2 * 60_000;
 // Lifetime wake budget per work item: an operator that consumes this many
 // pokes without reaching a terminal phase is not converging. Park it.
 const OPERATOR_POKE_CAP = 200;

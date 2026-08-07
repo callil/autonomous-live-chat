@@ -232,6 +232,15 @@ export function recordLedgerExternalState(item, { phase, artifacts = {}, now }) 
 	if (phase === "deployed" && item.phase !== "promoting" && !(item.phase === "validating" && (artifacts.promotion ?? item.artifacts.promotion))) {
 		throw new Error("Recording deployed requires phase promoting, or promotion evidence in artifacts.promotion.");
 	}
+	// A dispatch receipt is intent, not deployment: deployed requires the
+	// promotion run's own success conclusion, so completed can never precede
+	// the merge it claims.
+	{
+		const promotion = artifacts.promotion ?? item.artifacts.promotion;
+		if (phase === "deployed" && (promotion == null || promotion.conclusion !== "success")) {
+			throw new Error("Recording deployed requires the promotion run's success conclusion in artifacts.promotion.");
+		}
+	}
 	if (phase === "completed" && item.phase !== "deployed") throw new Error("Only a deployed candidate can complete.");
 	if (phase === "promoting" && typeof (artifacts.validation?.url ?? item.artifacts.validation?.url) !== "string") {
 		throw new Error("Promotion requires a validation artifact.");

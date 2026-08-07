@@ -273,7 +273,7 @@ try {
 			// transcript as encrypted content and MUST be replayed between tool
 			// calls, or the model loses its chain of thought.
 			include: ["reasoning.encrypted_content"],
-			reasoning: { effort: "medium" },
+			reasoning: { effort: request.effort === "low" ? "low" : "medium" },
 			max_output_tokens: 25_000,
 		});
 
