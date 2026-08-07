@@ -73,7 +73,7 @@ assert.match(source, /const TERMINAL_PROCESS_STATUSES/u);
 assert.match(source, /parseTerminalArtifact/u);
 assert.match(source, /sandbox\.getSession\(ids\.sessionId\)/u);
 assert.ok(`ah-nc031-async010-${"x".repeat(32)}`.length <= 63, "derived Cloudflare Sandbox identities stay within the platform limit");
-assert.match(source, /NANOCODEX_EXECUTION_TIMEOUT_MS = 720_000/u, "agent execution stays below Cloudflare's 15-minute alarm limit");
+assert.match(source, /NANOCODEX_EXECUTION_TIMEOUT_MS = 300_000/u, "agent execution is bounded at five minutes, well below Cloudflare's 15-minute alarm limit");
 assert.match(source, /RUNNER_DEADLINE_GRACE_MS = 120_000/u, "the Worker backstop sits past every in-container watchdog");
 assert.match(source, /function startedMarkerPath/u, "startRun persists a start marker so run age is derivable");
 assert.match(source, /\$\{ids\.requestPath\}\.started/u);
@@ -112,12 +112,12 @@ assert.doesNotMatch(jobEntrypointSource, /console\.log/u, "the background proces
 
 // Every blocking step in the container carries its own budget; the run can no
 // longer depend on the SDK-side process timeout to break a wedge.
-assert.match(jobEntrypointSource, /CLONE_TIMEOUT_MS = 180_000/u);
+assert.match(jobEntrypointSource, /CLONE_TIMEOUT_MS = 120_000/u);
 assert.match(jobEntrypointSource, /GIT_TIMEOUT_MS = 60_000/u);
-assert.match(jobEntrypointSource, /AGENT_TIMEOUT_MS = 540_000/u);
+assert.match(jobEntrypointSource, /AGENT_TIMEOUT_MS = 260_000/u);
 assert.match(jobEntrypointSource, /GH_STACK_TIMEOUT_MS = 120_000/u);
 assert.match(jobEntrypointSource, /GITHUB_FETCH_TIMEOUT_MS = 30_000/u);
-assert.match(jobEntrypointSource, /RUN_DEADLINE_MS = 650_000/u);
+assert.match(jobEntrypointSource, /RUN_DEADLINE_MS = 300_000/u);
 assert.match(jobEntrypointSource, /options\.timeoutMs/u, "run() honours a per-step budget");
 assert.match(jobEntrypointSource, /child\.kill\("SIGTERM"\)/u);
 assert.match(jobEntrypointSource, /child\.kill\("SIGKILL"\)/u, "a child that ignores SIGTERM is escalated");
@@ -143,7 +143,7 @@ assert.match(jobEntrypointSource, /const liveChildren = new Set\(\)/u);
 assert.match(jobEntrypointSource, /function killAllChildren/u);
 
 // The agent process bounds itself, caps buffering, and detects a silent stall.
-assert.match(entrypointSource, /NANOCODEX_TIMEOUT_MS = 520_000/u);
+assert.match(entrypointSource, /NANOCODEX_TIMEOUT_MS = 240_000/u);
 assert.match(entrypointSource, /NANOCODEX_INACTIVITY_MS_OVERRIDE\) \|\| 120_000/u, "the stall budget defaults to 120s and is overridable only for tests");
 assert.match(entrypointSource, /"nanocodex-stalled"/u);
 assert.match(entrypointSource, /"nanocodex-timeout"/u);

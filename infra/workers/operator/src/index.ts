@@ -233,6 +233,12 @@ export class OperatorTurn extends DurableObject<Env> {
 					}
 				}
 			}
+			// The lease is a loop-owned fact: when none is live, claim before any
+			// lease-requiring command instead of letting the model reason about it.
+			if (turn.leaseId === null && name !== "stageClaim") {
+				const claimed = await this.stageAndExecute(turn, "claim", { kind: "claim", leaseId: crypto.randomUUID(), leaseMs: 900_000 } as Parameters<AppHarnessLedger["stageOperatorAction"]>[0]["command"]);
+				if (claimed.error) return { error: `The work item could not be claimed first: ${claimed.error}` };
+			}
 			const command = commandFor(name, args, {
 				leaseId: turn.leaseId,
 				minted,
@@ -240,41 +246,52 @@ export class OperatorTurn extends DurableObject<Env> {
 				planBranch: turn.planBranch,
 				issueNumber: turn.issueNumber,
 			});
-			// 1. Durable log first. Idempotency keys and the single-active lock are
-			//    the ledger's, unchanged; a duplicate returns the existing action.
-			const staged = await this.env.LEDGER.stageOperatorAction({ workItemId: turn.workItemId, expectedVersion: turn.version, command });
-			if (staged.status === "applied") {
-				// A crash-resumed replay lands here: the command already executed.
-				// The receipt must still be absorbed, or every later command in
-				// this turn stages against the pre-action revision and is refused.
-				await this.absorbAppliedAction(turn, command, staged);
-				return summarizeAction(staged);
-			}
-			if (staged.status === "rejected") return summarizeAction(staged);
-			// 2. Claim execution under the same token and lease protocol.
-			const begun = await this.env.LEDGER.beginOperatorAction({ actionId: staged.id });
-			if (begun.disposition !== "execute" || !begun.executionToken) {
-				if (begun.action.status === "applied") await this.absorbAppliedAction(turn, command, begun.action);
-				return summarizeAction(begun.action);
-			}
-			// 3. Execute against the private capabilities, then record the truth.
-			try {
-				const result = await executeCommand(this.env, begun.workItem, begun.action.command);
-				const done = await this.env.LEDGER.completeOperatorAction({ actionId: staged.id, idempotencyKey: begun.action.idempotencyKey, executionToken: begun.executionToken, result });
-				this.absorbReceipt(turn, command, result);
-				await this.ctx.storage.put("turn", turn);
-				return summarizeAction(done);
-			} catch (error) {
-				// The rejection carries the reason into the ledger and back to the
-				// model in the same turn.
-				const message = error instanceof Error ? error.message : String(error);
-				const rejected = await this.env.LEDGER.rejectOperatorAction({ actionId: staged.id, executionToken: begun.executionToken, error: message });
-				return summarizeAction(rejected);
-			}
+			return this.stageAndExecute(turn, name, command);
 		} catch (error) {
 			// Tool-level failure is data, not a crash: the model sees it and corrects.
 			return { error: String(error instanceof Error ? error.message : error).slice(0, 300) };
 		}
+	}
+
+	/** Stage, begin, execute, and complete one command through the ledger's protocol. */
+	private async stageAndExecute(turn: TurnState, name: string, command: Parameters<AppHarnessLedger["stageOperatorAction"]>[0]["command"]): Promise<Record<string, unknown>> {
+		// 1. Durable log first. Idempotency keys and the single-active lock are
+		//    the ledger's, unchanged; a duplicate returns the existing action.
+		const staged = await this.env.LEDGER.stageOperatorAction({ workItemId: turn.workItemId, expectedVersion: turn.version, command });
+		if (staged.status === "applied") {
+			// A crash-resumed replay lands here: the command already executed.
+			// The receipt must still be absorbed, or every later command in
+			// this turn stages against the pre-action revision and is refused.
+			await this.absorbAppliedAction(turn, command, staged);
+			return summarizeAction(staged);
+		}
+		if (staged.status === "rejected") return this.noteLeaseLoss(turn, summarizeAction(staged));
+		// 2. Claim execution under the same token and lease protocol.
+		const begun = await this.env.LEDGER.beginOperatorAction({ actionId: staged.id });
+		if (begun.disposition !== "execute" || !begun.executionToken) {
+			if (begun.action.status === "applied") await this.absorbAppliedAction(turn, command, begun.action);
+			return summarizeAction(begun.action);
+		}
+		// 3. Execute against the private capabilities, then record the truth.
+		try {
+			const result = await executeCommand(this.env, begun.workItem, begun.action.command);
+			const done = await this.env.LEDGER.completeOperatorAction({ actionId: staged.id, idempotencyKey: begun.action.idempotencyKey, executionToken: begun.executionToken, result });
+			this.absorbReceipt(turn, command, result);
+			await this.ctx.storage.put("turn", turn);
+			return summarizeAction(done);
+		} catch (error) {
+			// The rejection carries the reason into the ledger and back to the
+			// model in the same turn.
+			const message = error instanceof Error ? error.message : String(error);
+			const rejected = await this.env.LEDGER.rejectOperatorAction({ actionId: staged.id, executionToken: begun.executionToken, error: message });
+			return this.noteLeaseLoss(turn, summarizeAction(rejected));
+		}
+	}
+
+	/** A lease rejection clears the loop's lease so the next command auto-claims. */
+	private noteLeaseLoss(turn: TurnState, summary: Record<string, unknown>): Record<string, unknown> {
+		if (/lease is invalid|live operator lease/iu.test(String(summary.error ?? ""))) turn.leaseId = null;
+		return summary;
 	}
 
 	/** A replayed or reconciled applied action carries its receipt as a JSON string. */

@@ -64,13 +64,13 @@ function safeRequest(input) {
 // Every step budget in milliseconds. Any single step can block forever — a
 // network fetch, a git push against an unreachable remote, or a stalled model
 // call — so no step is ever awaited without one of these.
-const CLONE_TIMEOUT_MS = 180_000;
+const CLONE_TIMEOUT_MS = 120_000;
 const GIT_TIMEOUT_MS = 60_000;
-const AGENT_TIMEOUT_MS = 540_000;
+const AGENT_TIMEOUT_MS = 260_000;
 const GH_STACK_TIMEOUT_MS = 120_000;
 const GITHUB_FETCH_TIMEOUT_MS = 30_000;
 const CALLBACK_TIMEOUT_MS = 15_000;
-const RUN_DEADLINE_MS = 650_000;
+const RUN_DEADLINE_MS = 300_000;
 const WATCHDOG_INTERVAL_MS = 5_000;
 const KILL_GRACE_MS = 2_000;
 

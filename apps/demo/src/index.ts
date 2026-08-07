@@ -166,15 +166,17 @@ const WAKE_RETRY_BASE_MS = 1_000;
 const OPERATOR_LEASE_MAX_MS = 15 * 60_000;
 // The operator turn is a bounded model loop, not a chat; the response lease
 // only covers one wall-clocked turn plus its note delivery.
-const OPERATOR_TURN_RESPONSE_LEASE_MS = 90_000;
+// Must exceed the longest possible operator turn (60s wall clock plus one
+// 45s-bounded model call in flight), or redelivery races the live turn.
+const OPERATOR_TURN_RESPONSE_LEASE_MS = 180_000;
 const OPERATOR_TURN_DELIVERY_ATTEMPTS = 3;
 const ACTION_APPLY_LEASE_MS = 60_000;
 const STAGED_ACTION_RECOVERY_MS = 90_000;
 const REJECTED_ACTION_PARK_THRESHOLD = 14;
 // Just above the runner's own 650s hard deadline: by the time this fires the
-// prior run is provably dead. With push-based completion this is a rare
-// fallback, not the primary recovery path.
-const STALLED_IMPLEMENTATION_MS = 12 * 60_000;
+// prior run is provably dead (the runner's own deadline is 5 minutes). With
+// push-based completion this is a rare fallback, not the primary recovery path.
+const STALLED_IMPLEMENTATION_MS = 6 * 60_000;
 const UNLEASED_REVIVAL_DELAY_MS = 5_000;
 const LEASED_REVIVAL_DELAY_MS = 8_000;
 const OPERATOR_TURN_HARD_BUDGET = 60;

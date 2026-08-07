@@ -9,7 +9,7 @@ const MAX_LINE_BYTES = 1_048_576;
 // Overall budget for the NanoCodex process, kept below the job entrypoint's
 // own agent budget so this process reports its own failure rather than being
 // killed from outside.
-const NANOCODEX_TIMEOUT_MS = 520_000;
+const NANOCODEX_TIMEOUT_MS = 240_000;
 // A run that emits no JSONL line for this long is stalled, not slow. The
 // override exists so the contract test can exercise the real kill path in
 // milliseconds instead of only grepping for it.
