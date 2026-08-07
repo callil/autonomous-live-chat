@@ -50,7 +50,10 @@ function base64Url(bytes: Uint8Array): string {
 
 async function deterministicId(scope: string): Promise<string> {
 	const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", encoder.encode(`${RUNNER_IMAGE_REVISION}:${scope}`)));
-	return `ah-${RUNNER_IMAGE_REVISION}-${base64Url(digest).slice(0, 32)}`;
+	// Sandbox IDs are DNS labels: lowercase hex only, so the identifier can
+	// never begin or end with a hyphen or contain an underscore.
+	const hex = Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("");
+	return `ah-${RUNNER_IMAGE_REVISION}-${hex.slice(0, 32)}`;
 }
 
 async function runIds(job: SafeJob): Promise<RunIds> {

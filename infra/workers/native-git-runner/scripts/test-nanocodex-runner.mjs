@@ -68,7 +68,7 @@ assert.match(config, /"deleted_classes": \["RunnerJob"\]/u);
 assert.doesNotMatch(config, /"name": "RUNNER_JOB"/u);
 assert.doesNotMatch(source, /runJob\(/u, "the Worker cannot synchronously own a full implementation run");
 assert.match(source, /async function deterministicId/u);
-assert.match(source, /base64Url\(digest\)\.slice\(0, 32\)/u);
+assert.match(source, /hex\.slice\(0, 32\)/u, "sandbox identifiers stay DNS-safe lowercase hex");
 assert.match(source, /const TERMINAL_PROCESS_STATUSES/u);
 assert.match(source, /parseTerminalArtifact/u);
 assert.match(source, /sandbox\.getSession\(ids\.sessionId\)/u);
