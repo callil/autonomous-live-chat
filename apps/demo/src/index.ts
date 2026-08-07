@@ -416,6 +416,18 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		if (input.command.kind === "record-candidate" && workItem.activeImplementation) {
 			input.command = { ...input.command, runId: workItem.activeImplementation.runId };
 		}
+		// Deployment reconciliation facts are the ledger's own: the applied
+		// promote action is the promotion evidence, and the deployment target is
+		// this deployment's production origin. The operator still decides when.
+		if (input.command.kind === "record-state" && (input.command.phase === "deployed" || input.command.phase === "completed")) {
+			const artifacts: Record<string, unknown> = { ...(input.command.artifacts ?? {}) };
+			if (typeof artifacts.deploymentUrl !== "string") artifacts.deploymentUrl = `https://${PRODUCTION_DEPLOYMENT_HOST}/`;
+			if (!artifacts.promotion && !workItem.artifacts.promotion) {
+				const promote = (await this.listOperatorActions({ workItemId: workItem.id })).findLast((action) => action.command.kind === "promote" && action.status === "applied");
+				if (promote && promote.command.kind === "promote") artifacts.promotion = { dispatchKey: promote.command.dispatchKey };
+			}
+			input.command = { ...input.command, artifacts };
+		}
 		validateOperatorCommand(input.command);
 		const key = operatorActionEffectKey(workItem.id, input.command);
 		const existingId = await this.ctx.storage.get<number>(`${ACTION_KEY_PREFIX}${key}`);
