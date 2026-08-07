@@ -34,7 +34,7 @@ assert.match(instructions, /official gh stack CLI/u, "the harness, not the model
 assert.match(instructions, /CI is the merge and production deployment authority/u);
 assert.match(instructions, /Multi-node stacks are not enabled yet/u);
 assert.doesNotMatch(instructions, /subagents|terminal|package managers|Wrangler/u, "capabilities the direct agent does not have must not be promised");
-assert.equal(AGENT_DEFAULT_MODEL, "gpt-5.2-codex");
+assert.equal(AGENT_DEFAULT_MODEL, "gpt-5.4-nano");
 
 const bounded = normalizeAgentSummary({
 	model: AGENT_DEFAULT_MODEL,
@@ -193,15 +193,14 @@ assert.match(jobEntrypointSource, /function parseAgentSummary/u, "the agent summ
 // --- Agent entrypoint contract ----------------------------------------------
 
 assert.doesNotMatch(entrypointSource, /child_process|spawn\(/u, "the agent is a direct API loop, not a binary supervisor");
-assert.match(entrypointSource, /AGENT_MODEL = "gpt-5\.2-codex"/u);
-assert.match(entrypointSource, /\/responses`/u, "the agent drives the OpenAI Responses API directly");
+assert.match(entrypointSource, /AGENT_MODEL = "gpt-5\.4-nano"/u);
+assert.match(entrypointSource, /\/chat\/completions`/u, "the agent drives the chat-completions endpoint this key provably serves");
 assert.match(entrypointSource, /AbortSignal\.timeout/u, "every model request is bounded");
 assert.match(entrypointSource, /AGENT_WALL_CLOCK_MS = 240_000/u, "the agent wall clock stays at 240s");
 assert.match(entrypointSource, /AGENT_REQUEST_TIMEOUT_MS_OVERRIDE\) \|\| 120_000/u, "a model request that produces nothing for 120s is stalled");
 assert.match(entrypointSource, /AGENT_MAX_TOOL_CALLS_OVERRIDE\) \|\| 12/u, "the loop is bounded at 12 tool calls");
 assert.match(entrypointSource, /const DENIED_PATHS/u);
 assert.match(entrypointSource, /parallel_tool_calls: false/u);
-assert.match(entrypointSource, /store: false/u);
 assert.match(entrypointSource, /await emit/u);
 assert.match(entrypointSource, /process\.exitCode =/u);
 assert.doesNotMatch(entrypointSource, /\.unref\(/u);
@@ -231,11 +230,11 @@ function startMockModel(responders) {
 }
 
 function functionCall(id, name, args) {
-	return { id, output: [{ type: "function_call", call_id: `call-${id}`, name, arguments: JSON.stringify(args) }] };
+	return { id, choices: [{ message: { role: "assistant", content: null, tool_calls: [{ id: `call-${id}`, type: "function", function: { name, arguments: JSON.stringify(args) } }] } }] };
 }
 
 function finalText(id, text) {
-	return { id, output: [{ type: "message", content: [{ type: "output_text", text }] }] };
+	return { id, choices: [{ message: { role: "assistant", content: text } }] };
 }
 
 async function runAgent({ port, checkout, env = {} }) {
@@ -272,11 +271,11 @@ async function runAgent({ port, checkout, env = {} }) {
 		(body) => {
 			assert.equal(body.model, AGENT_DEFAULT_MODEL);
 			assert.equal(body.parallel_tool_calls, false);
-			assert.equal(body.store, false);
 			assert.equal(body.tools.length, 3);
-			assert.deepEqual(body.tools.map((tool) => tool.name).sort(), ["list_dir", "read_file", "write_file"]);
-			assert.match(body.instructions, /exactly three tools/u);
-			assert.match(body.input[0].content, /Repository tree/u);
+			assert.deepEqual(body.tools.map((tool) => tool.function.name).sort(), ["list_dir", "read_file", "write_file"]);
+			assert.equal(body.messages[0].role, "system");
+			assert.match(body.messages[0].content, /exactly three tools/u);
+			assert.match(body.messages[1].content, /Repository tree/u);
 			return functionCall("resp_1", "list_dir", { path: "." });
 		},
 		() => functionCall("resp_2", "read_file", { path: "notes.txt" }),
@@ -298,7 +297,7 @@ async function runAgent({ port, checkout, env = {} }) {
 	assert.equal(await readFile(join(checkout, "notes.txt"), "utf8"), "hello world\n", "staged writes are applied to the checkout");
 	// The traversal and denied-path attempts surfaced as tool errors to the
 	// model, and the run still terminated cleanly.
-	const toolOutputs = requests.flatMap((body) => body.input.filter((item) => item?.type === "function_call_output").map((item) => item.output));
+	const toolOutputs = requests.flatMap((body) => (body.messages ?? []).filter((item) => item?.role === "tool").map((item) => item.content));
 	assert.ok(toolOutputs.some((output) => /Error: path escapes the checkout/u.test(output)));
 	assert.ok(toolOutputs.some((output) => /Error: path is not permitted/u.test(output)));
 	assert.doesNotMatch(result.stdout, /hello world/u, "file contents never ride the transcript");
