@@ -25,7 +25,7 @@ proposed -> discussing -> approved -> normal request lifecycle
                  rejected
 ```
 
-The Cloudflare OS operator may classify a proposal, ask questions, summarize
+The operator Worker may classify a proposal, ask questions, summarize
 the evolving idea, and recommend proceeding or declining. It must not delegate
 implementation before durable approval. Approval is idempotent and tied to the
 authenticated author's stable principal; a display name, cookie-local flag, or

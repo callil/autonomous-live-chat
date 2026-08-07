@@ -1,14 +1,14 @@
 # Control-plane migration
 
-The simplified architecture has one durable ledger and one persistent Cloudflare OS operator. The demo Worker is the intake and realtime rendering surface, not a second workflow engine.
+The simplified architecture has one durable ledger and one operator Worker (`infra/workers/operator`). The demo Worker is the intake and realtime rendering surface, not a second workflow engine.
 
 Until the cutover is complete, [`infra/tests/control-plane-migration-allowlist.json`](../infra/tests/control-plane-migration-allowlist.json) is the exact, machine-checked inventory of legacy demo-worker responsibilities. The inventory is intentionally small and explicit:
 
 | Temporary responsibility in the demo | Target owner | Cutover condition |
 | --- | --- | --- |
-| Coordinator imports, job and outbox records | Cloudflare OS operator plus the durable ledger | Remove the demo coordinator and its alarm/retry loop. |
-| Direct GitHub API reads, issue updates, and Actions dispatch | OS operator and the repository-scoped GitHub App | The demo only records and renders typed ledger artifacts. |
-| Native runner and GitHub identity bindings | OS operator’s private capability boundary | The demo deployment has neither binding. |
+| Coordinator imports, job and outbox records | Operator Worker plus the durable ledger | Remove the demo coordinator and its alarm/retry loop. |
+| Direct GitHub API reads, issue updates, and Actions dispatch | Operator Worker and the repository-scoped GitHub App | The demo only records and renders typed ledger artifacts. |
+| Native runner and GitHub identity bindings | Operator Worker’s private capability boundary | The demo deployment has neither binding. |
 | Signed workflow callback routes and synchronized callback/identity secrets | Narrow, typed ledger result recording through private RPC | The old callback state machine and duplicated secret copies are deleted. |
 
 Run the boundary test directly with:

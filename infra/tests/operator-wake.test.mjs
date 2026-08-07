@@ -7,7 +7,7 @@ assert.equal(inFlight.state, "in_flight");
 assert.equal(inFlight.attempts, 1, "the initial delivery counts toward the bounded recovery budget");
 
 const advancedDuringTurn = queueOperatorWakeRecord(inFlight, { id: "work-1", workItemId: "work-1", version: 2, now: 110, delayMs: 0 });
-assert.equal(advancedDuringTurn.version, 1, "a ledger mutation cannot replace the active Cloudflare OS turn");
+assert.equal(advancedDuringTurn.version, 1, "a ledger mutation cannot replace the active operator turn");
 assert.equal(advancedDuringTurn.nextVersion, 2, "the latest revision is remembered behind the active turn barrier");
 assert.equal(advancedDuringTurn.availableAt, 1_100, "mutations cannot shorten the active response lease");
 
