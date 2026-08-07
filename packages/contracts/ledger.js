@@ -123,7 +123,10 @@ export function deferLedgerWorkItem(item, { operatorId, leaseId, now, delayMs })
 	const at = timestamp(now, "Defer time");
 	requireLease(item, { operatorId, leaseId }, at);
 	if (!Number.isSafeInteger(delayMs) || delayMs < 1 || delayMs > 5 * 60_000) throw new Error("Defer duration must be between one millisecond and five minutes.");
-	return next(item, item.phase, at, { lease: null, resumeAt: at + delayMs });
+	// Defer means "wake me later, still mine": the lease survives so the next
+	// turn acts immediately instead of spending its wall clock re-claiming.
+	// Abandonment stays bounded by the lease's own expiry and recovery.
+	return next(item, item.phase, at, { resumeAt: at + delayMs });
 }
 
 export function recordLedgerClassification(item, { operatorId, leaseId, classification, now }) {
