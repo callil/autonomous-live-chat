@@ -184,6 +184,13 @@ const STALLED_IMPLEMENTATION_MS = 6 * 60_000;
 // The final safety net behind event pokes: one slow sweep re-pokes every live
 // work item, so a lost fire-and-forget poke costs minutes, never the item.
 const SWEEP_INTERVAL_MS = 2 * 60_000;
+// Merge watch: a validated candidate normally auto-merges within a minute or
+// two. Past this window with no merged fact, the snapshot records a
+// merge-timeout problem — the ledger queries no GitHub state itself; the
+// operator observes the candidate PR through the bridge and restacks a
+// conflicted candidate. The sweep's re-poke (and the WAITING re-poke) is what
+// delivers the problem to the next turn.
+const MERGE_WATCH_TIMEOUT_MS = 4 * 60_000;
 // Lifetime wake budget per work item: an operator that consumes this many
 // pokes without reaching a terminal phase is not converging. Park it.
 const OPERATOR_POKE_CAP = 200;
@@ -1177,6 +1184,15 @@ function operatorSnapshot(item: StoredWorkItem | undefined, actions: StoredOpera
 	// lane instead of falling back to a full promotion run.
 	const merged = facts?.merged && (candidateArtifact?.headSha === facts.merged.headSha || (item.plan && facts.merged.branch === item.plan.branch)) ? facts.merged : undefined;
 	const mainDeploy = merged && facts?.mainDeploy && (facts.mainDeploy.headSha === merged.mergeCommitSha || (facts.mainDeploy.conclusion === "success" && Date.parse(facts.mainDeploy.createdAt) > merged.at)) ? facts.mainDeploy : undefined;
+	// Merge-watch problem fact: GitHub sends no event when a PR becomes
+	// conflicted, so an armed auto-merge that never lands is invisible by push.
+	// Validation succeeded, the watch window passed, and neither a merged fact
+	// nor a promotion fact arrived: name the problem so the operator observes
+	// the candidate PR via the bridge and restacks a conflicted candidate now.
+	let mergeTimeoutProblem: string | undefined;
+	if (validation && validation.conclusion === "success" && !merged && !facts?.promotion && Date.now() - validation.at > MERGE_WATCH_TIMEOUT_MS) {
+		mergeTimeoutProblem = "Validation succeeded but the merge did not land within the merge watch window. Observe the candidate pull request state with observeCandidatePullRequest: if mergeableState is dirty the candidate is conflicted — restack now with stagePlan (next generation, fresh getMainSha baseSha).";
+	}
 	// Surface a stalled implementation run as a fact: the disposable runner
 	// derives its own process identity, so a re-staged implement command with
 	// a fresh runId starts a clean isolated run instead of resuming a corpse.
@@ -1210,6 +1226,7 @@ function operatorSnapshot(item: StoredWorkItem | undefined, actions: StoredOpera
 		...(nextStep ? { nextStep } : {}),
 		...(planProblem ? { planProblem } : {}),
 		...(implementationProblem ? { implementationProblem } : {}),
+		...(mergeTimeoutProblem ? { mergeTimeoutProblem } : {}),
 		...(runnerResult || runnerProgress || validation || promotion || candidate || merged || mainDeploy
 			? {
 				facts: {

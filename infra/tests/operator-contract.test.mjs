@@ -3,7 +3,7 @@ import { assertOperatorCommandAllowed, operatorActionEffectKey, operatorCommandE
 import { SYSTEM_PROMPT, TOOLS } from "../workers/operator/src/operator-tools.js";
 
 const toolNames = new Set(TOOLS.map((entry) => entry.function.name));
-for (const method of ["getMainSha", "inspectImplementation", "getCandidate", "observeCandidateValidation", "findPromotionRun", "inspectPromotionRun"]) {
+for (const method of ["getMainSha", "inspectImplementation", "getCandidate", "observeCandidatePullRequest", "observeCandidateValidation", "findPromotionRun", "inspectPromotionRun"]) {
 	assert.ok(toolNames.has(method), `the operator worker keeps required observation ${method}`);
 }
 for (const retired of ["stageClaim", "stageRelease", "stageDefer"]) {

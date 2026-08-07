@@ -6,6 +6,7 @@ const REPOSITORY = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u;
 const STACK_BRANCH = /^app-harness-os\/(\d+)\/g(\d+)$/u;
 const APP_LOGIN = "app-harness-native-git-callil[bot]";
 const WORKFLOW_PATH = ".github/workflows/os-stack-ci.yml";
+const CI_PROFILES = new Set(["visual", "content", "behavior", "data", "infrastructure"]);
 
 function required(name) {
 	const value = process.env[name];
@@ -49,7 +50,7 @@ export function validatePullRequest(pr, commit, files, options, comparison) {
 	if (options.expectedIssue && issue !== options.expectedIssue) throw new Error("Candidate branch does not match the expected issue.");
 	if (options.expectedGeneration && generation !== options.expectedGeneration) throw new Error("Candidate branch does not match the expected generation.");
 	const headSha = exactSha(head.sha, "pull request head");
-	const baseSha = exactSha(base.sha, "pull request base");
+	const baseSha = exactSha(options.recordedParentBase ?? base.sha, "recorded parent base");
 	if (options.expectedHead && headSha !== options.expectedHead) throw new Error("Candidate head changed after orchestration.");
 
 	const open = pr.state === "open";
@@ -68,6 +69,12 @@ export function validatePullRequest(pr, commit, files, options, comparison) {
 	if (lineValue(body, /- Node: `([^`]+)`/u, "node") !== "root") throw new Error("One-node stack provenance must identify the root node.");
 	if (lineValue(body, /- Parent base: `([^`]+)`/u, "parent") !== base.ref) throw new Error("Pull request parent provenance is invalid.");
 	if (lineValue(body, /- Candidate head: `([0-9a-f]{40})`/iu, "head").toLowerCase() !== headSha) throw new Error("Pull request head provenance is invalid.");
+	// The ledger-declared CI profile rides the same provenance markers: content
+	// and visual candidates earn the scoped validation fast path. The marker is
+	// optional for compatibility; when absent, an empty profile means the full
+	// mandatory baseline — never a guessed fast path.
+	const profileMatch = body.match(/- CI profile: `([a-z]+)`/u);
+	if (profileMatch && !CI_PROFILES.has(profileMatch[1])) throw new Error("Pull request CI profile provenance is invalid.");
 	return {
 		pullRequest: Number(pr.number),
 		headSha,
@@ -76,6 +83,7 @@ export function validatePullRequest(pr, commit, files, options, comparison) {
 		issue,
 		generation,
 		stackId: stackMatch[1],
+		ciProfile: profileMatch ? profileMatch[1] : "",
 		alreadyMerged: Boolean(merged),
 		mergeSha: merged ? pr.merge_commit_sha.toLowerCase() : "",
 	};
@@ -161,13 +169,22 @@ async function verifyPullRequestCommand() {
 	const pullRequest = integer(required("PR"), "PR");
 	const expectedHead = process.env.EXPECTED_HEAD ? exactSha(process.env.EXPECTED_HEAD, "EXPECTED_HEAD") : undefined;
 	const pr = await api(`repos/${repo}/pulls/${pullRequest}`);
+	// The immutability contract is against the candidate's RECORDED parent
+	// base, not whatever the base branch has advanced to since: under
+	// auto-merge, main moves constantly and every open candidate would
+	// otherwise read as diverged the moment any sibling lands. Textual
+	// mergeability stays GitHub's job; the trusted claim verified here is
+	// that the history is exactly the recorded base plus new work.
+	const recordedParentBase = (typeof pr.body === "string" ? pr.body : "").match(/- Parent base: `[^`]+` at `([0-9a-f]{40})`/u)?.[1];
+	if (!recordedParentBase) throw new Error("Pull request provenance must record the parent base revision.");
 	const [files, commit, comparison] = await Promise.all([
 		pullRequestFiles(repo, pullRequest),
 		api(`repos/${repo}/git/commits/${pr.head.sha}`),
-		api(`repos/${repo}/compare/${pr.base.sha}...${pr.head.sha}`),
+		api(`repos/${repo}/compare/${recordedParentBase}...${pr.head.sha}`),
 	]);
 	const result = validatePullRequest(pr, commit, files, {
 		repo,
+		recordedParentBase,
 		expectedParent: process.env.EXPECTED_PARENT,
 		expectedHead,
 		expectedIssue: process.env.EXPECTED_ISSUE ? integer(process.env.EXPECTED_ISSUE, "EXPECTED_ISSUE") : undefined,
@@ -184,6 +201,7 @@ async function verifyPullRequestCommand() {
 		issue: result.issue,
 		generation: result.generation,
 		stack_id: result.stackId,
+		ci_profile: result.ciProfile,
 		node_id: "root",
 		already_merged: result.alreadyMerged,
 		merge_sha: result.mergeSha,

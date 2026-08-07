@@ -156,6 +156,20 @@ assert.match(jobEntrypointSource, /autoMerge: \{ armed: autoMergeArm\.success \}
 assert.match(jobEntrypointSource, /postHeartbeat\(autoMergeArm\.success \? "auto-merge-armed" : "auto-merge-unarmed"\)/u, "arming emits a progress heartbeat either way and never fails the run");
 assert.ok(jobEntrypointSource.indexOf('"--auto", "--squash"') > jobEntrypointSource.indexOf("pull-request-annotated"), "auto-merge arms only after the PR exists and is annotated");
 
+// Restack hygiene: the new generation's run closes the prior generation's PR
+// if still open — bounded, non-fatal, and only after the new PR exists.
+assert.match(jobEntrypointSource, /SUPERSEDED_CLOSE_TIMEOUT_MS = 30_000/u, "the superseded-PR close carries its own bounded budget");
+assert.match(jobEntrypointSource, /request\.job\.generation > 1/u, "generation one has no predecessor to close");
+assert.match(jobEntrypointSource, /gh", \["pr", "close", supersededBranch, "--comment"/u, "the prior generation's PR is closed by its branch name with a superseded comment");
+assert.match(jobEntrypointSource, /postHeartbeat\(supersededClose\.success \? "superseded-pr-closed" : "superseded-pr-close-skipped"\)/u, "the close emits a heartbeat either way and never fails the run");
+assert.ok(jobEntrypointSource.indexOf('["pr", "close", supersededBranch') > jobEntrypointSource.indexOf('"--auto", "--squash"'), "the superseded PR closes only after the new candidate PR exists and its fast lane is armed");
+
+// The ledger-declared CI profile rides the provenance markers so the trusted
+// gate can grant content/visual candidates the scoped validation fast path.
+assert.match(jobEntrypointSource, /const CI_PROFILES = new Set\(\["visual", "content", "behavior", "data", "infrastructure"\]\)/u, "the runner validates the CI profile against the exact ledger vocabulary");
+assert.match(jobEntrypointSource, /!CI_PROFILES\.has\(candidate\.change\.ciProfile\)/u, "an out-of-vocabulary CI profile fails request validation instead of forging provenance");
+assert.match(jobEntrypointSource, /- CI profile: \\`\$\{candidate\.change\.ciProfile\}\\`/u, "the provenance body carries the ledger-declared CI profile marker the gate parses");
+
 // The direct agent stages file contents only, so the job entrypoint owns the
 // Git identity, staging, and commit that NanoCodex used to perform itself.
 assert.match(jobEntrypointSource, /"config", "user\.email"/u);

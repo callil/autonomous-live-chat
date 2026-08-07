@@ -20,6 +20,8 @@
 .ah-panel header button, .ah-back { padding: 2px 6px; color: var(--ah-muted); background: transparent; border: 0; cursor: pointer; }
 .ah-actions { display: grid; gap: 6px; margin-top: 10px; }
 .ah-actions button { display: flex; align-items: center; gap: 8px; padding: 9px; color: var(--ah-text); text-align: left; background: transparent; border: 1px solid var(--ah-border); border-radius: 8px; cursor: pointer; }
+.ah-actions .ah-activity { justify-content: center; }
+.ah-activity i { width: 7px; height: 7px; border-radius: 50%; background: #65d996; }
 .ah-panel form { display: grid; gap: 8px; margin-top: 10px; }
 .ah-panel label { color: var(--ah-muted); font-size: 12px; }
 .ah-panel textarea { min-height: 88px; padding: 9px; color: var(--ah-text); background: var(--ah-surface); border: 1px solid var(--ah-border); border-radius: 8px; resize: vertical; }

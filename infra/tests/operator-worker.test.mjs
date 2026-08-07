@@ -14,8 +14,8 @@ const [operatorWorker, operatorConfig, demoWorker, demoConfig, runnerWorker, run
 ]);
 
 // ---- tool vocabulary: strict schemas, loop-owned facts never model-facing ----
-assert.equal(TOOLS.length, 13, "the vocabulary is 6 observations + 7 stages; claim, release, and defer died with the lease machinery");
-assert.equal(OBSERVATION_TOOLS.size, 6);
+assert.equal(TOOLS.length, 14, "the vocabulary is 7 observations + 7 stages; claim, release, and defer died with the lease machinery");
+assert.equal(OBSERVATION_TOOLS.size, 7);
 assert.equal(STAGE_TOOLS.size, 7);
 for (const name of ["stageClaim", "stageRelease", "stageDefer", "listReady", "getWorkItem", "getAction", "listActions"]) {
 	assert.ok(!TOOLS.some((entry) => entry.function.name === name), `${name} does not exist in the event-driven vocabulary`);
@@ -31,9 +31,10 @@ for (const entry of TOOLS) {
 	}
 }
 assert.deepEqual(Object.keys(TOOLS.find((candidate) => candidate.function.name === "stageImplementation").function.parameters.properties), [], "the implementation run identifier is minted by the loop, never the model");
+assert.deepEqual(Object.keys(TOOLS.find((candidate) => candidate.function.name === "observeCandidatePullRequest").function.parameters.properties), [], "the candidate PR number is loop-injected from the recorded artifact, never a model argument");
 
 // ---- system prompt: no lease ceremony, WAITING is a turn outcome ----
-assert.ok(SYSTEM_PROMPT.length < 1_200, `system prompt stays compact (${SYSTEM_PROMPT.length} chars)`);
+assert.ok(SYSTEM_PROMPT.length < 1_500, `system prompt stays compact (${SYSTEM_PROMPT.length} chars)`);
 assert.match(SYSTEM_PROMPT, /classification -> issue -> plan -> implementation -> candidate -> validating -> promotion -> deployed -> completed/u);
 assert.doesNotMatch(SYSTEM_PROMPT, /claim|lease|defer|stageRelease/iu, "no lease vocabulary survives the simplification");
 assert.match(SYSTEM_PROMPT, /never poll getCandidate/u, "candidate results arrive by push");
@@ -43,6 +44,10 @@ assert.match(SYSTEM_PROMPT, /Stage from pushed State\.facts/u, "pushed GitHub fa
 assert.match(SYSTEM_PROMPT, /then WAIT: candidates auto-merge and deploy on their own/u, "after validating, the default is to wait for the fast lane, not dispatch promotion");
 assert.match(SYSTEM_PROMPT, /facts\.merged and a success facts\.mainDeploy arrive, stageState deployed with both as artifacts, then completed/u, "the merge and main-deploy facts together are the fast-lane deployed evidence");
 assert.match(SYSTEM_PROMPT, /stagePromotion is the fallback if no merged fact arrives after a long wait/u, "promotion dispatch is described as the fallback merge path");
+// ---- merge-watch conflict recovery: observe the PR, restack when dirty ----
+assert.match(SYSTEM_PROMPT, /On a mergeTimeoutProblem, observeCandidatePullRequest/u, "the merge-timeout problem fact routes to the bounded PR observation");
+assert.match(SYSTEM_PROMPT, /mergeableState is dirty the candidate is conflicted — restack immediately \(stagePlan next generation, fresh baseSha\)/u, "a conflicted candidate restacks immediately instead of waiting out the fast lane");
+assert.match(SYSTEM_PROMPT, /if merged, keep waiting for facts/u, "an already-merged candidate keeps waiting for the pushed merge facts, never double-restacks");
 const stageStateArtifacts = TOOLS.find((entry) => entry.function.name === "stageState").function.parameters.properties.artifacts;
 assert.deepEqual(Object.keys(stageStateArtifacts.properties).toSorted(), ["mainDeploy", "merged", "promotion", "validation"], "stageState can carry every evidence artifact the deployed guard accepts");
 assert.deepEqual(stageStateArtifacts.properties.merged.required.toSorted(), ["branch", "headSha", "mergeCommitSha", "number", "url"]);
@@ -134,6 +139,13 @@ assert.match(demoWorker, /const nextStep = item\.phase === "retryable"/u, "a ret
 assert.match(demoWorker, /Stage a revised plan \(revision \$\{item\.plan \? item\.plan\.revision \+ 1 : 1\}, next generation, fresh getMainSha baseSha\) to restack\./u, "the guidance carries the exact next revision");
 assert.match(SYSTEM_PROMPT, /phase retryable \(the failed run was already cleared\), restack/u, "the prompt teaches the retryable restack");
 assert.match(SYSTEM_PROMPT, /never wait for a cleared run/u, "the wedge — waiting on a dead generation — is named and forbidden");
+
+// ---- merge watch: the ledger names the problem; the operator observes ----
+assert.match(demoWorker, /MERGE_WATCH_TIMEOUT_MS = 4 \* 60_000/u, "the merge watch window is a named four-minute constant");
+assert.match(demoWorker, /let mergeTimeoutProblem/u, "the snapshot carries the merge-timeout problem fact");
+assert.match(demoWorker, /validation\.conclusion === "success" && !merged && !facts\?\.promotion && Date\.now\(\) - validation\.at > MERGE_WATCH_TIMEOUT_MS/u, "the problem fires only for a successful validation with no merged or promotion fact past the watch window");
+assert.match(demoWorker, /Observe the candidate pull request state with observeCandidatePullRequest/u, "the problem text instructs the bounded observation, not a ledger-side GitHub query");
+assert.match(operatorWorker, /observeCandidatePullRequest\(\{ number: turn\.candidatePr \}\)/u, "the loop injects the recorded candidate PR number into the observation");
 
 // ---- fast-lane facts: honest joins in the ledger and snapshot ----
 assert.match(demoWorker, /matchGithubMainDeployToWorkItems\(fact, live, merges\)/u, "main-deploy matching receives the per-item merge commits and may match several contained merges");

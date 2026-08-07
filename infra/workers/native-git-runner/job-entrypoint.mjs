@@ -61,6 +61,10 @@ function safeCallback(value) {
 	return { url: value.url, workItemId: value.workItemId, runId: value.runId };
 }
 
+// The ledger-declared CI profile rides the provenance markers so the trusted
+// gate can grant content/visual candidates the scoped validation fast path.
+const CI_PROFILES = new Set(["visual", "content", "behavior", "data", "infrastructure"]);
+
 function safeRequest(input) {
 	const job = input?.job;
 	if (!job || typeof job.jobId !== "string" || !EVENT_ID.test(job.jobId) || typeof job.repository !== "string" || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(job.repository) || !Number.isInteger(job.generation) || job.generation < 1 || typeof input.runId !== "string" || !EVENT_ID.test(input.runId) || typeof input.checkoutDirectory !== "string" || !input.checkoutDirectory.startsWith("/workspace/") || typeof input.instructions !== "string" || typeof input.model !== "string" || !MODEL.test(input.model)) return null;
@@ -68,7 +72,7 @@ function safeRequest(input) {
 	const candidate = input.candidate;
 	const branch = safeBranch(candidate?.stack?.branch);
 	const parentBranch = safeBranch(candidate?.stack?.parentBranch);
-	if (candidate?.change?.kind !== "repository-task" || typeof candidate.change.request !== "string" || !candidate.change.request.trim() || typeof candidate?.stack?.stackId !== "string" || !EVENT_ID.test(candidate.stack.stackId) || candidate.stack.nodeId !== "root" || !branch || !parentBranch || parentBranch !== "main" || candidate.stack.pullRequestBase !== "main" || !Number.isInteger(candidate.stack.issueNumber) || candidate.stack.issueNumber < 1 || typeof candidate.stack.parentBaseSha !== "string" || !SHA.test(candidate.stack.parentBaseSha) || branch !== `app-harness-os/${candidate.stack.issueNumber}/g${job.generation}`) return null;
+	if (candidate?.change?.kind !== "repository-task" || typeof candidate.change.request !== "string" || !candidate.change.request.trim() || !CI_PROFILES.has(candidate.change.ciProfile) || typeof candidate?.stack?.stackId !== "string" || !EVENT_ID.test(candidate.stack.stackId) || candidate.stack.nodeId !== "root" || !branch || !parentBranch || parentBranch !== "main" || candidate.stack.pullRequestBase !== "main" || !Number.isInteger(candidate.stack.issueNumber) || candidate.stack.issueNumber < 1 || typeof candidate.stack.parentBaseSha !== "string" || !SHA.test(candidate.stack.parentBaseSha) || branch !== `app-harness-os/${candidate.stack.issueNumber}/g${job.generation}`) return null;
 	return { ...input, job, candidate: { ...candidate, change: { ...candidate.change, request: candidate.change.request.trim() }, stack: { ...candidate.stack, branch, parentBranch } }, callback: safeCallback(input.callback) };
 }
 
@@ -83,6 +87,7 @@ const AGENT_TIMEOUT_MS = 260_000;
 // the run budget; this is the whole reason the local gate is affordable.
 const LOCAL_TEST_TIMEOUT_MS = 30_000;
 const AUTO_MERGE_TIMEOUT_MS = 30_000;
+const SUPERSEDED_CLOSE_TIMEOUT_MS = 30_000;
 const GH_STACK_TIMEOUT_MS = 120_000;
 const GITHUB_FETCH_TIMEOUT_MS = 30_000;
 const CALLBACK_TIMEOUT_MS = 15_000;
@@ -197,6 +202,7 @@ function provenanceBody(existing, request, headSha) {
 		`- Node: \`${candidate.stack.nodeId}\``,
 		`- Parent base: \`${candidate.stack.parentBranch}\`${candidate.stack.parentBaseSha ? ` at \`${candidate.stack.parentBaseSha}\`` : ""}`,
 		`- Candidate head: \`${headSha}\``,
+		`- CI profile: \`${candidate.change.ciProfile}\``,
 		"- Operator: App Harness direct coding agent",
 		"- CI is the merge and production deployment authority.",
 		end,
@@ -441,6 +447,17 @@ async function main() {
 	// fallback merge path, so a failure here costs latency, never the run.
 	const autoMergeArm = await run("gh", ["pr", "merge", String(pullRequest.number), "--auto", "--squash"], { cwd: request.checkoutDirectory, timeoutMs: AUTO_MERGE_TIMEOUT_MS });
 	postHeartbeat(autoMergeArm.success ? "auto-merge-armed" : "auto-merge-unarmed");
+
+	// Restack hygiene: this generation supersedes the previous one, so its PR —
+	// still open only when auto-merge never landed it (usually a post-submission
+	// conflict) — is closed here. Bounded and non-fatal by design: gh fails
+	// harmlessly when no open PR exists for the prior branch, and a failure to
+	// close costs a stale open PR, never the run.
+	if (request.job.generation > 1) {
+		const supersededBranch = `app-harness-os/${request.candidate.stack.issueNumber}/g${request.job.generation - 1}`;
+		const supersededClose = await run("gh", ["pr", "close", supersededBranch, "--comment", `Superseded by generation ${request.job.generation}: ${pullRequest.url}`], { cwd: request.checkoutDirectory, timeoutMs: SUPERSEDED_CLOSE_TIMEOUT_MS });
+		postHeartbeat(supersededClose.success ? "superseded-pr-closed" : "superseded-pr-close-skipped");
+	}
 
 	return artifact(request, "pull-request-opened", { baseSha, headSha, pullRequest, autoMerge: { armed: autoMergeArm.success }, stack: { id: request.candidate.stack.stackId, nodeId: request.candidate.stack.nodeId, branch: request.candidate.stack.branch, parentBranch: request.candidate.stack.parentBranch, topology: submitted.topology }, agent });
 }

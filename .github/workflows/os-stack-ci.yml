@@ -24,6 +24,7 @@ jobs:
       pull_request: ${{ steps.candidate.outputs.pull_request }}
       head_sha: ${{ steps.candidate.outputs.head_sha }}
       candidate_base_sha: ${{ steps.candidate.outputs.candidate_base_sha }}
+      ci_profile: ${{ steps.candidate.outputs.ci_profile }}
     env:
       GH_REPO: ${{ github.repository }}
       GH_TOKEN: ${{ github.token }}
@@ -68,5 +69,18 @@ jobs:
           cache: npm
       - name: Install candidate dependencies without privileged secrets
         run: npm ci
+      # CI diet: the gate-parsed, ledger-declared CI profile classifies the
+      # candidate's validation cost. Content and visual candidates touch only
+      # the demo surface, so they run the demo composer test plus the demo
+      # typecheck; every other profile (or an absent marker) runs the full
+      # workspace baseline. The required validate-candidate check reports
+      # either way — the fast path narrows the steps, never the gate.
       - name: Run mandatory candidate baseline
+        if: ${{ needs.provenance.outputs.ci_profile != 'content' && needs.provenance.outputs.ci_profile != 'visual' }}
         run: npm run check
+      - name: Run scoped content/visual candidate baseline
+        if: ${{ needs.provenance.outputs.ci_profile == 'content' || needs.provenance.outputs.ci_profile == 'visual' }}
+        run: |
+          npm --workspace @app-harness/demo run cf-typegen
+          npm --workspace @app-harness/demo run typecheck
+          node apps/demo/test/composer.test.mjs
