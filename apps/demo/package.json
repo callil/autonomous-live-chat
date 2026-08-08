@@ -11,7 +11,7 @@
     "deploy": "wrangler deploy",
     "cf-typegen": "wrangler types",
     "typecheck": "tsc --noEmit --noUnusedLocals --noUnusedParameters",
-    "test": "node test/composer.test.mjs"
+    "test": "node test/composer.test.mjs && node test/floating-flyout.test.mjs"
   },
   "devDependencies": {
     "@types/node": "^26.1.2",
