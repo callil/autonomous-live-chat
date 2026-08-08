@@ -49,3 +49,7 @@ Infrastructure services have separate, explicit deployment workflows. Ordinary a
 The room does not impose product-level character or history-count caps. Messages and collaboration records are stored as individual Durable Object records rather than silently dropping older entries from a fixed-size array. Reconnects receive a bounded page plus live deltas, with earlier pages available on demand. Byte admission and batch sizes come from the documented platform contract in [platform policy](./docs/platform-policy.md), not scattered UI magic numbers. Repository intent and progress remain in the Durable Object work ledger, per-item operator turn records, GitHub issues and pull requests, commits, and checked-in documentation.
 
 The end-to-end path, trust boundaries, stack behavior, and current limitations are described in [the architecture guide](./docs/architecture.md).
+
+## Stack CLI usage
+
+All pull requests in this repository — platform and app-authored alike — are created with `gh stack` commands (`init`/`add`/`submit`), never bare `gh pr create`, so every PR belongs to a server-side stack and merges through `gh stack merge`.
