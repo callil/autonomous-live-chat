@@ -44,7 +44,7 @@ const HARNESS_TOOLBAR_STYLES = `<style>
   }
   .comment-preview-dismiss:hover { background: var(--color-surface-hover); color: var(--color-text); }
   .comment-pin { cursor: pointer; }
-  body.harness-parent-targeting [data-app-harness-id]:not(body) [data-app-harness-id] { pointer-events: none !important; }
+  .harness-parent-skip { pointer-events: none !important; }
   @keyframes harness-status-pulse { 0% { box-shadow: 0 0 0 0 rgba(101,217,150,.8); } 70%,100% { box-shadow: 0 0 0 .45rem rgba(101,217,150,0); } }
   @media (prefers-reduced-motion: reduce) { .active-status-dot.working { animation: none; } }
   @media (max-width: 64rem) { .authoring-popover { bottom: var(--narrow-launcher-bottom); } }
@@ -68,6 +68,12 @@ const HARNESS_TOOLBAR_SCRIPT = `<script>
   const commentLayer = document.querySelector('#comment-layer');
   if (!popover || !tools || !activity || !count) return;
 
+  // Make the root viewport the site target, including page background outside the body box.
+  document.documentElement.dataset.appHarnessId = 'entire-site';
+  document.documentElement.dataset.appHarnessLabel = 'Entire site';
+  document.body.removeAttribute('data-app-harness-id');
+  document.body.removeAttribute('data-app-harness-label');
+
   // Lucide's open-source line icons replace the original bespoke icon set.
   const icons = {
     target: '<svg data-icon-library="lucide" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg>',
@@ -83,7 +89,29 @@ const HARNESS_TOOLBAR_SCRIPT = `<script>
     const button = document.querySelector(selector);
     if (button) button.title += ' · Hold Shift for parent container';
   });
-  const setParentTargeting = active => document.body.classList.toggle('harness-parent-targeting', active);
+  let skippedTarget;
+  let pointerX = 0;
+  let pointerY = 0;
+  const clearSkippedTarget = () => {
+    skippedTarget?.classList.remove('harness-parent-skip');
+    skippedTarget = undefined;
+  };
+  const skipNearestTarget = () => {
+    clearSkippedTarget();
+    const hit = document.elementsFromPoint(pointerX, pointerY)
+      .map(element => element.closest?.('[data-app-harness-id]'))
+      .find(element => element && element !== document.documentElement && !element.closest('.harness-frame'));
+    if (hit) {
+      skippedTarget = hit;
+      skippedTarget.classList.add('harness-parent-skip');
+    }
+  };
+  const setParentTargeting = active => active ? skipNearestTarget() : clearSkippedTarget();
+  window.addEventListener('pointermove', event => {
+    pointerX = event.clientX;
+    pointerY = event.clientY;
+    if (event.shiftKey) skipNearestTarget();
+  }, true);
   window.addEventListener('keydown', event => { if (event.key === 'Shift') setParentTargeting(true); });
   window.addEventListener('keyup', event => { if (event.key === 'Shift') setParentTargeting(false); });
   window.addEventListener('blur', () => setParentTargeting(false));

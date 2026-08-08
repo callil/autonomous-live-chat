@@ -15,6 +15,11 @@ assert.match(entry, /status\.textContent = phase\.textContent \|\| 'Active';/u, 
 assert.match(entry, /active-status-dot' \+ \(phase\.classList\.contains\('needs_review'\) \? '' : ' working'\)/u, "working rows receive the pulsing status-dot state");
 assert.match(entry, /@media \(prefers-reduced-motion: reduce\) \{ \.active-status-dot\.working \{ animation: none; \} \}/u, "status animation respects reduced-motion preferences");
 
+assert.match(entry, /document\.documentElement\.dataset\.appHarnessId = 'entire-site'/u, "the page background resolves to a selectable entire-site target");
+assert.match(entry, /document\.elementsFromPoint\(pointerX, pointerY\)[\s\S]*element\.closest\?\.\('\[data-app-harness-id\]'\)/u, "parent targeting starts from the nearest applicable marked element");
+assert.match(entry, /\.harness-parent-skip \{ pointer-events: none !important; \}/u, "only the nearest target is skipped so target and comment tools reach its parent container");
+assert.doesNotMatch(entry, /harness-parent-targeting/u, "parent targeting no longer disables every nested target and jumps to the outermost container");
+
 assert.match(entry, /event\.key === 'Enter' && \(event\.metaKey \|\| event\.ctrlKey\)/u, "the change-request composer submits with Cmd+Enter and its cross-platform equivalent");
 assert.match(entry, /requestForm\.requestSubmit\(\);/u, "the keyboard shortcut follows native form validation and submission semantics");
 assert.match(entry, /requestInput\.value = '';[\s\S]*requestInput\.dispatchEvent\(new Event\('input', \{ bubbles: true \}\)\);/u, "the composer clears both its field and input state after an acknowledged send");
