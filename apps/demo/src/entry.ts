@@ -24,10 +24,14 @@ const HARNESS_TOOLBAR_STYLES = `<style>
   .authoring-tools .harness-tool[aria-pressed="true"] { background: rgba(255,255,255,.16); }
   .authoring-tools .annotation-toggle { border-left: 1px solid rgba(255,255,255,.22); border-radius: 0 var(--radius-round) var(--radius-round) 0; }
   .authoring-tools svg { width: 1rem; height: 1rem; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
-  .active-status-dot { width: .4375rem; height: .4375rem; border-radius: 50%; background: #65d996; }
+  .active-status-dot { flex: 0 0 auto; width: .4375rem; height: .4375rem; border-radius: 50%; background: #65d996; }
   .active-status-dot.working { animation: harness-status-pulse 1.35s ease-out infinite; }
   .authoring-notice { display: none !important; }
   .work-item[data-terminal="true"] { display: none; }
+  .work-item[data-active-issue="true"] > :not(.active-issue-line) { display: none; }
+  .active-issue-line { display: flex; align-items: center; gap: .5rem; min-width: 0; }
+  .active-issue-line a { color: inherit; font-weight: 600; white-space: nowrap; }
+  .active-issue-status { overflow: hidden; color: var(--color-text-secondary); text-overflow: ellipsis; white-space: nowrap; }
   .comment-preview {
     position: fixed; z-index: 3; width: min(18rem, calc(100vw - 2rem)); padding: .75rem 2rem .75rem .875rem;
     border: 1px solid var(--color-border-strong); border-radius: var(--radius-control); background: var(--color-surface);
@@ -40,9 +44,9 @@ const HARNESS_TOOLBAR_STYLES = `<style>
   }
   .comment-preview-dismiss:hover { background: var(--color-surface-hover); color: var(--color-text); }
   .comment-pin { cursor: pointer; }
-  /* Holding Shift removes nested hit targets so both target and comment modes can reach their containing target. */
   body.harness-parent-targeting [data-app-harness-id]:not(body) [data-app-harness-id] { pointer-events: none !important; }
   @keyframes harness-status-pulse { 0% { box-shadow: 0 0 0 0 rgba(101,217,150,.8); } 70%,100% { box-shadow: 0 0 0 .45rem rgba(101,217,150,0); } }
+  @media (prefers-reduced-motion: reduce) { .active-status-dot.working { animation: none; } }
   @media (max-width: 64rem) { .authoring-popover { bottom: var(--narrow-launcher-bottom); } }
   @media (max-width: 40rem) { .harness-tool span { display: none; } .authoring-tools .harness-tool { padding: 0 .55rem; } }
 </style>`;
@@ -57,6 +61,7 @@ const HARNESS_TOOLBAR_SCRIPT = `<script>
   const count = document.querySelector('#activity-count-label');
   const list = document.querySelector('#work-item-list');
   const requestForm = document.querySelector('#target-composer');
+  const requestInput = document.querySelector('#target-request-input');
   const requestStatus = document.querySelector('#target-request-error');
   const done = document.querySelector('#done-target-request');
   const annotationPanel = document.querySelector('#annotation-panel');
@@ -84,10 +89,6 @@ const HARNESS_TOOLBAR_SCRIPT = `<script>
   window.addEventListener('blur', () => setParentTargeting(false));
 
   activity.replaceChildren(count);
-  const pulse = document.createElement('i');
-  pulse.className = 'active-status-dot';
-  pulse.setAttribute('aria-hidden', 'true');
-  activity.insertBefore(pulse, count);
   tools.append(activity);
 
   // Open once to initialize the existing targeting layer, then keep the complete pill visible without a launcher click.
@@ -99,16 +100,32 @@ const HARNESS_TOOLBAR_SCRIPT = `<script>
     const rows = [...(list?.querySelectorAll('.work-item') || [])];
     const active = [];
     rows.forEach(row => {
-      const phase = row.querySelector('.work-item-phase')?.classList;
-      const terminal = Boolean(phase?.contains('completed') || phase?.contains('rejected'));
+      const phase = row.querySelector('.work-item-phase');
+      const terminal = Boolean(phase?.classList.contains('completed') || phase?.classList.contains('rejected'));
       row.dataset.terminal = terminal ? 'true' : 'false';
-      if (phase && !terminal) active.push(row);
+      if (!phase || terminal) return;
+      active.push(row);
+      row.dataset.activeIssue = 'true';
+      if (row.querySelector('.active-issue-line')) return;
+      const line = document.createElement('div');
+      line.className = 'active-issue-line';
+      const dot = document.createElement('i');
+      dot.className = 'active-status-dot' + (phase.classList.contains('needs_review') ? '' : ' working');
+      dot.setAttribute('aria-hidden', 'true');
+      const issue = row.querySelector('.work-item-links a[href*="/issues/"]');
+      const issueLabel = issue?.textContent?.replace(/^Issue /, '') || 'Issue pending';
+      const issueElement = issue ? issue.cloneNode(true) : document.createElement('span');
+      issueElement.textContent = issueLabel;
+      const status = document.createElement('span');
+      status.className = 'active-issue-status';
+      status.textContent = phase.textContent || 'Active';
+      line.setAttribute('aria-label', issueLabel + ': ' + status.textContent + (dot.classList.contains('working') ? ', working' : ''));
+      line.append(dot, issueElement, status);
+      row.prepend(line);
     });
     count.textContent = String(active.length);
     activity.setAttribute('aria-label', 'Open ' + active.length + ' active issue' + (active.length === 1 ? '' : 's'));
     activity.title = active.length + ' active issue' + (active.length === 1 ? '' : 's');
-    pulse.hidden = active.length === 0;
-    pulse.classList.toggle('working', active.some(row => !row.querySelector('.work-item-phase.needs_review')));
   };
   if (list) {
     new MutationObserver(refreshActiveIssues).observe(list, { childList: true, subtree: true });
@@ -226,7 +243,13 @@ const HARNESS_TOOLBAR_SCRIPT = `<script>
     }
   });
   if (requestStatus && done) new MutationObserver(() => {
-    if (requestStatus.classList.contains('acknowledged') && !done.hidden) done.click();
+    if (requestStatus.classList.contains('acknowledged') && !done.hidden) {
+      if (requestInput) {
+        requestInput.value = '';
+        requestInput.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+      done.click();
+    }
   }).observe(requestStatus, { attributes: true, childList: true });
 })();
 </script>`;
