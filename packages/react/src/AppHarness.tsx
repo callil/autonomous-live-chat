@@ -33,10 +33,23 @@ export function AppHarness({ children, onRequest, onOpenActivity, activityCount 
       setHoverRect(undefined);
       return;
     }
+
+    // The document root is the final applicable container. This makes page
+    // background selectable without requiring every host to add an otherwise
+    // artificial wrapper, while preserving a host-provided root target.
+    const site = document.documentElement;
+    const ownsSiteId = !site.hasAttribute("data-app-harness-id");
+    const ownsSiteLabel = !site.hasAttribute("data-app-harness-label");
+    if (ownsSiteId) site.setAttribute("data-app-harness-id", "entire-site");
+    if (ownsSiteLabel) site.setAttribute("data-app-harness-label", "Entire site");
+
     const candidate = (event: MouseEvent | PointerEvent): Element | null => {
       const closest = event.target instanceof Element ? event.target.closest(TARGET_SELECTOR) : null;
       if (!closest) return null;
       if (!event.shiftKey) return closest;
+      // Resolve from the selected target's parent, rather than from the raw
+      // event node, so nested content consistently chooses the nearest
+      // applicable parent container.
       return closest.parentElement?.closest(TARGET_SELECTOR) ?? closest;
     };
     const move = (event: PointerEvent) => {
@@ -60,6 +73,8 @@ export function AppHarness({ children, onRequest, onOpenActivity, activityCount 
     return () => {
       document.removeEventListener("pointermove", move, true);
       document.removeEventListener("click", select, true);
+      if (ownsSiteId) site.removeAttribute("data-app-harness-id");
+      if (ownsSiteLabel) site.removeAttribute("data-app-harness-label");
     };
   }, [targeting]);
 
