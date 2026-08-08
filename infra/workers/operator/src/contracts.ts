@@ -104,7 +104,7 @@ export interface GitHubRepositoryBinding {
 	dispatchPromotion(input: { pullRequest: number; stackId: string; generation: number; issueNumber: number; nodeId: string; parentBranch: string; headSha: string; dispatchKey: string; ciProfile: "visual" | "content" | "behavior" | "data" | "infrastructure" }): Promise<{ dispatchKey: string; dispatched: true }>;
 	getMainSha(): Promise<{ sha: string }>;
 	getCandidate(input: { branch: string; pullRequestBase: string }): Promise<{ number: number; url: string; headSha: string; base: string; state: string } | null>;
-	observeCandidatePullRequest(input: { number: number }): Promise<{ number: number; state: string; merged: boolean; mergeableState: string; mergeCommitSha: string | null }>;
+	observeCandidatePullRequest(input: { number: number }): Promise<{ number: number; state: string; merged: boolean; mergeableState: string; mergeCommitSha: string | null; headSha: string | null }>;
 	observeCandidateValidation(input: { pullRequest: number; headSha: string }): Promise<{ runId: number; status: string; conclusion: string | null; url: string; createdAt: string } | null>;
 	updateClassification(input: { issueNumber: number; classification: "triage" | "agent" | "needs-review" | "rejected" | "deployed"; modelClassification?: { changeType: "visual" | "content" | "data" | "behavior" | "infrastructure"; scope: "localized" | "bounded" | "broad"; risk: "low" | "medium" | "high"; affectedSurface: "ui" | "copy" | "data" | "behavior" | "infrastructure"; reversible: boolean; executionEligibility: "eligible" | "needs_review"; ciProfile: "visual" | "content" | "behavior" | "data" | "infrastructure" } }): Promise<unknown>;
 	postStatus(input: { issueNumber: number; eventId: string; body: string }): Promise<unknown>;
