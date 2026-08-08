@@ -203,7 +203,7 @@ async function api(path, options = {}) {
 			Authorization: `Bearer ${required("GH_TOKEN")}`,
 			"Content-Type": "application/json",
 			"User-Agent": "app-harness-os-stack-gate",
-			"X-GitHub-Api-Version": "2022-11-28",
+			"X-GitHub-Api-Version": options.version ?? "2022-11-28",
 			...options.headers,
 		},
 	});
@@ -224,7 +224,7 @@ async function verifyPullRequestCommand() {
 	const repo = repository(required("GH_REPO"));
 	const pullRequest = integer(required("PR"), "PR");
 	const expectedHead = process.env.EXPECTED_HEAD ? exactSha(process.env.EXPECTED_HEAD, "EXPECTED_HEAD") : undefined;
-	const pr = await api(`repos/${repo}/pulls/${pullRequest}`);
+	const pr = await api(`repos/${repo}/pulls/${pullRequest}`, { version: "2026-03-10" });
 	// The immutability contract is against the candidate's RECORDED parent
 	// base, not whatever the base branch has advanced to since: under
 	// auto-merge, main moves constantly and every open candidate would
@@ -263,15 +263,17 @@ async function verifyPullRequestCommand() {
 	// what the promote job verifies instead. REQUIRE_BOTTOM is set only by the
 	// promotion workflow: only the bottom open member of the cascade may merge.
 	if (!result.alreadyMerged) {
+		// GitHub materializes a Stack only at two or more pull requests: a
+		// single-node candidate carries stack: null by design, which is normal
+		// and not a trust signal either way — the provenance checks above are
+		// authoritative for it. When a stack IS present, its membership must
+		// be coherent, fail-closed. The stacks routes take the STACK's own
+		// number (not the PR number) and the 2026-03-10 API version.
 		const stackNumber = pr.stack?.number;
 		if (Number.isInteger(stackNumber) && stackNumber >= 1) {
-			// Present and malformed stays fail-closed: a mismatched stack is a
-			// forgery signal. Absent stays advisory: the stacks REST surface is
-			// a preview feature and its availability is not this repo's choice —
-			// the pre-existing provenance checks above carry the trust boundary.
-			validateStackMembership(pr, await api(`repos/${repo}/stacks/${stackNumber}`), { requireBottom: process.env.REQUIRE_BOTTOM === "true" });
+			validateStackMembership(pr, await api(`repos/${repo}/stacks/${stackNumber}`, { version: "2026-03-10" }), { requireBottom: process.env.REQUIRE_BOTTOM === "true" });
 		} else {
-			console.log("Stack membership unavailable on the PR payload (preview API absent); membership assertions skipped, provenance checks remain authoritative.");
+			console.log("Single-node candidate: no server-side stack exists (stacks require two or more pull requests); provenance checks are authoritative.");
 		}
 	}
 	await output({
