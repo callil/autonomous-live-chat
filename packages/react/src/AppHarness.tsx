@@ -14,9 +14,18 @@ export type AppHarnessProps = {
 };
 
 const TARGET_SELECTOR = "[data-app-harness-id]";
+const SITE_TARGET_ID = "entire-site";
+const SITE_TARGET_LABEL = "Entire site";
 
 function CrosshairIcon() {
   return <svg aria-hidden="true" viewBox="0 0 20 20"><circle cx="10" cy="10" r="4"/><path d="M10 2v4M10 14v4M2 10h4M14 10h4"/></svg>;
+}
+
+/** Resolve the leaf target first, or its nearest marked ancestor while selecting a container. */
+function applicableTarget(element: Element, selectParent: boolean): Element | null {
+  const nearest = element.closest(TARGET_SELECTOR);
+  if (!nearest || !selectParent) return nearest;
+  return nearest.parentElement?.closest(TARGET_SELECTOR) ?? nearest;
 }
 
 export function AppHarness({ children, onRequest, onOpenActivity, activityCount = 0 }: AppHarnessProps) {
@@ -28,17 +37,28 @@ export function AppHarness({ children, onRequest, onOpenActivity, activityCount 
   const [request, setRequest] = useState("");
   const [status, setStatus] = useState<"idle" | "submitting" | "submitted" | "error">("idle");
 
+  // The viewport background is a useful target even when the host has no visible
+  // root container. Preserve any host-provided root target instead of replacing it.
+  useEffect(() => {
+    const root = document.documentElement;
+    if (root.hasAttribute("data-app-harness-id")) return;
+    root.setAttribute("data-app-harness-id", SITE_TARGET_ID);
+    root.setAttribute("data-app-harness-label", SITE_TARGET_LABEL);
+    return () => {
+      if (root.getAttribute("data-app-harness-id") === SITE_TARGET_ID) {
+        root.removeAttribute("data-app-harness-id");
+        root.removeAttribute("data-app-harness-label");
+      }
+    };
+  }, []);
+
   useEffect(() => {
     if (!targeting) {
       setHoverRect(undefined);
       return;
     }
-    const candidate = (event: MouseEvent | PointerEvent): Element | null => {
-      const closest = event.target instanceof Element ? event.target.closest(TARGET_SELECTOR) : null;
-      if (!closest) return null;
-      if (!event.shiftKey) return closest;
-      return closest.parentElement?.closest(TARGET_SELECTOR) ?? closest;
-    };
+    const candidate = (event: MouseEvent | PointerEvent): Element | null =>
+      event.target instanceof Element ? applicableTarget(event.target, event.shiftKey) : null;
     const move = (event: PointerEvent) => {
       const element = candidate(event);
       if (!element) return setHoverRect(undefined);
@@ -83,7 +103,7 @@ export function AppHarness({ children, onRequest, onOpenActivity, activityCount 
       {open && <section className="ah-panel" aria-label="App Harness" data-app-harness-id="authoring-panel" data-app-harness-label="App Harness authoring panel">
         <header><strong>App Harness</strong><button type="button" aria-label="Close App Harness" data-app-harness-id="close-authoring" data-app-harness-label="Close App Harness" onClick={() => setOpen(false)}>×</button></header>
         {!target ? <div className="ah-actions">
-          <button type="button" aria-pressed={targeting} data-app-harness-id="target-control" data-app-harness-label="Target control" title="Hold Shift to target a parent container" onClick={() => setTargeting((value) => !value)}><CrosshairIcon />Target an element</button>
+          <button type="button" aria-pressed={targeting} data-app-harness-id="target-control" data-app-harness-label="Target control" title="Hold Shift to target the nearest parent container" onClick={() => setTargeting((value) => !value)}><CrosshairIcon />Target an element</button>
           {onOpenActivity && <button className="ah-activity" type="button" aria-label={`Open activity (${activityCount})`} data-app-harness-id="activity-control" data-app-harness-label="Activity control" onClick={onOpenActivity}><i aria-hidden="true" /><span>{activityCount}</span></button>}
         </div> : <form aria-labelledby={composerId} onSubmit={submit}>
           <label id={composerId} htmlFor={`${composerId}-request`}>Target: {target.label ?? target.targetId}</label>
