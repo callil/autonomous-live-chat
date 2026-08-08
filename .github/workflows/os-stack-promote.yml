@@ -213,18 +213,17 @@ jobs:
           # log names the failure mode instead of a generic non-zero exit.
           case "$status" in
             0) ;;
-            2|6|9)
-              # Absence class: this repository does not serve server-side stack
-              # objects (verified: pr.stack is null and the stacks REST surface
-              # 404s), so the native cascade has nothing to operate on. The
-              # documented "legacy endpoints can't merge a stack member" rule
-              # does not bind a PR that is not a real stack member; the legacy
-              # squash merge with the exact-head match remains sound, and every
-              # surrounding guarantee (pre-merge reverify, remote-main equality,
-              # post-merge exact-tree verification) applies unchanged.
-              echo "gh stack merge exit ${status}: no server-side stack to operate on — falling back to the exact-head legacy merge."
+            2|6)
+              # A stack only exists at two or more pull requests: exit 2 for a
+              # single-node candidate means "not in a stack", which is normal —
+              # the legacy exact-head merge is correct and documented for a
+              # plain pull request. (Exit 6 is number ambiguity; the exact-head
+              # match keeps it safe.) Real multi-node stacks never take this
+              # branch: their membership was verified by the gate above.
+              echo "gh stack merge exit ${status}: single-node candidate (no server-side stack) — merging as a plain pull request with the exact-head match."
               gh pr merge "$PR" --squash --delete-branch --match-head-commit "$EXPECTED_HEAD"
               ;;
+            9) echo '::error::gh stack merge exit 9: stacked pull requests are not available — unwinnable, do not re-dispatch.'; exit 9 ;;
             8) echo '::error::gh stack merge exit 8: the stack is locked by another process — back off, then re-dispatch the promotion.'; exit 8 ;;
             4) echo '::error::gh stack merge exit 4: GitHub API failure — retryable; re-dispatch the promotion.'; exit 4 ;;
             3) echo '::error::gh stack merge exit 3: rebase conflict — the candidate needs a restack (next generation, fresh base).'; exit 3 ;;
