@@ -13,6 +13,9 @@ assert.doesNotThrow(() => new Function(clientScript), "the browser client script
 assert.match(clientScript, /function renderMessageSnapshot\(messages\) \{ messagesEl\.replaceChildren\(\); rendered\.clear\(\);/u, "a reconnect snapshot replaces retired chat state instead of merging it");
 assert.match(clientScript, /event\.type === 'chat:snapshot'\) \{ renderMessageSnapshot\(event\.messages\)/u, "every authoritative chat snapshot uses replacement semantics");
 assert.match(avatarColors, /const color = avatarColor\(name\);\s+avatar\.style\.color = color;\s+author\.style\.color = color;/u, "each message author uses the same generated color as their avatar");
+assert.match(avatarColors, /phase\.replaceChildren\(dot, \.\.\.\(issue \? \[issue\.cloneNode\(true\)\] : \[\]\), statusText\)/u, "active issue rows present the working indicator, linked issue number, and text status together");
+assert.match(avatarColors, /phase\.classList\.contains\('needs_review'\) \? '' : ' working'/u, "working issue indicators pulse while review items remain still");
+assert.match(avatarColors, /targetRequestInput\.value = '';/u, "the targeted request field clears after acknowledgement");
 
 assert.doesNotMatch(html, /maxlength=/u);
 assert.doesNotMatch(html, /message-count/u);
@@ -70,5 +73,6 @@ assert.match(html, /Load earlier updates/u, "the UI can retrieve a work item's o
 // Guard the established keyboard contract while changing composer behavior.
 assert.match(html, /event\.key === 'Enter' && !event\.shiftKey/);
 assert.match(html, /event\.preventDefault\(\); form\.requestSubmit\(\);/);
+assert.match(entry, /event\.key === 'Enter' && \(event\.metaKey \|\| event\.ctrlKey\)/u, "Cmd+Enter submits the targeted request composer");
 
 console.log("uncapped composer and durable record contracts passed");
