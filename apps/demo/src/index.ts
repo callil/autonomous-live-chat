@@ -186,9 +186,10 @@ type ExternalFactInput =
 
 type RuntimeEnv = Omit<Env, "OPERATOR" | "OPERATOR_PAUSED" | "GITHUB"> & { OPERATOR: unknown; GITHUB?: unknown; OPERATOR_PAUSED?: string };
 
-/** The one bridge observation the room's sweep reconciliation uses: a bounded candidate PR read that recovers a lost merged delivery. */
+/** The bounded bridge observations the room's sweep reconciliation uses: a candidate PR read (lost merges, stale heads) and a validation-run read (lost validation deliveries). */
 type GithubBridgeTransport = {
-	observeCandidatePullRequest(input: { number: number }): Promise<{ number: number; state: string; merged: boolean; mergeableState: string; mergeCommitSha?: string | null }>;
+	observeCandidatePullRequest(input: { number: number }): Promise<{ number: number; state: string; merged: boolean; mergeableState: string; mergeCommitSha?: string | null; headSha?: string | null }>;
+	observeCandidateValidation(input: { pullRequest: number; headSha: string }): Promise<{ runId: number; status: string; conclusion: string | null; url: string; createdAt: string } | null>;
 };
 
 const MESSAGE_PREFIX = "message:";
@@ -222,6 +223,9 @@ const REJECTED_ACTION_PARK_THRESHOLD = 14;
 // prior run is provably dead (the runner's own deadline is 5 minutes). With
 // push-based completion this is a rare fallback, not the primary recovery path.
 const STALLED_IMPLEMENTATION_MS = 6 * 60_000;
+// How long an item may sit at candidate without validation evidence before
+// the sweep spends bridge observations reconciling it from GitHub directly.
+const CANDIDATE_VALIDATION_GRACE_MS = 3 * 60_000;
 // The final safety net behind event pokes: one slow sweep re-pokes every live
 // work item, so a lost fire-and-forget poke costs minutes, never the item.
 const SWEEP_INTERVAL_MS = 2 * 60_000;
@@ -511,18 +515,40 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 			// will pin), so a dependent run never starts under an unknowable
 			// parent revision.
 			if (input.command.kind === "implement") {
+				// One live run per item: a freshly minted runId while the prior
+				// run is inside its execution deadline is a duplicate dispatch,
+				// not a restart. Two live runs race the same branch — the loser
+				// force-pushes over the winner mid-validation and the recorded
+				// candidate head goes stale (observed live: four overlapping
+				// runs wedged one item at candidate for seven hours).
+				if (current.activeImplementation && Date.now() - current.activeImplementation.startedAt < STALLED_IMPLEMENTATION_MS) return { implementAlreadyLive: true as const };
 				if (!stackTipPinned(normalizeRoomStack(await txn.get(ROOM_STACK_KEY)), current.id)) return { stackTipUnpinned: true as const };
 				const grant = grantImplementSlot(await txn.get(ADMISSION_STATE_KEY), current.id);
 				await txn.put(ADMISSION_STATE_KEY, grant.state);
 				if (!grant.granted) return { implementQueuedAhead: grant.ahead };
+			}
+			// A dependent plan derives its immutable parent base from the pinned
+			// tip; staged under a reserved (unpinned) tip it can only fail at
+			// apply, and each such failure burns the item's bounded rejection
+			// budget toward a park. Refuse at stage time with the same WAITING
+			// teaching error the implement gate uses instead.
+			if (input.command.kind === "plan") {
+				const effective = truncateStack(normalizeRoomStack(await txn.get(ROOM_STACK_KEY)), current.id).stack;
+				if (!stackTipPinned(effective, current.id)) return { stackTipUnpinned: true as const };
 			}
 			const id = ((await txn.get<number>(ACTION_COUNTER_KEY)) ?? 0) + 1;
 			if (!Number.isSafeInteger(id)) throw new Error("Operator action counter is exhausted.");
 			const now = Date.now();
 			const action: StoredOperatorAction = { id, workItemId: current.id, expectedVersion: current.version, idempotencyKey: key, command: input.command, status: "staged", attempts: 0, createdAt: now, updatedAt: now };
 			await Promise.all([txn.put(ACTION_COUNTER_KEY, id), txn.put(this.actionKey(current.id, id), action), txn.put(`${ACTION_KEY_PREFIX}${key}`, id), txn.put(`${ACTION_ACTIVE_PREFIX}${current.id}`, id)]);
-			return action as StoredOperatorAction | { implementQueuedAhead: number } | { stackTipUnpinned: true };
+			return action as StoredOperatorAction | { implementQueuedAhead: number } | { stackTipUnpinned: true } | { implementAlreadyLive: true };
 		});
+		if ("implementAlreadyLive" in action) {
+			// A WAITING-class teaching error, never a rejection: the run's own
+			// completion callback or the sweep's deadline enforcement moves the
+			// item, and a second dispatch can only corrupt the first.
+			throw new Error("An isolated implementation run is already live for this item and inside its execution deadline. Do not dispatch another. Reply WAITING; the runner's completion callback or the deadline sweep will move this item.");
+		}
 		if ("stackTipUnpinned" in action) {
 			// The tip-pinning refusal is a teaching error too: the item below is
 			// still between plan and candidate, and its candidate event re-pokes
@@ -615,8 +641,10 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		if (workItem) {
 			await this.appendActionEvent(workItem.id, workItem.phase, `The operator could not apply ${rejected.command.kind.replaceAll("-", " ")}${failure ? `: ${failure}` : "."}`);
 			// An operator that cannot converge would otherwise churn forever.
-			// A bounded rejection budget parks truthfully.
-			const rejections = (await this.listOperatorActions({ workItemId: workItem.id })).filter((action) => action.status === "rejected").length;
+			// A bounded rejection budget parks truthfully. A revived item gets a
+			// fresh budget: only rejections after the revival count against it.
+			const budgetFloor = (workItem as StoredWorkItem & { revivedAt?: number }).revivedAt ?? 0;
+			const rejections = (await this.listOperatorActions({ workItemId: workItem.id })).filter((action) => action.status === "rejected" && action.updatedAt > budgetFloor).length;
 			if (!TERMINAL_PHASES.has(workItem.phase) && rejections >= REJECTED_ACTION_PARK_THRESHOLD) {
 				const parked = { ...workItem, phase: "needs_review" as const, version: workItem.version + 1, activeImplementation: null, updatedAt: Date.now() };
 				await this.persistTransition(workItem.version, parked, `The operator rejected ${rejections} staged commands for this work item; work is parked for review with its ledger and artifacts intact.`, "system");
@@ -994,6 +1022,32 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		return parked;
 	}
 
+	/**
+	 * Maintenance: put a parked item back to work. The park was the bounded
+	 * rejection budget's honest stop; reviving resets that budget (only
+	 * rejections after the revival count) and re-pokes the operator, with the
+	 * full ledger and artifacts intact.
+	 */
+	async reviveWorkItems(sequences: number[]): Promise<number> {
+		let revived = 0;
+		for await (const page of this.storagePages<StoredWorkItem>(WORK_ITEM_PREFIX)) {
+			for (const item of page.values()) {
+				if (item.phase !== "needs_review" || !sequences.includes(item.sequence ?? -1)) continue;
+				try {
+					const current = await this.loadWorkItem(item.id);
+					if (!current || current.phase !== "needs_review") continue;
+					const now = Date.now();
+					const next = { ...current, phase: "retryable" as const, version: current.version + 1, activeImplementation: null, revivedAt: now, updatedAt: now };
+					await this.persistTransition(current.version, next, "Revived by maintenance: the rejection budget is reset and the operator will resume from the recorded ledger.", "system");
+					revived += 1;
+					const fresh = await this.loadWorkItem(item.id);
+					if (fresh) this.pokeOperator(fresh, "sweep");
+				} catch { /* raced with its own transition; the next sweep settles it */ }
+			}
+		}
+		return revived;
+	}
+
 	/** Maintenance: delete parked/rejected items and every trace of them. */
 	async purgeReviewWorkItems(): Promise<number> {
 		let purged = 0;
@@ -1193,6 +1247,61 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 	}
 
 	/**
+	 * Missed-validation backstop for the candidate phase: validation facts
+	 * ride the webhook, and one dropped join — a delivery whose head no longer
+	 * matches the recorded candidate because a racing run pushed late — would
+	 * otherwise leave the item at candidate forever with green checks nobody
+	 * ever reads (observed live: seven hours). Each sweep spends a bounded
+	 * pair of bridge observations per overdue candidate: read the live PR
+	 * head, repair the recorded candidate head if it went stale, then read
+	 * the validation run for the true head and ingest it through the same
+	 * fact path the webhook uses. The operator still makes every decision —
+	 * this only restores the evidence.
+	 */
+	private async reconcileCandidateValidation(now: number): Promise<void> {
+		if (!this.env.GITHUB) return;
+		let budget = 2;
+		for await (const page of this.storagePages<StoredWorkItem>(WORK_ITEM_PREFIX)) {
+			for (const item of page.values()) {
+				if (budget <= 0) return;
+				if (item.phase !== "candidate" || now - item.updatedAt < CANDIDATE_VALIDATION_GRACE_MS) continue;
+				const candidate = item.artifacts.candidate as { pullRequestNumber?: unknown; headSha?: unknown } | undefined;
+				if (!Number.isSafeInteger(candidate?.pullRequestNumber) || typeof candidate?.headSha !== "string") continue;
+				const facts = await this.ctx.storage.get<ExternalFacts>(`${EXTERNAL_FACT_PREFIX}${item.id}`);
+				if (facts?.validation && facts.validation.headSha === candidate.headSha) continue;
+				budget -= 1;
+				try {
+					const bridge = this.env.GITHUB as GithubBridgeTransport;
+					const observed = await bridge.observeCandidatePullRequest({ number: candidate.pullRequestNumber as number });
+					let headSha = candidate.headSha;
+					if (typeof observed.headSha === "string" && /^[0-9a-f]{40}$/u.test(observed.headSha) && observed.headSha !== headSha) {
+						headSha = observed.headSha;
+						const repaired = await this.ctx.storage.transaction(async (txn) => {
+							const current = await txn.get<StoredWorkItem>(this.workItemKey(item.id));
+							const recorded = current?.artifacts.candidate as { pullRequestNumber?: unknown; headSha?: unknown } | undefined;
+							if (!current || current.phase !== "candidate" || recorded?.pullRequestNumber !== candidate.pullRequestNumber || recorded?.headSha !== candidate.headSha) return false;
+							await txn.put(this.workItemKey(current.id), { ...current, artifacts: { ...current.artifacts, candidate: { ...(current.artifacts.candidate as Record<string, unknown>), headSha } }, version: current.version + 1, updatedAt: Date.now() });
+							return true;
+						});
+						if (repaired) await this.appendActionEvent(item.id, item.phase, "Reconciled the candidate's recorded head to the live pull request head; a late push had left the record stale.", "system");
+					}
+					const validation = await bridge.observeCandidateValidation({ pullRequest: candidate.pullRequestNumber as number, headSha });
+					if (validation && validation.conclusion !== null) {
+						await this.ingestGithubFact({
+							source: "github",
+							deliveryId: `reconcile:validation:${item.id}:${validation.runId}`,
+							fact: { kind: "validation", runId: validation.runId, url: validation.url, conclusion: validation.conclusion, createdAt: validation.createdAt, headSha },
+						});
+					}
+				} catch (error) {
+					// An unobservable PR or run is not a lost item: the next sweep retries.
+					console.error("Candidate validation reconciliation failed.", { workItemId: item.id, error });
+				}
+			}
+		}
+	}
+
+	/**
 	 * The nuke-and-rebuild lever for a corrupted room stack: park every
 	 * stacked non-terminal item and clear the record so the queue can be
 	 * re-admitted in order as fresh generations. The trusted server-side
@@ -1258,6 +1367,9 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		// Merge-train reconciliation: recover a lost merged delivery for the
 		// stack's bottom node before the per-item re-pokes below.
 		await this.reconcileStackBottom(now);
+		// Candidate reconciliation: recover a lost or unjoinable validation
+		// delivery (and repair a stale recorded head) from bounded bridge reads.
+		await this.reconcileCandidateValidation(now);
 		for await (const page of this.storagePages<StoredOperatorAction>(ACTION_PREFIX)) {
 			for (const action of page.values()) {
 				if (action.status !== "applying" || !action.leaseExpiresAt || action.leaseExpiresAt > now) continue;
@@ -1936,6 +2048,16 @@ export default {
 				...outcome,
 				operatorStep: "Manual trusted step (not executed by this worker): run `gh stack unstack` against the abandoned server-side stack, then resubmit the parked requests in order as fresh generations.",
 			});
+		}
+		if (pathname === "/api/admin/revive") {
+			// Prototype maintenance lever: put parked items back to work with a
+			// fresh rejection budget; ledger and artifacts stay intact.
+			if (request.method !== "POST") return new Response("Method not allowed", { status: 405 });
+			let body: { sequences?: unknown };
+			try { body = JSON.parse(await request.text()) as typeof body; } catch { return new Response("Invalid JSON", { status: 400 }); }
+			if (!Array.isArray(body.sequences) || !body.sequences.length || body.sequences.length > 32 || !body.sequences.every((value) => Number.isSafeInteger(value))) return new Response("sequences (1-32 integers) required", { status: 400 });
+			const revived = await env.CHAT_ROOM.getByName("main").reviveWorkItems(body.sequences as number[]);
+			return Response.json({ revived });
 		}
 		if (pathname === "/api/admin/park-stale") {
 			// Prototype maintenance lever: park every non-terminal work item at or

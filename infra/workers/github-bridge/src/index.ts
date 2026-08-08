@@ -381,11 +381,11 @@ export class GitHubCapability {
 		return { dispatchKey: input.dispatchKey, dispatched: true };
 	}
 
-	async observeCandidatePullRequest(input: CandidatePullRequestObservationInput): Promise<{ number: number; state: string; merged: boolean; mergeableState: string; mergeCommitSha: string | null }> {
+	async observeCandidatePullRequest(input: CandidatePullRequestObservationInput): Promise<{ number: number; state: string; merged: boolean; mergeableState: string; mergeCommitSha: string | null; headSha: string | null }> {
 		if (!validIssueNumber(input.number)) throw new Error("Invalid candidate pull request observation input.");
 		const response = await fetch(`https://api.github.com/repos/${this.env.ALLOWED_REPOSITORY}/pulls/${input.number}`, { headers: githubHeaders(await this.installationToken()) });
 		if (!response.ok) throw new Error(`GitHub candidate pull request observation failed (${response.status}).`);
-		const body = await response.json() as { state?: unknown; merged?: unknown; mergeable_state?: unknown; merge_commit_sha?: unknown };
+		const body = await response.json() as { state?: unknown; merged?: unknown; mergeable_state?: unknown; merge_commit_sha?: unknown; head?: { sha?: unknown } };
 		if (typeof body.state !== "string" || typeof body.merged !== "boolean") throw new Error("GitHub candidate pull request observation returned an invalid response.");
 		// GitHub computes mergeability lazily; while the background job runs the
 		// field is null. "unknown" is the honest projection: the operator keeps
@@ -398,6 +398,10 @@ export class GitHubCapability {
 			merged: body.merged,
 			mergeableState: typeof body.mergeable_state === "string" ? body.mergeable_state : "unknown",
 			mergeCommitSha: typeof body.merge_commit_sha === "string" && GIT_SHA.test(body.merge_commit_sha) ? body.merge_commit_sha : null,
+			// The live head rides along so the ledger's sweep reconciliation can
+			// detect a stale recorded candidate head (a racing run's late push)
+			// and repair it from this same bounded observation.
+			headSha: typeof body.head?.sha === "string" && GIT_SHA.test(body.head.sha) ? body.head.sha : null,
 		};
 	}
 
