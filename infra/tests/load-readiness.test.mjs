@@ -109,6 +109,11 @@ assert.match(demoWorker, /An isolated implementation run is already live for thi
 assert.match(demoWorker, /await this\.reconcileCandidateValidation\(now\);/u, "the sweep reconciles lost validation evidence for stuck candidates");
 assert.match(demoWorker, /deliveryId: `reconcile:validation:\$\{item\.id\}:\$\{validation\.runId\}`/u, "reconciled validation evidence rides the same deduplicated fact path the webhook uses");
 assert.match(demoWorker, /Reconciled the candidate's recorded head to the live pull request head/u, "a stale recorded candidate head is repaired from the bounded PR observation");
+assert.match(demoWorker, /for \(let attempt = 0; attempt < 4; attempt \+= 1\) \{\n\t\t\tconst current = await this\.requireWorkItem\(input\.workItemId\);\n\t\t\tconst canonical = canonicalStackPlan\(current, input\.plan, normalizeRoomStack\(await this\.ctx\.storage\.get\(ROOM_STACK_KEY\)\)\);/u, "plan coordinates are re-derived from the live tip on every commit attempt: tip contention is absorbed by the ledger, never surfaced to the model");
+assert.match(demoWorker, /error\.startsWith\("CONTENTION:"\)\)/u, "contention rejections are recognizable by their marker");
+assert.match(demoWorker, /!contention\(action\)\)\.length/u, "contention rejections never count against the bounded rejection budget");
+assert.match(demoWorker, /await this\.reconcilePromotion\(now\);/u, "the sweep reconciles lost promotion evidence exactly like lost validation evidence");
+assert.match(demoWorker, /deliveryId: `reconcile:promotion:\$\{item\.id\}:\$\{run\.runId\}`/u, "reconciled promotion evidence rides the same deduplicated fact path the webhook uses");
 assert.match(demoWorker, /if \(!grant\.granted\) return \{ implementQueuedAhead: grant\.ahead \};/u, "a refused grant commits the queue registration before the stage is refused");
 assert.match(demoWorker, /All \$\{IMPLEMENT_SLOTS\} implementation slots are busy: \$\{action\.implementQueuedAhead\} item\(s\) are queued ahead/u, "the refusal is a teaching error that names the queue");
 assert.match(demoWorker, /Reply WAITING; the ledger re-pokes this item when a slot frees\./u, "the teaching error tells the model the honest next step");

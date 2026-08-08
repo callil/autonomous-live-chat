@@ -186,10 +186,11 @@ type ExternalFactInput =
 
 type RuntimeEnv = Omit<Env, "OPERATOR" | "OPERATOR_PAUSED" | "GITHUB"> & { OPERATOR: unknown; GITHUB?: unknown; OPERATOR_PAUSED?: string };
 
-/** The bounded bridge observations the room's sweep reconciliation uses: a candidate PR read (lost merges, stale heads) and a validation-run read (lost validation deliveries). */
+/** The bounded bridge observations the room's sweep reconciliation uses: a candidate PR read (lost merges, stale heads), a validation-run read (lost validation deliveries), and a promotion-run read (lost promotion deliveries). */
 type GithubBridgeTransport = {
 	observeCandidatePullRequest(input: { number: number }): Promise<{ number: number; state: string; merged: boolean; mergeableState: string; mergeCommitSha?: string | null; headSha?: string | null }>;
 	observeCandidateValidation(input: { pullRequest: number; headSha: string }): Promise<{ runId: number; status: string; conclusion: string | null; url: string; createdAt: string } | null>;
+	findPromotionRun(input: { dispatchKey: string; createdAfter?: string }): Promise<{ runId: number; status: string; conclusion: string | null; url: string; createdAt: string } | null>;
 };
 
 const MESSAGE_PREFIX = "message:";
@@ -378,28 +379,51 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 	}
 
 	async recordPlan(input: { workItemId: string; plan: LedgerPlan; message: string }): Promise<StoredWorkItem> {
-		const current = await this.requireWorkItem(input.workItemId);
-		const updated = applyPlan(current, { plan: input.plan, now: Date.now() }) as StoredWorkItem;
-		let staleSurvivors: string[] = [];
-		const persisted = await this.persistTransition(current.version, updated, normalizeOperatorMessage(input.message), "cloudflare-os", async (txn) => {
-			// The room stack advances inside the same transaction that records
-			// the plan: a replan of a node already on the stack truncates it
-			// first (marking every node above stale), then the accepted plan's
-			// node is appended as the new reserved tip. The append re-verifies
-			// the plan's parent against the live tip, so a plan staged against a
-			// stack that has since moved is refused, never recorded.
-			const plan = updated.plan!;
-			const truncated = truncateStack(normalizeRoomStack(await txn.get(ROOM_STACK_KEY)), updated.id);
-			staleSurvivors = truncated.staleWorkItemIds;
-			const appended = appendReservedNode(truncated.stack, { workItemId: updated.id, nodeId: plan.nodeId, branch: plan.branch, parentBranch: plan.parentBranch, parentBaseSha: plan.parentBaseSha, stackId: plan.stackId });
-			if (!appended.appended) throw new Error(`The room stack moved before this plan could commit (${appended.reason}). Stage a revised plan; the ledger re-derives the parent from the current tip.`);
-			await txn.put(ROOM_STACK_KEY, appended.stack);
-		});
-		// The truncation's survivors replan lowest-first: the tip-pinning rule
-		// refuses the higher ones until the lower one's candidate pins the tip,
-		// so one sweep-class nudge to the lowest survivor starts the cascade.
-		if (staleSurvivors.length) await this.nudgeRestackSurvivor(staleSurvivors[0]);
-		return persisted;
+		// Derive-at-commit: the mechanical stack coordinates (parent branch,
+		// immutable base, node identity) are a function of the live tip, and
+		// the tip moves whenever a sibling's plan commits first. That
+		// contention is the ledger's to absorb — re-derive from the current
+		// tip and retry, bounded — never the model's to see as a failed
+		// command. The model's intent (summary, CI profile, base revision)
+		// passes through untouched on every attempt.
+		let lastError: unknown;
+		for (let attempt = 0; attempt < 4; attempt += 1) {
+			const current = await this.requireWorkItem(input.workItemId);
+			const canonical = canonicalStackPlan(current, input.plan, normalizeRoomStack(await this.ctx.storage.get(ROOM_STACK_KEY)));
+			if (canonical.parentBranch !== "main" && canonical.parentBaseSha === null) {
+				// A sibling holds the tip reserved: contention, not a model error.
+				throw new Error("CONTENTION: The room stack tip is reserved by a sibling's in-flight candidate. Reply WAITING; the ledger re-pokes when the tip pins.");
+			}
+			const updated = applyPlan(current, { plan: canonical, now: Date.now() }) as StoredWorkItem;
+			let staleSurvivors: string[] = [];
+			try {
+				const persisted = await this.persistTransition(current.version, updated, normalizeOperatorMessage(input.message), "cloudflare-os", async (txn) => {
+					// The room stack advances inside the same transaction that
+					// records the plan: a replan of a node already on the stack
+					// truncates it first (marking every node above stale), then
+					// the accepted plan's node is appended as the new reserved
+					// tip. The append re-verifies the plan's parent against the
+					// live tip; a mismatch aborts this attempt and the loop
+					// above re-derives from the tip that won.
+					const plan = updated.plan!;
+					const truncated = truncateStack(normalizeRoomStack(await txn.get(ROOM_STACK_KEY)), updated.id);
+					staleSurvivors = truncated.staleWorkItemIds;
+					const appended = appendReservedNode(truncated.stack, { workItemId: updated.id, nodeId: plan.nodeId, branch: plan.branch, parentBranch: plan.parentBranch, parentBaseSha: plan.parentBaseSha, stackId: plan.stackId });
+					if (!appended.appended) throw new Error(`The room stack moved before this plan could commit (${appended.reason}).`);
+					await txn.put(ROOM_STACK_KEY, appended.stack);
+				});
+				// The truncation's survivors replan lowest-first: the tip-pinning rule
+				// refuses the higher ones until the lower one's candidate pins the tip,
+				// so one sweep-class nudge to the lowest survivor starts the cascade.
+				if (staleSurvivors.length) await this.nudgeRestackSurvivor(staleSurvivors[0]);
+				return persisted;
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				if (!/room stack moved before this plan could commit|changed before this operator transition could commit/u.test(message)) throw error;
+				lastError = error;
+			}
+		}
+		throw new Error(`CONTENTION: The room stack kept moving across every re-derivation attempt (${lastError instanceof Error ? lastError.message : String(lastError)}). Reply WAITING; the ledger re-pokes as the train settles.`);
 	}
 
 	async startImplementation(input: { workItemId: string; runId: string }): Promise<{ disposition: string; item: StoredWorkItem }> {
@@ -643,8 +667,12 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 			// An operator that cannot converge would otherwise churn forever.
 			// A bounded rejection budget parks truthfully. A revived item gets a
 			// fresh budget: only rejections after the revival count against it.
+			// Contention rejections never count: shared state moving underneath
+			// a correct command is the system's weather, not a model mistake,
+			// and billing it to the model parked healthy items under load.
 			const budgetFloor = (workItem as StoredWorkItem & { revivedAt?: number }).revivedAt ?? 0;
-			const rejections = (await this.listOperatorActions({ workItemId: workItem.id })).filter((action) => action.status === "rejected" && action.updatedAt > budgetFloor).length;
+			const contention = (action: StoredOperatorAction): boolean => typeof (action.result as { error?: unknown } | undefined)?.error === "string" && ((action.result as { error: string }).error.startsWith("CONTENTION:"));
+			const rejections = (await this.listOperatorActions({ workItemId: workItem.id })).filter((action) => action.status === "rejected" && action.updatedAt > budgetFloor && !contention(action)).length;
 			if (!TERMINAL_PHASES.has(workItem.phase) && rejections >= REJECTED_ACTION_PARK_THRESHOLD) {
 				const parked = { ...workItem, phase: "needs_review" as const, version: workItem.version + 1, activeImplementation: null, updatedAt: Date.now() };
 				await this.persistTransition(workItem.version, parked, `The operator rejected ${rejections} staged commands for this work item; work is parked for review with its ledger and artifacts intact.`, "system");
@@ -1302,6 +1330,42 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 	}
 
 	/**
+	 * Missed-promotion backstop: the same reconciliation edge the candidate
+	 * phase has, for the promotion window. An item at validating or promoting
+	 * whose applied promote action has a dispatch key but whose promotion
+	 * fact never arrived gets one bounded bridge read of the promotion run,
+	 * ingested through the deduplicated fact path the webhook uses.
+	 */
+	private async reconcilePromotion(now: number): Promise<void> {
+		if (!this.env.GITHUB) return;
+		let budget = 2;
+		for await (const page of this.storagePages<StoredWorkItem>(WORK_ITEM_PREFIX)) {
+			for (const item of page.values()) {
+				if (budget <= 0) return;
+				if ((item.phase !== "validating" && item.phase !== "promoting") || now - item.updatedAt < CANDIDATE_VALIDATION_GRACE_MS) continue;
+				const facts = await this.ctx.storage.get<ExternalFacts>(`${EXTERNAL_FACT_PREFIX}${item.id}`);
+				if (facts?.promotion?.conclusion) continue;
+				const promote = (await this.listOperatorActions({ workItemId: item.id })).findLast((action) => action.command.kind === "promote" && action.status === "applied");
+				if (!promote || promote.command.kind !== "promote") continue;
+				budget -= 1;
+				try {
+					const run = await (this.env.GITHUB as GithubBridgeTransport).findPromotionRun({ dispatchKey: promote.command.dispatchKey });
+					if (run && run.conclusion !== null) {
+						await this.ingestGithubFact({
+							source: "github",
+							deliveryId: `reconcile:promotion:${item.id}:${run.runId}`,
+							fact: { kind: "promotion", runId: run.runId, url: run.url, conclusion: run.conclusion, createdAt: run.createdAt, dispatchKey: promote.command.dispatchKey },
+						});
+					}
+				} catch (error) {
+					// An unobservable run is not a lost item: the next sweep retries.
+					console.error("Promotion reconciliation failed.", { workItemId: item.id, error });
+				}
+			}
+		}
+	}
+
+	/**
 	 * The nuke-and-rebuild lever for a corrupted room stack: park every
 	 * stacked non-terminal item and clear the record so the queue can be
 	 * re-admitted in order as fresh generations. The trusted server-side
@@ -1370,6 +1434,8 @@ export class ChatRoom extends DurableObject<RuntimeEnv> {
 		// Candidate reconciliation: recover a lost or unjoinable validation
 		// delivery (and repair a stale recorded head) from bounded bridge reads.
 		await this.reconcileCandidateValidation(now);
+		// Promotion reconciliation: the same edge for the promotion window.
+		await this.reconcilePromotion(now);
 		for await (const page of this.storagePages<StoredOperatorAction>(ACTION_PREFIX)) {
 			for (const action of page.values()) {
 				if (action.status !== "applying" || !action.leaseExpiresAt || action.leaseExpiresAt > now) continue;
