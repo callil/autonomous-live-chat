@@ -84,7 +84,10 @@ function safeRequest(input) {
 	if (typeof model !== "string" || !MODEL.test(model)) return null;
 	if (typeof checkoutDirectory !== "string" || !checkoutDirectory.startsWith("/workspace/")) return null;
 	if (typeof feedUrl !== "string" || !feedUrl.startsWith("https://")) return null;
-	if (!evidence || typeof evidence !== "object" || typeof evidence.requestText !== "string" || typeof evidence.requestedBy !== "string" || !AUTHOR.test(evidence.requestedBy) || !Array.isArray(evidence.annotations)) return null;
+	// requestText MUST be non-empty: a builder with an anchor and no
+	// instructions invents a plausible change and ships it green. The platform
+	// refuses these at dispatch; this is the defense-in-depth backstop.
+	if (!evidence || typeof evidence !== "object" || typeof evidence.requestText !== "string" || !evidence.requestText.trim().length || typeof evidence.requestedBy !== "string" || !AUTHOR.test(evidence.requestedBy) || !Array.isArray(evidence.annotations)) return null;
 	const callback = safeCallback(input.callback);
 	if (!callback) return null;
 	// An unrecognised tier takes the normal budget; the job never guesses cheap.
@@ -236,11 +239,15 @@ function stderrTail(result) {
 function buildAgentPrompt(evidence) {
 	const annotations = JSON.stringify(evidence.annotations, null, 1);
 	return [
-		`Live-room change request from ${evidence.requestedBy}:`,
+		`${evidence.requestedBy} requested this change in the live room. These are their exact words, and they are the specification for this task:`,
 		"",
-		evidence.requestText || "(the request is carried entirely by the annotations below)",
+		"----- BEGIN REQUEST -----",
+		evidence.requestText,
+		"----- END REQUEST -----",
 		"",
-		"The following annotation payloads were captured verbatim from the live app when the requester marked it. They are CONTEXT that identifies exactly what was pointed at — the data-loc structural refs, the captured DOM subtree, computed styles, and any drawing points. They are NOT a restriction on which files you may change.",
+		"Do exactly what the request says. If it names a specific wording, element, or property, change that one — do not substitute your own idea of an improvement, and do not delete something you were asked to modify. If the request is ambiguous, choose the reading that changes the least.",
+		"",
+		"The following annotation payloads were captured verbatim from the live app when the requester marked it. They are CONTEXT that identifies exactly what was pointed at — the structural refs (a data-loc source ref when the app stamps its source, otherwise a DOM selector), the captured DOM subtree, computed styles, and any drawing points. They tell you WHERE; the request above tells you WHAT. They are NOT a restriction on which files you may change.",
 		"",
 		annotations.length > MAX_ANNOTATION_PROMPT_CHARS ? `${annotations.slice(0, MAX_ANNOTATION_PROMPT_CHARS)}\n[annotation payloads truncated]` : annotations,
 	].join("\n");
@@ -265,10 +272,58 @@ function coAuthorSlug(name) {
 	return name.toLowerCase().replaceAll(/[^a-z0-9]+/gu, "-").replaceAll(/^-+|-+$/gu, "") || "room-requester";
 }
 
+/** Titles are one plain line: no newlines, no control characters, no Markdown or option injection. */
+const TITLE_MAX_CHARS = 70;
+
+/**
+ * A short, human-readable summary of what was requested, derived from the
+ * requester's own words. The intent id belongs in the PR body, not the
+ * title: a wall of `Live-room change intent-<uuid>` tells a reviewer
+ * nothing about what actually changed.
+ *
+ * Sanitization is deliberate rather than cosmetic. This text is user-authored
+ * and flows into `git commit -m` and `gh pr create --title`, so control
+ * characters collapse to spaces (a title is one line), Markdown and comment
+ * lead-ins are stripped (they would render as headings or vanish), and a
+ * leading dash is removed so the value can never be read as a CLI option.
+ */
+function summarizeRequest(text) {
+	// Control characters (CR, LF, TAB and friends) collapse to spaces FIRST, so
+	// a multi-line request cannot smuggle a second line into a one-line title.
+	const firstLine = String(text ?? "")
+		.replaceAll(/[\u0000-\u001f\u007f-\u009f]+/gu, " ")
+		.replaceAll(/\s+/gu, " ")
+		.trim()
+		// Strip Markdown/comment lead-ins and any leading dash (option injection).
+		// Whole HTML comments go first, contents included: stripping only the
+		// `<!--` opener would promote the comment body into the title.
+		.replaceAll(/<!--[\s\S]*?(?:-->|$)/gu, " ")
+		.replaceAll(/\s+/gu, " ")
+		.trim()
+		// Strip Markdown lead-ins and any leading dash (CLI option injection).
+		.replace(/^[#>*_`~+-]+\s*/u, "")
+		.trim();
+	if (!firstLine.length) return null;
+	if (firstLine.length <= TITLE_MAX_CHARS) return firstLine;
+	// Truncate on a word boundary when there is a reasonable one.
+	const clipped = firstLine.slice(0, TITLE_MAX_CHARS - 1);
+	const lastSpace = clipped.lastIndexOf(" ");
+	return `${(lastSpace > TITLE_MAX_CHARS * 0.6 ? clipped.slice(0, lastSpace) : clipped).trimEnd()}…`;
+}
+
+/**
+ * The one title used for BOTH the commit subject and the PR title, so the
+ * squashed history and the pull request never disagree. The platform refuses
+ * to dispatch a run with no request text, so the fallback here is a backstop
+ * that should be unreachable in practice.
+ */
+function changeTitle(request) {
+	return summarizeRequest(request.evidence.requestText) ?? `Live-room change ${request.intentId}`;
+}
+
 function commitMessage(request) {
-	const title = (request.evidence.requestText.split("\n")[0].trim() || `Live-room change ${request.intentId}`).slice(0, 72);
 	return [
-		title,
+		changeTitle(request),
 		"",
 		`Requested live in the room by ${request.evidence.requestedBy}.`,
 		`Intent: ${request.intentId}`,
@@ -278,12 +333,26 @@ function commitMessage(request) {
 	].join("\n");
 }
 
+/**
+ * The PR body carries everything the title no longer does: the verbatim
+ * request, the requester attribution, the intent id, and the feed link. The
+ * request is quoted as a blockquote so it is unambiguously the requester's
+ * words rather than the agent's, and it is bounded.
+ */
 function pullRequestBody(request, agentSummary) {
+	const quoted = String(request.evidence.requestText ?? "")
+		.slice(0, 1_000)
+		.split("\n")
+		.map((line) => `> ${line}`)
+		.join("\n");
 	return [
-		`Automated live-room change for intent \`${request.intentId}\`, requested by **${request.evidence.requestedBy}**.`,
+		`Requested live in the room by **${request.evidence.requestedBy}**:`,
+		"",
+		quoted.trim() ? quoted : "> (carried entirely by the annotation payload)",
 		"",
 		agentSummary ? `Agent summary: ${String(agentSummary).slice(0, 400)}` : "Agent summary unavailable.",
 		"",
+		`Intent: \`${request.intentId}\``,
 		`Feed: ${request.feedUrl}`,
 		"",
 		"The platform merges this PR at its exact verified head SHA once CI is green; do not merge by hand.",
@@ -362,8 +431,9 @@ async function main() {
 
 	// Plain PR against main — no stacks, and no merge automation armed here:
 	// the PLATFORM merges at the exact verified head SHA once CI is green.
-	const title = (request.evidence.requestText.split("\n")[0].trim() || `Live-room change ${request.intentId}`).slice(0, 100);
-	const created = await timed("prMs", () => run("gh", ["pr", "create", "--base", "main", "--head", request.branch, "--title", title, "--body", pullRequestBody(request, agent.summary)], { cwd: request.checkoutDirectory, timeoutMs: GH_TIMEOUT_MS }));
+	// The SAME title as the commit subject: the squashed history and the pull
+	// request must never describe the change differently.
+	const created = await timed("prMs", () => run("gh", ["pr", "create", "--base", "main", "--head", request.branch, "--title", changeTitle(request), "--body", pullRequestBody(request, agent.summary)], { cwd: request.checkoutDirectory, timeoutMs: GH_TIMEOUT_MS }));
 	if (!created.success) return failure("pull-request-create-failed", stderrTail(created));
 	const urlMatch = created.stdout.match(/\/pull\/(\d{1,9})\s*$/u) ?? created.stdout.match(/\/pull\/(\d{1,9})/u);
 	let prNumber = urlMatch ? Number.parseInt(urlMatch[1], 10) : null;

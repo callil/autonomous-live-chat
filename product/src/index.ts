@@ -48,10 +48,12 @@ export default {
 			return Response.json({ sha: validDeploySha(env.DEPLOY_SHA) ? env.DEPLOY_SHA : null }, { headers: NO_STORE });
 		}
 
-		if (url.pathname === "/api/rooms/main" || url.pathname.startsWith("/api/")) {
+		if (url.pathname === "/overlay.js" || url.pathname === "/overlay/tenant" || url.pathname === "/api/rooms/main" || url.pathname.startsWith("/api/")) {
 			// The narrow seam to the platform: same path, same method, same
 			// headers (cookies included), same body — WebSocket upgrades ride
 			// through untouched. Nothing is rewritten and nothing is stored.
+			// /overlay.js rides this same seam so the platform-owned overlay is
+			// same-origin here: this app can serve it but can never modify it.
 			// The PLATFORM binding reaches the platform Worker's public fetch
 			// handler (same-account workers.dev fetches are not routable).
 			const upstream = new URL(url.pathname + url.search, env.PLATFORM_ORIGIN);

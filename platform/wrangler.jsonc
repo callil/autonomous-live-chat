@@ -27,6 +27,12 @@
 	"observability": {
 		"enabled": true
 	},
+	"rules": [
+		// The overlay client ships as TEXT and is served verbatim at
+		// /overlay.js. It is platform-owned and frozen: the installed app
+		// embeds it by URL and can never modify it.
+		{ "type": "Text", "globs": ["**/*.client.js"] }
+	],
 	"vars": {
 		// The room's daily spend ceiling, enforced at dispatch. The owner
 		// bearer credential is a worker secret, never a var. GitHub App
