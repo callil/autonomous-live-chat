@@ -13,7 +13,6 @@ body { margin: 0; font: 15px/1.5 ui-sans-serif, system-ui, sans-serif; height: 1
 
 .topbar { display: flex; justify-content: space-between; align-items: baseline; padding: .65rem 1rem; border-bottom: 1px solid var(--line); }
 .room-title { font-weight: 650; }
-.room-meta { margin-left: .5rem; font-size: .8rem; opacity: .65; }
 .connection { display: inline-flex; align-items: center; gap: .4rem; font-size: .8rem; opacity: .8; }
 .dot { width: .5rem; height: .5rem; border-radius: 50%; background: #c9822f; display: inline-block; }
 .dot.live { background: var(--live); }
