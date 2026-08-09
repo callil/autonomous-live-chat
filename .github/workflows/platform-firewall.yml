@@ -1,0 +1,55 @@
+# The platform/product firewall (rebuild task #13, v1 non-negotiables in
+# task #20): agent branches (room/*) may only change product code. Any agent
+# PR touching the frozen platform, CI configuration, dependency manifests,
+# lockfiles, or wrangler configs fails this required check. New dependencies
+# are human-gated by construction.
+name: Platform firewall
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: platform-firewall-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  firewall:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the exact revision without persisted credentials
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Fail agent diffs that touch protected paths
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          case "$HEAD_REF" in
+            room/*) ;;
+            *)
+              echo "Not an agent branch ($HEAD_REF); the firewall does not apply."
+              exit 0
+              ;;
+          esac
+          mapfile -t changed < <(git diff --name-only "$BASE_SHA" "$HEAD_SHA")
+          blocked=()
+          for file in "${changed[@]}"; do
+            case "$file" in
+              platform/*|.github/*|package.json|*/package.json|package-lock.json|*/package-lock.json|npm-shrinkwrap.json|*/npm-shrinkwrap.json|yarn.lock|*/yarn.lock|pnpm-lock.yaml|*/pnpm-lock.yaml|bun.lockb|*/bun.lockb|wrangler.jsonc|*/wrangler.jsonc|wrangler.json|*/wrangler.json|wrangler.toml|*/wrangler.toml)
+                blocked+=("$file")
+                ;;
+            esac
+          done
+          if [ "${#blocked[@]}" -gt 0 ]; then
+            echo "::error::Agent branches cannot modify frozen platform surfaces:"
+            printf ' - %s\n' "${blocked[@]}"
+            exit 1
+          fi
+          echo "Agent diff stays inside product code (${#changed[@]} files checked)."
