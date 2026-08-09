@@ -42,5 +42,47 @@ jobs:
           cache: npm
       - name: Install exact dependencies
         run: npm ci
+      # Scope detection, not a scope CHOICE: the full suite is the default and
+      # the narrow lane is entered only when the diff is provably confined to
+      # product/. Anything else — platform, infra, CI, manifests, lockfiles, or
+      # a diff this step cannot compute — falls through to the full suite. The
+      # merge authority is unchanged; this only stops a product CSS tweak from
+      # typechecking seven Workers and running the whole monorepo to prove it.
+      - name: Decide how much of the suite this diff requires
+        id: scope
+        if: ${{ github.event_name == 'pull_request' }}
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          if ! changed="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")"; then
+            echo "product_only=false" >> "$GITHUB_OUTPUT"
+            echo "Could not compute the diff; running the full suite."
+            exit 0
+          fi
+          if [ -z "$changed" ]; then
+            echo "product_only=false" >> "$GITHUB_OUTPUT"
+            echo "Empty diff; running the full suite."
+            exit 0
+          fi
+          product_only=true
+          while IFS= read -r file; do
+            case "$file" in
+              product/*) ;;
+              *) product_only=false ;;
+            esac
+          done <<< "$changed"
+          echo "product_only=$product_only" >> "$GITHUB_OUTPUT"
+          echo "product-only diff: $product_only"
+          printf ' - %s\n' $changed
+      - name: Verify the product surface (product-only diff)
+        if: ${{ steps.scope.outputs.product_only == 'true' }}
+        run: |
+          npm --workspace @app-harness/product run cf-typegen
+          npm --workspace @app-harness/product run typecheck
+          npm --workspace @app-harness/product test
+          git diff --check
       - name: Verify Worker, orchestration, stack, and agent contracts
+        if: ${{ steps.scope.outputs.product_only != 'true' }}
         run: npm run check
