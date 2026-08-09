@@ -8,6 +8,10 @@
   --live: #2fb46b;
 }
 * { box-sizing: border-box; }
+/* The hidden attribute must always win: author display rules (grid/flex) on
+   toggled chrome would otherwise override the UA's [hidden] { display: none }
+   and leave the join scrim covering the room forever. */
+[hidden] { display: none !important; }
 body { margin: 0; font: 15px/1.5 ui-sans-serif, system-ui, sans-serif; height: 100dvh; }
 .app { display: grid; grid-template-rows: auto 1fr auto; height: 100dvh; }
 

@@ -13,6 +13,7 @@ const worker = await readFile(new URL("../src/index.ts", import.meta.url), "utf8
 const wrangler = await readFile(new URL("../wrangler.jsonc", import.meta.url), "utf8");
 const html = await readFile(new URL("../src/ui/room.html", import.meta.url), "utf8");
 const client = await readFile(new URL("../src/ui/room.client.js", import.meta.url), "utf8");
+const css = await readFile(new URL("../src/ui/room.css", import.meta.url), "utf8");
 
 test("data-loc stamping is line-accurate, deterministic, and idempotent", () => {
 	const source = ["<html>", "<body>", '  <div class="x">', '    <p data-loc="keep:1">hi</p>', "  </div>", "</body>", "</html>"].join("\n");
@@ -54,6 +55,19 @@ test("the sole request trigger is an explicit Target/Comment/Draw envelope with 
 	assert.match(client, /clientSubmissionId/u);
 	assert.match(client, /request:cancel/u, "the cancel window is one click");
 	assert.doesNotMatch(client, /classif/iu, "no per-utterance classification — chat is chat");
+});
+
+test("the join flow completes: hidden always wins the cascade and failures are surfaced", () => {
+	// Regression: .join-scrim's display:grid (author origin) overrode the UA's
+	// [hidden] { display: none }, so join.hidden = true left the full-viewport
+	// scrim covering the room after a successful session POST.
+	assert.match(css, /\[hidden\]\s*\{\s*display:\s*none\s*!important;?\s*\}/u, "an author-origin [hidden] rule must exist so hidden-toggled chrome actually hides");
+	assert.match(html, /id="join" hidden/u, "the join scrim boots hidden until the session check says otherwise");
+	assert.match(html, /id="request-composer" hidden/u, "the request composer boots hidden");
+	// No silent join failures: every failure path writes to the visible error line.
+	assert.match(client, /joinError\.textContent = \(await response\.text\(\)\) \|\| `Join failed \(\$\{response\.status\}\)\.`/u, "a rejected session POST surfaces its reason");
+	assert.match(client, /joinError\.textContent = "Could not reach the room\. Try again\."/u, "a network failure surfaces too");
+	assert.match(client, /joinButton\.disabled = true/u, "the submit is single-flight while the POST is in flight");
 });
 
 test("the client speaks only the platform's room protocol, same-origin", () => {
