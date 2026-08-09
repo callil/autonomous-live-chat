@@ -57,14 +57,20 @@ test("the sole request trigger is an explicit Target/Comment/Draw envelope with 
 	assert.doesNotMatch(client, /classif/iu, "no per-utterance classification — chat is chat");
 });
 
+test("the annotation composer opens by its drop point, stays on-screen, and supports shortcut submit", () => {
+	assert.match(client, /positionRequestComposer\(anchor\)/u, "the composer is positioned from the selected point");
+	assert.match(client, /event\.clientX, y: event\.clientY/u, "target and comment clicks provide their exact point");
+	assert.match(client, /innerWidth - rect\.width - COMPOSER_GUTTER/u, "horizontal placement is clamped to the viewport");
+	assert.match(client, /innerHeight - rect\.height - COMPOSER_GUTTER/u, "vertical placement is clamped to the viewport");
+	assert.match(client, /event\.metaKey \|\| event\.ctrlKey/u, "Command+Enter and Control+Enter submit feedback");
+	assert.match(client, /requestComposer\.requestSubmit\(\)/u, "the shortcut uses native form submission");
+	assert.match(html, />Submit<\/button>/u, "the compact action has a direct label");
+});
+
 test("the join flow completes: hidden always wins the cascade and failures are surfaced", () => {
-	// Regression: .join-scrim's display:grid (author origin) overrode the UA's
-	// [hidden] { display: none }, so join.hidden = true left the full-viewport
-	// scrim covering the room after a successful session POST.
 	assert.match(css, /\[hidden\]\s*\{\s*display:\s*none\s*!important;?\s*\}/u, "an author-origin [hidden] rule must exist so hidden-toggled chrome actually hides");
 	assert.match(html, /id="join" hidden/u, "the join scrim boots hidden until the session check says otherwise");
 	assert.match(html, /id="request-composer" hidden/u, "the request composer boots hidden");
-	// No silent join failures: every failure path writes to the visible error line.
 	assert.match(client, /joinError\.textContent = \(await response\.text\(\)\) \|\| `Join failed \(\$\{response\.status\}\)\.`/u, "a rejected session POST surfaces its reason");
 	assert.match(client, /joinError\.textContent = "Could not reach the room\. Try again\."/u, "a network failure surfaces too");
 	assert.match(client, /joinButton\.disabled = true/u, "the submit is single-flight while the POST is in flight");

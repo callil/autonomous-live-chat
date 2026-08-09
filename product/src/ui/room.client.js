@@ -14,6 +14,7 @@
 	const MAX_SNAPSHOT_CHARS = 4000;
 	const STYLE_KEYS = ["color", "background-color", "font-size", "font-weight", "padding", "margin", "border", "border-radius", "display"];
 	const MIN_DRAW_DISTANCE = 3;
+	const COMPOSER_GUTTER = 12;
 
 	const $ = (selector) => document.querySelector(selector);
 	const messages = $("#messages"), feedItems = $("#feed-items"), queueChips = $("#queue-chips"), pendingAcks = $("#pending-acks");
@@ -32,7 +33,6 @@
 	const renderedChat = new Set(), renderedFeed = new Set(), pending = new Map();
 
 	function setConnection(text, live) { connection.textContent = text; dot.classList.toggle("live", live); }
-
 	function stampDynamic(node, label) { node.dataset.loc = `${SOURCE}:${label}`; return node; }
 
 	// --- chat ---------------------------------------------------------------
@@ -88,7 +88,6 @@
 			row.append(text);
 			const links = item.refs ? provenanceLinks(item.refs) : null;
 			if (links) row.append(links);
-			// Newest first, ordered by seq.
 			const before = [...feedItems.children].find((child) => Number(child.dataset.seq) < item.seq);
 			feedItems.insertBefore(row, before ?? null);
 		}
@@ -151,9 +150,7 @@
 
 	function setMode(next) {
 		mode = mode === next ? null : next;
-		for (const [button, name] of [[toolTarget, "target"], [toolComment, "comment"], [toolDraw, "draw"]]) {
-			button.setAttribute("aria-pressed", String(mode === name));
-		}
+		for (const [button, name] of [[toolTarget, "target"], [toolComment, "comment"], [toolDraw, "draw"]]) button.setAttribute("aria-pressed", String(mode === name));
 		document.body.classList.toggle("mode-target", mode === "target");
 		document.body.classList.toggle("mode-comment", mode === "comment");
 		document.body.classList.toggle("mode-draw", mode === "draw");
@@ -167,16 +164,30 @@
 		hovered = selected = selectedEnvelope = pendingDraw = null;
 	}
 
-	function openRequestComposer(kind, contextLabel) {
+	function positionRequestComposer(anchor) {
+		requestComposer.style.left = "0px";
+		requestComposer.style.top = "0px";
+		const rect = requestComposer.getBoundingClientRect();
+		let left = anchor.x + COMPOSER_GUTTER;
+		let top = anchor.y + COMPOSER_GUTTER;
+		if (left + rect.width > innerWidth - COMPOSER_GUTTER) left = anchor.x - rect.width - COMPOSER_GUTTER;
+		if (top + rect.height > innerHeight - COMPOSER_GUTTER) top = anchor.y - rect.height - COMPOSER_GUTTER;
+		left = Math.max(COMPOSER_GUTTER, Math.min(left, innerWidth - rect.width - COMPOSER_GUTTER));
+		top = Math.max(COMPOSER_GUTTER, Math.min(top, innerHeight - rect.height - COMPOSER_GUTTER));
+		requestComposer.style.left = `${left}px`;
+		requestComposer.style.top = `${top}px`;
+	}
+
+	function openRequestComposer(kind, contextLabel, anchor) {
 		requestComposer.dataset.kind = kind;
 		requestContext.textContent = contextLabel;
 		requestInput.value = "";
-		requestInput.placeholder = kind === "comment" ? "Leave feedback for the agent" : "Describe the change";
-		requestSubmit.textContent = kind === "comment" ? "Record" : "Start";
+		requestInput.placeholder = kind === "comment" ? "Leave feedback…" : "Request a change…";
 		requestError.textContent = "";
 		requestError.classList.remove("ok");
 		requestSubmit.disabled = false;
 		requestComposer.hidden = false;
+		positionRequestComposer(anchor);
 		requestInput.focus();
 	}
 
@@ -206,7 +217,7 @@
 		selectedEnvelope = captureEnvelope(candidate);
 		const kind = mode === "comment" ? "comment" : "target";
 		setModeOff();
-		openRequestComposer(kind, `${kind === "comment" ? "Comment on" : "Target"}: ${selectedEnvelope.dataLoc}`);
+		openRequestComposer(kind, `${kind === "comment" ? "Comment on" : "Target"}: ${selectedEnvelope.dataLoc}`, { x: event.clientX, y: event.clientY });
 	}, true);
 
 	function setModeOff() {
@@ -240,15 +251,13 @@
 		drawing = false;
 		drawLayer.releasePointerCapture?.(event.pointerId);
 		if (draftPoints.length < 2) { draftPath?.remove(); draftPath = null; return; }
-		// Anchor the drawing to the element under its first point (the drawing
-		// layer itself is transparent to hit-testing when hidden).
 		drawLayer.style.pointerEvents = "none";
 		const under = locFor(document.elementFromPoint(draftPoints[0].x, draftPoints[0].y)) ?? document.body;
 		drawLayer.style.pointerEvents = "";
 		pendingDraw = { points: draftPoints.slice(0, 600), envelope: captureEnvelope(under), path: draftPath };
 		draftPath = null;
 		setModeOff();
-		openRequestComposer("draw", `Drawing over: ${pendingDraw.envelope.dataLoc}`);
+		openRequestComposer("draw", `Drawing over: ${pendingDraw.envelope.dataLoc}`, draftPoints[draftPoints.length - 1]);
 	}
 	drawLayer.addEventListener("pointerup", finishDraw);
 	drawLayer.addEventListener("pointercancel", finishDraw);
@@ -265,14 +274,17 @@
 		if (kind === "draw") {
 			if (!pendingDraw) { requestError.textContent = "Draw something first."; return; }
 			annotation = { kind: "draw", ...pendingDraw.envelope, drawingPoints: pendingDraw.points };
-		} else if (kind === "comment") {
-			annotation = { kind: "comment", ...selectedEnvelope, text };
-		} else {
-			annotation = { kind: "target", ...selectedEnvelope };
-		}
+		} else if (kind === "comment") annotation = { kind: "comment", ...selectedEnvelope, text };
+		else annotation = { kind: "target", ...selectedEnvelope };
 		send({ type: `request:${kind}`, text, annotation, clientSubmissionId });
 		requestSubmit.disabled = true;
 		requestError.textContent = "Submitting…";
+	});
+	requestInput.addEventListener("keydown", (event) => {
+		if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+			event.preventDefault();
+			if (!requestSubmit.disabled) requestComposer.requestSubmit();
+		}
 	});
 	requestCancel.addEventListener("click", () => { pendingDraw?.path?.remove(); closeRequestComposer(); });
 
@@ -365,6 +377,5 @@
 		})
 		.catch(() => { join.hidden = false; });
 
-	// The error boundary in the shell waits for this flag.
 	window.__ahpBooted = true;
 })();
