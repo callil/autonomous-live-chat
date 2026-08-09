@@ -63,11 +63,13 @@ body.mode-draw .draw-layer { pointer-events: auto; cursor: crosshair; }
 .loc-selected { outline: 2px solid var(--accent) !important; outline-offset: 2px; }
 body.mode-target, body.mode-comment { cursor: crosshair; }
 
-.request-composer { position: absolute; left: 50%; bottom: 8rem; transform: translateX(-50%); width: min(28rem, calc(100vw - 2rem)); padding: .8rem; border: 1px solid var(--line); border-radius: .8rem; background: Canvas; box-shadow: 0 10px 32px rgb(0 0 0 / .3); pointer-events: auto; display: grid; gap: .5rem; }
-.request-context { font-size: .78rem; opacity: .75; }
-.request-composer textarea { font: inherit; resize: vertical; min-height: 3.2rem; padding: .5rem .6rem; border-radius: .5rem; border: 1px solid var(--line); background: transparent; color: inherit; }
-.request-actions { display: flex; justify-content: flex-end; gap: .5rem; }
+.request-composer { position: absolute; width: min(22rem, calc(100vw - 1.5rem)); padding: .55rem; border: 1px solid var(--line); border-radius: .65rem; background: Canvas; box-shadow: 0 8px 24px rgb(0 0 0 / .28); pointer-events: auto; display: grid; gap: .35rem; }
+.request-context { overflow: hidden; font-size: .72rem; opacity: .65; text-overflow: ellipsis; white-space: nowrap; }
+.request-composer textarea { font: inherit; resize: none; min-height: 2.8rem; padding: .45rem .55rem; border-radius: .45rem; border: 1px solid var(--line); background: transparent; color: inherit; }
+.request-actions { display: flex; justify-content: flex-end; gap: .35rem; }
+.request-actions button { padding: .35rem .65rem; font-size: .82rem; }
 .request-error { margin: 0; font-size: .78rem; color: #c94f2f; }
+.request-error:empty { display: none; }
 .request-error.ok { color: var(--live); }
 
 .join-scrim { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; background: color-mix(in srgb, Canvas 75%, transparent); backdrop-filter: blur(3px); }
