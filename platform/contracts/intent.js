@@ -30,12 +30,14 @@ function refs(value) {
  * (utterances, verbatim annotations) lives in the ledger; the intent names it
  * and tracks lifecycle. It is never a frozen ticket.
  */
-export function createIntent({ id, openedBy, at, refs: pointers, openSeq }) {
+export function createIntent({ id, openedBy, openedById, at, refs: pointers, openSeq }) {
 	if (!Number.isSafeInteger(openSeq) || openSeq < 1) throw new Error("Intent openSeq must be a positive ledger sequence.");
 	return {
 		schemaVersion: 1,
 		id: identifier(id, "Intent ID"),
 		openedBy: identifier(openedBy, "Intent opener"),
+		/** The STABLE session id (phase 3 identity): the attribution and rate-limit key. Display names are presentation only. */
+		openedById: identifier(openedById ?? openedBy, "Intent opener id"),
 		state: "open",
 		version: 1,
 		refs: refs(pointers),
@@ -79,6 +81,19 @@ export function dispatchIntent(intent, { runId, at }) {
 	return { ...intent, state: "dispatched", version: intent.version + 1, runId, updatedAt: at };
 }
 
+/**
+ * The Doctor's retry-once lever (phase 3): a dispatched intent whose run
+ * failed may be granted exactly ONE fresh run. The intent stays dispatched
+ * with the new runId; a second retry is a contract violation, loudly.
+ */
+export function retryIntent(intent, { runId, at }) {
+	identifier(runId, "Run ID");
+	timestamp(at, "Retry timestamp");
+	if (intent.state !== "dispatched") throw new Error(`Intent ${intent.id} is ${intent.state}; only a dispatched intent retries.`);
+	if (intent.retried === true) throw new Error(`Intent ${intent.id} already used its one retry.`);
+	return { ...intent, runId, retried: true, version: intent.version + 1, updatedAt: at };
+}
+
 /** dispatched -> live|parked, from the run's terminal fact. */
 export function recordIntentOutcome(intent, { state, at, detail }) {
 	timestamp(at, "Outcome timestamp");
@@ -94,10 +109,14 @@ export function withdrawIntent(intent, { at }) {
 	return { ...intent, state: "withdrawn", version: intent.version + 1, updatedAt: at };
 }
 
-/** Open-intent pressure for one user: open + dispatched both count against the cap. */
+/**
+ * Open-intent pressure for one user: open + dispatched both count against the
+ * cap, keyed on the STABLE session id (intents recorded before identity
+ * landed fall back to their display name).
+ */
 export function countOpenIntents(intents, userId) {
 	identifier(userId, "User");
-	return intents.filter((intent) => intent.openedBy === userId && !TERMINAL_INTENT_STATES.has(intent.state)).length;
+	return intents.filter((intent) => (intent.openedById ?? intent.openedBy) === userId && !TERMINAL_INTENT_STATES.has(intent.state)).length;
 }
 
 export function underOpenIntentLimit(intents, userId, limit = OPEN_INTENT_LIMIT) {

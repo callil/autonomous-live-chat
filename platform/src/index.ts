@@ -21,6 +21,7 @@ import {
 	createIntent,
 	dispatchIntent,
 	recordIntentOutcome,
+	retryIntent,
 	underOpenIntentLimit,
 	withdrawIntent,
 	type Intent,
@@ -29,8 +30,11 @@ import { cancelDeadline, parseRequestEnvelope } from "../contracts/envelope.js";
 import { renderFeed, renderFeedItem, renderQueueChips } from "../contracts/feed.js";
 import { classifyCheckRuns, includesMigrationMarker } from "../contracts/checks.js";
 import { decide, type ReconcileAction } from "../contracts/reconcile.js";
+import { admitRateLimited, mintSessionToken, verifySessionToken, SESSION_TTL_MS, type SessionIdentity } from "../contracts/session.js";
 import { GitHubApp, observeDeployedVersion, syntheticLivenessCheck, verifyWebhookSignature } from "./github.js";
-import { BindingRunnerPort, StubDoctorPort, StubRunnerPort, type DoctorPort, type RunnerBinding, type RunnerPort } from "./ports.js";
+import { AnthropicDoctorPort } from "./doctor.js";
+import { FALLBACK_HTML } from "./fallback.js";
+import { BindingRunnerPort, RETRYABLE_DOCTOR_KINDS, StubDoctorPort, StubRunnerPort, type DoctorCase, type DoctorCaseKind, type DoctorPort, type RunnerBinding, type RunnerPort } from "./ports.js";
 
 type RuntimeEnv = Env & {
 	ADMIN_TOKEN?: string;
@@ -38,11 +42,12 @@ type RuntimeEnv = Env & {
 	GITHUB_APP_INSTALLATION_ID?: string;
 	GITHUB_APP_PRIVATE_KEY?: string;
 	GITHUB_WEBHOOK_SECRET?: string;
+	ANTHROPIC_API_KEY?: string;
 };
 
 type ClientMessage =
-	| { type: "chat:send"; author?: unknown; text?: unknown }
-	| { type: "request:target" | "request:comment" | "request:draw"; author?: unknown; text?: unknown; annotation?: unknown; clientSubmissionId?: unknown }
+	| { type: "chat:send"; text?: unknown }
+	| { type: "request:target" | "request:comment" | "request:draw"; text?: unknown; annotation?: unknown; clientSubmissionId?: unknown }
 	| { type: "request:cancel"; intentId?: unknown }
 	| { type: "feed:history"; beforeSeq?: unknown };
 
@@ -54,6 +59,8 @@ type RevertRecord = { sha: string; requestedAt: number; dispatchedAt: number | n
 type WatchdogRecord = { sha: string; until: number; migration: boolean };
 /** The last two revisions the platform OBSERVED serving; `previous` is the auto-revert target. */
 type GoodShaRecord = { current: string; previous: string | null };
+/** A durable park case awaiting the Doctor: appended by park sites, consumed by the reconciler. */
+type DoctorQueueEntry = { id: string; kind: DoctorCaseKind; runId?: string; intentId?: string; detail: string; at: number };
 
 const EVENT_SEQUENCE_KEY = "sequence:event";
 const EVENT_PREFIX = "event:";
@@ -65,6 +72,7 @@ const DIRTY_KEY = "dirty";
 const REVERT_KEY = "pending-revert";
 const WATCHDOG_KEY = "deploy-watchdog";
 const GOOD_SHA_KEY = "observed-good-sha";
+const DOCTOR_QUEUE_KEY = "doctor-queue";
 
 /** Level-triggered cadence: the reconciler re-reads state every minute no matter what. */
 const RECONCILE_INTERVAL_MS = 60_000;
@@ -72,9 +80,14 @@ const RECONCILE_INTERVAL_MS = 60_000;
 const POKE_DELAY_MS = 1_000;
 /** Snapshot depth for a fresh connection; older history pages via feed:history. */
 const SNAPSHOT_EVENT_COUNT = 100;
+/** Feed items carried on every feed:update broadcast so connected clients see new facts live. */
+const BROADCAST_FEED_ITEMS = 30;
 const MAX_MESSAGE_BYTES = 128_000;
-const AUTHOR = /^[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}$/u;
 const SHA = /^[0-9a-f]{40}$/u;
+/** Per-identity chat flood ceiling (identity is the stable session id, not the display name). */
+const CHAT_RATE = { limit: 20, windowMs: 60_000 };
+/** Per-identity request-envelope ceiling; the 5-open-intent cap is the durable backstop. */
+const REQUEST_RATE = { limit: 6, windowMs: 60_000 };
 /**
  * Honest per-run cost estimate until real metering lands (the blank-slate
  * design priced a change at $0.30-0.75).
@@ -84,7 +97,11 @@ const DEFAULT_DAILY_BUDGET_USD = 25;
 /** Post-deploy liveness window (task #16: health pings for 5 minutes). */
 const WATCHDOG_WINDOW_MS = 5 * 60_000;
 /** The product deploy leg, reused for reverts via its sha input. */
-const DEPLOY_WORKFLOW_FILE = "deploy-demo-on-main.yml";
+const DEPLOY_WORKFLOW_FILE = "deploy-product.yml";
+
+const SESSION_COOKIE = "ahp_session";
+const IDENTITY_ID_HEADER = "x-ahp-session-id";
+const IDENTITY_NAME_HEADER = "x-ahp-session-name";
 
 const encoder = new TextEncoder();
 const utf8Bytes = (value: string): number => encoder.encode(value).byteLength;
@@ -93,29 +110,29 @@ function budgetDay(now: number): string {
 	return new Date(now).toISOString().slice(0, 10);
 }
 
-function safeAuthor(value: unknown): string | null {
-	// TODO(phase 3, non-negotiable before cutover): replace client-supplied
-	// display names with real identity/auth. The rate limit below keys on this
-	// name, which is honest bookkeeping but not a security boundary yet.
-	return typeof value === "string" && AUTHOR.test(value) ? value : null;
-}
-
 /**
  * The Room Durable Object: single-threaded owner of the append-only event
  * ledger, the strict FIFO singleton build queue, intent records, and the feed
  * projection. Webhooks and client actions only append facts and set a dirty
  * mark; the 60-second level-triggered reconciler re-reads durable state and
  * drives the delta through the pure decide() policy. No model output enters
- * this truth path.
+ * this truth path — the Doctor's verdict is constrained to a typed
+ * disposition plus a public note that renders as exactly that.
  */
 export class RoomDO extends DurableObject<RuntimeEnv> {
 	private readonly runnerPort: RunnerPort;
-	private readonly doctorPort: DoctorPort = new StubDoctorPort();
+	private readonly doctorPort: DoctorPort;
+	/** In-memory flood windows keyed on the stable session id; durable caps back them up. */
+	private readonly chatWindows = new Map<string, number[]>();
+	private readonly requestWindows = new Map<string, number[]>();
 
 	constructor(ctx: DurableObjectState, env: RuntimeEnv) {
 		super(ctx, env);
 		const binding = env.RUNNER as unknown as RunnerBinding | undefined;
 		this.runnerPort = binding ? new BindingRunnerPort(binding as RunnerBinding) : new StubRunnerPort();
+		// The real Doctor rides the ANTHROPIC_API_KEY secret; without it the
+		// deterministic stub parks every deviation for a human (fail-open).
+		this.doctorPort = env.ANTHROPIC_API_KEY ? new AnthropicDoctorPort(env.ANTHROPIC_API_KEY) : new StubDoctorPort();
 		this.ctx.blockConcurrencyWhile(async () => {
 			await this.scheduleReconcile(Date.now() + RECONCILE_INTERVAL_MS);
 		});
@@ -135,11 +152,18 @@ export class RoomDO extends DurableObject<RuntimeEnv> {
 
 	async fetch(request: Request): Promise<Response> {
 		if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") return new Response("Expected a WebSocket upgrade.", { status: 426 });
+		// Identity was verified by the Worker in front of this DO (signed
+		// session cookie); the DO trusts only these internal headers.
+		const id = request.headers.get(IDENTITY_ID_HEADER);
+		const name = request.headers.get(IDENTITY_NAME_HEADER);
+		if (!id || !name) return new Response("A signed session is required.", { status: 401 });
 		const pair = new WebSocketPair();
 		const [client, server] = Object.values(pair);
 		this.ctx.acceptWebSocket(server);
+		// Hibernation-safe identity: the attachment survives eviction.
+		server.serializeAttachment({ id, name } satisfies { id: string; name: string });
 		const snapshot = await this.snapshot();
-		server.send(JSON.stringify(snapshot));
+		server.send(JSON.stringify({ ...snapshot, you: { id, name } }));
 		return new Response(null, { status: 101, webSocket: client });
 	}
 
@@ -148,17 +172,30 @@ export class RoomDO extends DurableObject<RuntimeEnv> {
 		await this.scheduleReconcile(Date.now() + RECONCILE_INTERVAL_MS);
 	}
 
+	private socketIdentity(socket: WebSocket): { id: string; name: string } | null {
+		try {
+			const attachment = socket.deserializeAttachment() as { id?: unknown; name?: unknown } | null;
+			if (attachment && typeof attachment.id === "string" && typeof attachment.name === "string") return { id: attachment.id, name: attachment.name };
+		} catch { /* fall through to null */ }
+		return null;
+	}
+
 	async webSocketMessage(socket: WebSocket, raw: ArrayBuffer | string): Promise<void> {
 		if (typeof raw !== "string" || utf8Bytes(raw) > MAX_MESSAGE_BYTES) {
 			this.notice(socket, "That message is too large. Split it into smaller parts.");
 			return;
 		}
+		const identity = this.socketIdentity(socket);
+		if (!identity) {
+			this.notice(socket, "This connection carries no session; reconnect to continue.");
+			return;
+		}
 		let message: ClientMessage;
 		try { message = JSON.parse(raw) as ClientMessage; } catch { return; }
 		try {
-			if (message.type === "chat:send") return await this.handleChat(socket, message);
-			if (message.type === "request:target" || message.type === "request:comment" || message.type === "request:draw") return await this.handleRequest(socket, message);
-			if (message.type === "request:cancel") return await this.handleCancel(socket, message);
+			if (message.type === "chat:send") return await this.handleChat(socket, message, identity);
+			if (message.type === "request:target" || message.type === "request:comment" || message.type === "request:draw") return await this.handleRequest(socket, message, identity);
+			if (message.type === "request:cancel") return await this.handleCancel(socket, message, identity);
 			if (message.type === "feed:history") return await this.handleHistory(socket, message);
 		} catch (error) {
 			this.notice(socket, error instanceof Error ? error.message : "That message could not be processed.");
@@ -185,7 +222,9 @@ export class RoomDO extends DurableObject<RuntimeEnv> {
 	 * - progress heartbeats { progress: true, step } -> a run-heartbeat fact;
 	 * - the terminal report { state: "verifying", branch, prNumber, headSha }
 	 *   or { state: "failed", reason }. The runner never reports "merged":
-	 *   merging is the platform's job, after CI.
+	 *   merging is the platform's job, after CI. A failed report parks the run
+	 *   immediately and queues the case for the Doctor — the consult itself
+	 *   happens in the reconciler, never in this client-driven handler.
 	 */
 	async ingestRunnerResult(input: Record<string, unknown>): Promise<{ accepted: boolean; reason?: string }> {
 		const { runId, attemptId } = input;
@@ -222,7 +261,7 @@ export class RoomDO extends DurableObject<RuntimeEnv> {
 					queue = completeRun(queue, { runId, attemptId, state: "failed", at: now, detail: reason });
 					await this.ctx.storage.put(QUEUE_KEY, pruneTerminalRuns(queue));
 					await this.appendEvent("run-failed", { runId, intentId: run.intentId, reason }, now);
-					await this.recordIntentOutcomeFact(run.intentId, "parked", now, reason);
+					await this.queueDoctorCase({ kind: "run-failed", runId, intentId: run.intentId, detail: `The build reported failure: ${reason}` }, now);
 				}
 			});
 		} catch (error) {
@@ -268,9 +307,9 @@ export class RoomDO extends DurableObject<RuntimeEnv> {
 	/**
 	 * The level-triggered reconciler. It never trusts why it woke: it re-reads
 	 * durable state, asks the pure decide() policy for the overdue deltas —
-	 * cancel windows elapsed, TTL-expired runs parked, verifying runs checked
-	 * against CI, deploys observed, liveness enforced, the queue head
-	 * dispatched — then executes them in order and reschedules.
+	 * pending Doctor cases, cancel windows elapsed, TTL-expired runs parked,
+	 * verifying runs checked against CI, deploys observed, liveness enforced,
+	 * the queue head dispatched — then executes them in order and reschedules.
 	 */
 	private async reconcile(): Promise<void> {
 		const now = Date.now();
@@ -288,6 +327,7 @@ export class RoomDO extends DurableObject<RuntimeEnv> {
 			budget: { spentUsd: budget.spentUsd, budgetUsd: this.dailyBudgetUsd(), estimatedRunUsd: ESTIMATED_RUN_COST_USD },
 			revert: revert ? { sha: revert.sha, dispatchedAt: revert.dispatchedAt } : null,
 			watchdog,
+			doctorQueue: await this.loadDoctorQueue(),
 		});
 		for (const action of actions) {
 			try {
@@ -312,23 +352,89 @@ export class RoomDO extends DurableObject<RuntimeEnv> {
 			case "liveness-check": return this.executeLivenessCheck(action, now);
 			case "dispatch-revert": return this.executeDispatchRevert(action.sha, now);
 			case "observe-revert": return this.executeObserveRevert(action.sha, now);
+			case "consult-doctor": return this.executeConsultDoctor(now);
 		}
 	}
 
-	/** TTL enforcement: park-and-explain, then the queue advances. */
+	/** Append a park case for the Doctor. MUST run inside a storage transaction. */
+	private async queueDoctorCase(entry: Omit<DoctorQueueEntry, "id" | "at">, now: number): Promise<void> {
+		const pending = await this.loadDoctorQueue();
+		pending.push({ ...entry, id: `case-${crypto.randomUUID()}`, at: now, detail: entry.detail.slice(0, 600) });
+		await this.ctx.storage.put(DOCTOR_QUEUE_KEY, pending);
+	}
+
+	/**
+	 * Resolve ONE pending Doctor case: build the full case file from durable
+	 * facts, consult the DoctorPort (bounded; fails open to stay-parked), and
+	 * apply the verdict durably — either the intent parks with the Doctor's
+	 * public note, or it is granted its one retry as a fresh queued run.
+	 */
+	private async executeConsultDoctor(now: number): Promise<void> {
+		const pending = await this.loadDoctorQueue();
+		const entry = pending[0];
+		if (!entry) return;
+		const intent = entry.intentId ? await this.ctx.storage.get<Intent>(`${INTENT_PREFIX}${entry.intentId}`) : null;
+		const retryAvailable = RETRYABLE_DOCTOR_KINDS.has(entry.kind) && intent?.state === "dispatched" && intent.retried !== true;
+		const caseFile: DoctorCase = {
+			kind: entry.kind,
+			runId: entry.runId,
+			intentId: entry.intentId,
+			detail: entry.detail,
+			retryAvailable,
+			...(intent ? await this.describeIntent(intent) : {}),
+			recentEvents: await this.recentEventLines(),
+		};
+		let verdict = await this.doctorPort.consult(caseFile);
+		// The mechanical clamp holds here too: no retry without the lever.
+		if (verdict.disposition === "retry-once" && !retryAvailable) verdict = { disposition: "stay-parked", publicNote: verdict.publicNote };
+		await this.ctx.storage.transaction(async () => {
+			const current = await this.loadDoctorQueue();
+			if (!current.length || current[0].id !== entry.id) return;
+			await this.ctx.storage.put(DOCTOR_QUEUE_KEY, current.slice(1));
+			if (!entry.intentId || !intent) {
+				await this.appendEvent("doctor-note", { note: verdict.publicNote, kind: entry.kind }, now);
+				return;
+			}
+			if (verdict.disposition === "retry-once") {
+				const runId = `run-${crypto.randomUUID()}`;
+				const queue = enqueueRun(await this.loadQueue(), { runId, intentId: intent.id, enqueuedAt: now });
+				await this.ctx.storage.put(QUEUE_KEY, queue);
+				await this.ctx.storage.put(`${INTENT_PREFIX}${intent.id}`, retryIntent(intent, { runId, at: now }));
+				await this.appendEvent("run-queued", { runId, intentId: intent.id }, now);
+				await this.appendEvent("intent-retried", { intentId: intent.id, runId, note: verdict.publicNote }, now);
+				return;
+			}
+			await this.recordIntentOutcomeFact(intent.id, "parked", now, verdict.publicNote);
+		});
+		await this.poke();
+	}
+
+	/** The case-file view of an intent: verbatim request text plus its requester. */
+	private async describeIntent(intent: Intent): Promise<{ requestText: string; requestedBy: string }> {
+		const evidence = await this.collectEvidence(intent);
+		return { requestText: evidence.requestText.slice(0, 2_000), requestedBy: evidence.requestedBy };
+	}
+
+	/** Bounded recent ledger facts for the Doctor's case file, oldest first. */
+	private async recentEventLines(count = 20): Promise<string[]> {
+		const lastSeq = (await this.ctx.storage.get<number>(EVENT_SEQUENCE_KEY)) ?? 0;
+		const events = await this.loadEvents(Math.max(1, lastSeq - count + 1), lastSeq);
+		return events.map((event) => `${event.seq} ${event.kind}: ${JSON.stringify(event.payload).slice(0, 240)}`);
+	}
+
+	/** TTL enforcement: park-and-explain, then the queue advances; the Doctor gets the case. */
 	private async executeParkRun(now: number): Promise<void> {
 		await this.ctx.storage.transaction(async () => {
 			const queue = await this.loadQueue();
 			const { queue: swept, parked } = parkExpiredRun(queue, now);
 			if (!parked) return;
-			const kind = parked.state === "running" ? "run-ttl-exceeded" : parked.state === "verifying" ? "verify-ttl-exceeded" : "deploy-ttl-exceeded";
+			const kind: DoctorCaseKind = parked.state === "running" ? "run-ttl-exceeded" : parked.state === "verifying" ? "verify-ttl-exceeded" : "deploy-ttl-exceeded";
 			const detail = parked.state === "deploying"
 				? `The change squash-merged at ${String(parked.mergeSha).slice(0, 7)} but the deploy was never observed serving it.`
 				: `The run exceeded its ${parked.state} budget.`;
-			const verdict = await this.doctorPort.consult({ kind, runId: parked.runId, intentId: parked.intentId, detail });
 			await this.ctx.storage.put(QUEUE_KEY, swept);
-			await this.appendEvent("run-parked", { runId: parked.runId, intentId: parked.intentId, note: verdict.publicNote }, now);
-			await this.recordIntentOutcomeFact(parked.intentId, "parked", now, verdict.publicNote);
+			await this.appendEvent("run-parked", { runId: parked.runId, intentId: parked.intentId, note: detail }, now);
+			await this.queueDoctorCase({ kind, runId: parked.runId, intentId: parked.intentId, detail }, now);
 		});
 	}
 
@@ -387,7 +493,7 @@ export class RoomDO extends DurableObject<RuntimeEnv> {
 			current = completeRun(current, { runId: head.runId, attemptId, state: "failed", at: now, detail: result.reason });
 			await this.ctx.storage.put(QUEUE_KEY, pruneTerminalRuns(current));
 			await this.appendEvent("run-failed", { runId: head.runId, intentId: head.intentId, reason: result.reason }, now);
-			await this.recordIntentOutcomeFact(head.intentId, "parked", now, `The builder could not start (${result.reason}).`);
+			await this.queueDoctorCase({ kind: "dispatch-refused", runId: head.runId, intentId: head.intentId, detail: `The builder could not start (${result.reason}).` }, now);
 		});
 	}
 
@@ -408,7 +514,7 @@ export class RoomDO extends DurableObject<RuntimeEnv> {
 	 * A verifying run: read the exact head SHA's check runs, classify them
 	 * mechanically, and on green squash-merge with --match-head-commit
 	 * semantics, record the migration marker from the ACTUAL changed files,
-	 * and hand the run to the deploy leg. Red CI parks-and-explains.
+	 * and hand the run to the deploy leg. Red CI parks-and-queues-the-Doctor.
 	 */
 	private async observeCi(action: Extract<ReconcileAction, { kind: "observe-ci" }>, now: number): Promise<void> {
 		const app = this.githubApp();
@@ -417,14 +523,14 @@ export class RoomDO extends DurableObject<RuntimeEnv> {
 		if (verdict.verdict === "pending") return;
 		const attemptId = action.attemptId ?? "";
 		if (verdict.verdict === "red") {
-			const doctor = await this.doctorPort.consult({ kind: "ci-red", runId: action.runId, detail: `CI failed: ${verdict.failed.join(", ").slice(0, 300)}` });
+			const detail = `CI failed: ${verdict.failed.join(", ").slice(0, 300)}`;
 			await this.ctx.storage.transaction(async () => {
 				let queue = await this.loadQueue();
 				const run = assertLiveAttempt(queue, { runId: action.runId, attemptId });
-				queue = completeRun(queue, { runId: action.runId, attemptId, state: "failed", at: now, detail: doctor.publicNote });
+				queue = completeRun(queue, { runId: action.runId, attemptId, state: "failed", at: now, detail });
 				await this.ctx.storage.put(QUEUE_KEY, pruneTerminalRuns(queue));
-				await this.appendEvent("run-failed", { runId: action.runId, intentId: run.intentId, reason: doctor.publicNote }, now);
-				await this.recordIntentOutcomeFact(run.intentId, "parked", now, doctor.publicNote);
+				await this.appendEvent("run-failed", { runId: action.runId, intentId: run.intentId, reason: detail }, now);
+				await this.queueDoctorCase({ kind: "ci-red", runId: action.runId, intentId: run.intentId, detail }, now);
 			});
 			return;
 		}
@@ -433,14 +539,14 @@ export class RoomDO extends DurableObject<RuntimeEnv> {
 		const migration = includesMigrationMarker(await app.listChangedFiles(action.prNumber));
 		const merge = await app.squashMerge(action.prNumber, action.headSha);
 		if (!merge.merged) {
-			const doctor = await this.doctorPort.consult({ kind: "merge-refused", runId: action.runId, detail: `GitHub refused the exact-SHA squash merge (${merge.reason}).` });
+			const detail = `GitHub refused the exact-SHA squash merge (${merge.reason}).`;
 			await this.ctx.storage.transaction(async () => {
 				let queue = await this.loadQueue();
 				const run = assertLiveAttempt(queue, { runId: action.runId, attemptId });
-				queue = completeRun(queue, { runId: action.runId, attemptId, state: "failed", at: now, detail: doctor.publicNote });
+				queue = completeRun(queue, { runId: action.runId, attemptId, state: "failed", at: now, detail });
 				await this.ctx.storage.put(QUEUE_KEY, pruneTerminalRuns(queue));
-				await this.appendEvent("run-failed", { runId: action.runId, intentId: run.intentId, reason: doctor.publicNote }, now);
-				await this.recordIntentOutcomeFact(run.intentId, "parked", now, doctor.publicNote);
+				await this.appendEvent("run-failed", { runId: action.runId, intentId: run.intentId, reason: detail }, now);
+				await this.queueDoctorCase({ kind: "merge-refused", runId: action.runId, intentId: run.intentId, detail }, now);
 			});
 			return;
 		}
@@ -489,7 +595,7 @@ export class RoomDO extends DurableObject<RuntimeEnv> {
 	 * The liveness watchdog: a synthetic fetch of the live product. Failure is
 	 * a public fact, then a deterministic auto-revert to the previous good
 	 * SHA — unless the deploy included a migration, which auto-revert refuses
-	 * (state may have moved); that parks to the Doctor seam instead.
+	 * (state may have moved); that queues the Doctor for a public note.
 	 */
 	private async executeLivenessCheck(action: Extract<ReconcileAction, { kind: "liveness-check" }>, now: number): Promise<void> {
 		const result = await syntheticLivenessCheck(this.env.PRODUCT_URL);
@@ -499,9 +605,9 @@ export class RoomDO extends DurableObject<RuntimeEnv> {
 			const detail = action.migration
 				? `The deploy of ${action.sha.slice(0, 7)} included a migration; auto-revert refuses to cross it. (${result.reason})`
 				: `No previous observed-good revision exists to revert to. (${result.reason})`;
-			const doctor = await this.doctorPort.consult({ kind: "liveness-failed-migration", detail });
 			await this.ctx.storage.transaction(async () => {
-				await this.appendEvent("liveness-failed", { reason: `${result.reason} — ${doctor.publicNote}` }, now);
+				await this.appendEvent("liveness-failed", { reason: `${result.reason} — ${detail}` }, now);
+				await this.queueDoctorCase({ kind: "liveness-failed-migration", detail }, now);
 				await this.ctx.storage.delete(WATCHDOG_KEY);
 			});
 			return;
@@ -555,26 +661,25 @@ export class RoomDO extends DurableObject<RuntimeEnv> {
 		return { requestText, requestedBy: intent.openedBy, annotations };
 	}
 
-	private async handleChat(socket: WebSocket, message: Extract<ClientMessage, { type: "chat:send" }>): Promise<void> {
-		const author = safeAuthor(message.author);
+	private async handleChat(socket: WebSocket, message: Extract<ClientMessage, { type: "chat:send" }>, identity: { id: string; name: string }): Promise<void> {
 		const text = typeof message.text === "string" ? message.text.trim() : "";
-		if (!author || !text.length) {
-			this.notice(socket, "Chat needs an author and non-empty text.");
+		if (!text.length) {
+			this.notice(socket, "Chat needs non-empty text.");
+			return;
+		}
+		const now = Date.now();
+		if (!admitRateLimited(this.chatWindows, identity.id, now, CHAT_RATE)) {
+			this.notice(socket, "You are sending messages too quickly; wait a moment.");
 			return;
 		}
 		let event: LedgerEvent | undefined;
 		await this.ctx.storage.transaction(async () => {
-			event = await this.appendEvent("utterance", { author, text }, Date.now());
+			event = await this.appendEvent("utterance", { author: identity.name, authorId: identity.id, text }, now);
 		});
-		this.broadcast({ type: "chat:message", author, text, seq: event?.seq, at: event?.at });
+		this.broadcast({ type: "chat:message", author: identity.name, text, seq: event?.seq, at: event?.at });
 	}
 
-	private async handleRequest(socket: WebSocket, message: Extract<ClientMessage, { type: "request:target" | "request:comment" | "request:draw" }>): Promise<void> {
-		const author = safeAuthor(message.author);
-		if (!author) {
-			this.notice(socket, "Requests need an author.");
-			return;
-		}
+	private async handleRequest(socket: WebSocket, message: Extract<ClientMessage, { type: "request:target" | "request:comment" | "request:draw" }>, identity: { id: string; name: string }): Promise<void> {
 		const envelope = parseRequestEnvelope(message);
 		if (!envelope) return;
 		const control = await this.loadControl();
@@ -582,23 +687,27 @@ export class RoomDO extends DurableObject<RuntimeEnv> {
 			this.notice(socket, "The room is frozen by its owner: new requests are paused, chat stays open.");
 			return;
 		}
+		const now = Date.now();
+		if (!admitRateLimited(this.requestWindows, identity.id, now, REQUEST_RATE)) {
+			this.notice(socket, "You are opening requests too quickly; wait a moment.");
+			return;
+		}
 		const intents = await this.loadIntents();
-		if (!underOpenIntentLimit(intents, author)) {
+		if (!underOpenIntentLimit(intents, identity.id)) {
 			this.notice(socket, "You already have 5 open requests. Wait for one to finish (or cancel one) before opening another.");
 			return;
 		}
-		const now = Date.now();
 		const intentId = `intent-${crypto.randomUUID()}`;
 		let deadline = 0;
 		await this.ctx.storage.transaction(async () => {
-			const annotationEvent = await this.appendEvent("annotation", { by: author, annotation: envelope.annotation }, now);
+			const annotationEvent = await this.appendEvent("annotation", { by: identity.name, byId: identity.id, annotation: envelope.annotation }, now);
 			// The intent-opened seq is the room-unique ordinal that later names
 			// the run branch: room/<openSeq>/<attempt>.
-			const openedEvent = await this.appendEvent("intent-opened", { intentId, by: author }, now);
-			const intent = createIntent({ id: intentId, openedBy: author, at: now, refs: { utteranceSeqs: [], annotationSeqs: [annotationEvent.seq] }, openSeq: openedEvent.seq });
+			const openedEvent = await this.appendEvent("intent-opened", { intentId, by: identity.name }, now);
+			const intent = createIntent({ id: intentId, openedBy: identity.name, openedById: identity.id, at: now, refs: { utteranceSeqs: [], annotationSeqs: [annotationEvent.seq] }, openSeq: openedEvent.seq });
 			await this.ctx.storage.put(`${INTENT_PREFIX}${intentId}`, intent);
 			deadline = cancelDeadline(now);
-			await this.appendEvent("request-accepted", { intentId, by: author, text: envelope.text, at: now, cancelDeadline: deadline }, now);
+			await this.appendEvent("request-accepted", { intentId, by: identity.name, text: envelope.text, at: now, cancelDeadline: deadline }, now);
 		});
 		// The immediate public ack, with its cancel window, straight back to the
 		// requester and out to the room.
@@ -608,19 +717,29 @@ export class RoomDO extends DurableObject<RuntimeEnv> {
 		await this.scheduleReconcile(deadline + POKE_DELAY_MS);
 	}
 
-	private async handleCancel(socket: WebSocket, message: Extract<ClientMessage, { type: "request:cancel" }>): Promise<void> {
+	private async handleCancel(socket: WebSocket, message: Extract<ClientMessage, { type: "request:cancel" }>, identity: { id: string; name: string }): Promise<void> {
 		const intentId = typeof message.intentId === "string" ? message.intentId : null;
 		if (!intentId) return;
 		const now = Date.now();
 		let cancelled = false;
+		let refused: string | null = null;
 		await this.ctx.storage.transaction(async () => {
 			const intent = await this.ctx.storage.get<Intent>(`${INTENT_PREFIX}${intentId}`);
 			if (!intent || intent.state !== "open") return;
+			// Only the requester (by stable id) may cancel their own request.
+			if ((intent.openedById ?? intent.openedBy) !== identity.id) {
+				refused = "Only the requester can cancel a request.";
+				return;
+			}
 			await this.ctx.storage.put(`${INTENT_PREFIX}${intentId}`, withdrawIntent(intent, { at: now }));
 			await this.appendEvent("request-cancelled", { intentId, by: intent.openedBy }, now);
 			await this.appendEvent("intent-withdrawn", { intentId }, now);
 			cancelled = true;
 		});
+		if (refused) {
+			this.notice(socket, refused);
+			return;
+		}
 		if (!cancelled) {
 			this.notice(socket, "That request has already been dispatched (or finished); it can no longer be cancelled.");
 			return;
@@ -657,7 +776,16 @@ export class RoomDO extends DurableObject<RuntimeEnv> {
 		const now = Date.now();
 		const control = await this.loadControl();
 		const queue = await this.loadQueue();
-		this.broadcast({ type: "feed:update", queue: renderQueueChips(queue, now), frozen: control.frozen });
+		// Recent items ride every update so connected clients see new facts
+		// without reconnecting; they merge by seq.
+		const lastSeq = (await this.ctx.storage.get<number>(EVENT_SEQUENCE_KEY)) ?? 0;
+		const events = await this.loadEvents(Math.max(1, lastSeq - BROADCAST_FEED_ITEMS + 1), lastSeq);
+		this.broadcast({
+			type: "feed:update",
+			queue: renderQueueChips(queue, now),
+			frozen: control.frozen,
+			items: events.map(renderFeedItem).filter((item) => item !== null),
+		});
 	}
 
 	private broadcast(message: Record<string, unknown>): void {
@@ -697,6 +825,10 @@ export class RoomDO extends DurableObject<RuntimeEnv> {
 		return (await this.ctx.storage.get<QueuedRun[]>(QUEUE_KEY)) ?? [];
 	}
 
+	private async loadDoctorQueue(): Promise<DoctorQueueEntry[]> {
+		return (await this.ctx.storage.get<DoctorQueueEntry[]>(DOCTOR_QUEUE_KEY)) ?? [];
+	}
+
 	private async loadIntents(): Promise<Intent[]> {
 		const page = await this.ctx.storage.list<Intent>({ prefix: INTENT_PREFIX });
 		return [...page.values()];
@@ -731,6 +863,26 @@ function roomName(pathname: string): string | null {
 	return match ? match[1] : null;
 }
 
+function readCookie(request: Request, name: string): string | null {
+	const header = request.headers.get("Cookie");
+	if (!header) return null;
+	for (const part of header.split(";")) {
+		const eq = part.indexOf("=");
+		if (eq === -1) continue;
+		if (part.slice(0, eq).trim() === name) return part.slice(eq + 1).trim();
+	}
+	return null;
+}
+
+/** The presented session token: cookie first, ?session= as the non-browser fallback (it is a bearer either way). */
+function presentedSessionToken(request: Request): string | null {
+	return readCookie(request, SESSION_COOKIE) ?? new URL(request.url).searchParams.get("session");
+}
+
+function sessionCookie(token: string): string {
+	return `${SESSION_COOKIE}=${token}; Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}; Path=/; Secure; HttpOnly; SameSite=Lax`;
+}
+
 export default {
 	async fetch(request: Request, env: RuntimeEnv): Promise<Response> {
 		const pathname = new URL(request.url).pathname;
@@ -751,6 +903,42 @@ export default {
 				try { return Response.json(await room().requestRevert(body.sha)); } catch (error) { return new Response(error instanceof Error ? error.message : "Invalid revert", { status: 400 }); }
 			}
 			return new Response("Not found", { status: 404 });
+		}
+
+		if (pathname === "/api/session") {
+			// Identity (phase 3, v1 non-negotiable): the platform mints signed
+			// session cookies — a display-name claim plus a stable id, HMAC'd
+			// with a key derived from ADMIN_TOKEN. Fails closed when the secret
+			// is not provisioned.
+			if (!env.ADMIN_TOKEN) return new Response("Identity is not provisioned yet.", { status: 503 });
+			if (request.method === "GET") {
+				const token = presentedSessionToken(request);
+				const identity = token ? await verifySessionToken(env.ADMIN_TOKEN, token) : null;
+				if (!identity) return new Response("No valid session.", { status: 401 });
+				return Response.json({ id: identity.id, name: identity.name });
+			}
+			if (request.method === "POST") {
+				let body: { name?: unknown };
+				try { body = JSON.parse(await request.text()) as typeof body; } catch { return new Response("Invalid JSON", { status: 400 }); }
+				let minted: { token: string; identity: SessionIdentity };
+				try {
+					minted = await mintSessionToken(env.ADMIN_TOKEN, typeof body.name === "string" ? body.name.trim() : "");
+				} catch (error) {
+					return new Response(error instanceof Error ? error.message : "Invalid name", { status: 400 });
+				}
+				return Response.json(
+					{ id: minted.identity.id, name: minted.identity.name, token: minted.token },
+					{ headers: { "Set-Cookie": sessionCookie(minted.token) } },
+				);
+			}
+			return new Response("Method not allowed", { status: 405 });
+		}
+
+		if (pathname === "/fallback") {
+			// The frozen minimal UI (task #13): reachable even when the
+			// self-modifiable product bundle is broken.
+			if (request.method !== "GET") return new Response("Method not allowed", { status: 405 });
+			return new Response(FALLBACK_HTML, { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" } });
 		}
 
 		if (pathname === "/api/runner/complete") {
@@ -782,7 +970,16 @@ export default {
 		if (name) {
 			if (request.method !== "GET") return new Response("Method not allowed", { status: 405 });
 			if (name !== "main") return new Response("Unknown room", { status: 404 });
-			return env.ROOM_DO.getByName(name).fetch(request);
+			// The room WebSocket requires a valid signed session; the Worker
+			// verifies it here and forwards ONLY the verified identity to the DO.
+			if (!env.ADMIN_TOKEN) return new Response("Identity is not provisioned yet.", { status: 503 });
+			const token = presentedSessionToken(request);
+			const identity = token ? await verifySessionToken(env.ADMIN_TOKEN, token) : null;
+			if (!identity) return new Response("A signed session is required.", { status: 401 });
+			const headers = new Headers(request.headers);
+			headers.set(IDENTITY_ID_HEADER, identity.id);
+			headers.set(IDENTITY_NAME_HEADER, identity.name);
+			return env.ROOM_DO.getByName(name).fetch(new Request(request.url, { method: request.method, headers }));
 		}
 		return new Response("Not found", { status: 404 });
 	},

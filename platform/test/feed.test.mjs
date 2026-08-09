@@ -16,6 +16,7 @@ test("every ledger event kind has a deterministic template", () => {
 		"intent-live": { intentId: "intent-1" },
 		"intent-parked": { intentId: "intent-1", reason: "run-ttl-exceeded" },
 		"intent-withdrawn": { intentId: "intent-1" },
+		"intent-retried": { intentId: "intent-1", runId: "run-2", note: "CI looked flaky; one fresh build." },
 		"run-queued": { runId: "run-1", intentId: "intent-1" },
 		"run-started": { runId: "run-1", intentId: "intent-1", attemptId: "attempt-1", branch: "room/12/abcd1234" },
 		"run-heartbeat": { runId: "run-1", intentId: "intent-1", step: "cloned" },
@@ -33,6 +34,7 @@ test("every ledger event kind has a deterministic template", () => {
 		"room-unfrozen": { by: "owner" },
 		"revert-requested": { sha: "d".repeat(40), by: "owner" },
 		"budget-exhausted": { day: "2026-08-09" },
+		"doctor-note": { note: "The deploy crossed a migration; a human needs to look." },
 	};
 	const silentKinds = new Set(["utterance", "run-heartbeat"]);
 	for (const kind of LEDGER_EVENT_KINDS) {
@@ -46,6 +48,15 @@ test("every ledger event kind has a deterministic template", () => {
 		}
 	}
 	assert.throws(() => renderFeedItem({ seq: 1, kind: "model-opinion", at: 1, payload: {} }), /No feed template/u, "an unrenderable fact is a loud contract violation");
+});
+
+test("provenance refs are mechanical projections of the same durable facts", () => {
+	const merged = renderFeedItem(createLedgerEvent({ seq: 3, kind: "pr-merged", at: 1, payload: { runId: "run-1", intentId: "intent-1", prNumber: 7, mergeSha: "e".repeat(40) } }));
+	assert.deepEqual(merged.refs, { prNumber: 7, sha: "e".repeat(40) }, "the PR and commit ride as structured refs");
+	const observed = renderFeedItem(createLedgerEvent({ seq: 4, kind: "deploy-observed", at: 1, payload: { sha: "b".repeat(40) } }));
+	assert.deepEqual(observed.refs, { sha: "b".repeat(40) });
+	const chat = renderFeedItem(createLedgerEvent({ seq: 5, kind: "intent-opened", at: 1, payload: { intentId: "intent-1", by: "callil" } }));
+	assert.equal(chat.refs, undefined, "kinds without artifacts carry no refs");
 });
 
 test("the projection is deterministic: same facts in, same feed out", () => {

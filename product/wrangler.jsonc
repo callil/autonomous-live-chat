@@ -1,0 +1,31 @@
+/**
+ * The PRODUCT worker (phase 3 product/platform split, task #13): the
+ * self-modifiable room UI. It speaks ONLY to the platform's room WebSocket
+ * and narrow HTTP API through a plain same-origin proxy — ZERO Durable
+ * Object bindings, ZERO service bindings, no ledger access of any kind
+ * (v1 non-negotiable: binding-level isolation).
+ *
+ * This config file itself is frozen by the platform firewall (agent branches
+ * cannot touch any wrangler config); the UI source under src/ is the
+ * agent-editable product surface.
+ */
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "app-harness-product",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-08-05",
+	"compatibility_flags": ["nodejs_compat"],
+	"observability": { "enabled": true },
+	"rules": [
+		// UI sources are bundled as text and stamped with data-loc refs at
+		// module init — a deterministic build-time transform, not runtime
+		// templating.
+		{ "type": "Text", "globs": ["**/*.html", "**/*.css", "**/*.client.js"] }
+	],
+	"vars": {
+		// The frozen platform's public origin: every /api/* request (including
+		// the room WebSocket upgrade) proxies there verbatim.
+		"PLATFORM_ORIGIN": "https://app-harness-platform.coda-a.workers.dev"
+	},
+	"upload_source_maps": true
+}

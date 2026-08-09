@@ -113,3 +113,12 @@ test("the policy is a pure function: the same snapshot always yields the same pl
 	assert.deepEqual(decide(shot), decide(shot));
 	assert.throws(() => decide(snapshot({ now: -1 })), /non-negative/u);
 });
+
+test("a pending Doctor case consults exactly once per cycle, ahead of dispatch, without blocking the lane", () => {
+	const queue = enqueueRun([], { runId: "run-2", intentId: "intent-2", enqueuedAt: 1 });
+	const actions = decide(snapshot({ queue, doctorQueue: [{ id: "case-1", kind: "ci-red", intentId: "intent-1", detail: "CI failed", at: 1 }] }));
+	assert.deepEqual(actions[0], { kind: "consult-doctor" }, "the case resolves before new work");
+	assert.equal(actions.filter((action) => action.kind === "consult-doctor").length, 1, "one consult per cycle");
+	assert.ok(actions.some((action) => action.kind === "dispatch"), "a pending case never blocks the free lane");
+	assert.deepEqual(decide(snapshot({ doctorQueue: [] })), [], "an empty doctor queue decides nothing");
+});

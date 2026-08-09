@@ -44,6 +44,7 @@ const DENIED_PATHS = [
 const WRITE_DENIED_PATHS = [
 	/^platform\//u,
 	/^infra\//u,
+	/^apps\//u,
 	/^\.github\//u,
 	/(^|\/)package\.json$/u,
 	/(^|\/)package-lock\.json$/u,

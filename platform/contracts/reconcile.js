@@ -16,9 +16,10 @@ import { activeRun, nextDispatch, parkExpiredRun, withinDailyBudget } from "./qu
  * - budget         { spentUsd, budgetUsd, estimatedRunUsd }
  * - revert         null | { sha, dispatchedAt: number | null }  (owner revert-to-SHA, bypasses the pipeline)
  * - watchdog       null | { sha, until, migration }              (post-deploy liveness window)
+ * - doctorQueue    pending park cases awaiting the Doctor's verdict (phase 3)
  */
 export function decide(snapshot) {
-	const { now, frozen, queue, openIntents, budget, revert, watchdog } = snapshot;
+	const { now, frozen, queue, openIntents, budget, revert, watchdog, doctorQueue } = snapshot;
 	if (!Number.isSafeInteger(now) || now < 0) throw new Error("Snapshot clock must be a non-negative integer.");
 	if (!Array.isArray(queue) || !Array.isArray(openIntents)) throw new Error("Snapshot queue and openIntents must be arrays.");
 	const actions = [];
@@ -31,18 +32,26 @@ export function decide(snapshot) {
 			: { kind: "observe-revert", sha: revert.sha });
 	}
 
-	// 2. TTL enforcement: park-and-explain, then the queue advances. The
+	// 2. One pending Doctor case resolves per cycle. The consult happens in
+	// the reconciler — never inline in a client-driven push handler, where a
+	// disconnect could cancel it halfway — so a crash mid-consult simply
+	// re-presents the same durable case next cycle.
+	if (Array.isArray(doctorQueue) && doctorQueue.length > 0) {
+		actions.push({ kind: "consult-doctor" });
+	}
+
+	// 3. TTL enforcement: park-and-explain, then the queue advances. The
 	// swept view drives the rest of this cycle so a parked head frees the
 	// lane immediately.
 	const { queue: swept, parked } = parkExpiredRun(queue, now);
 	if (parked) actions.push({ kind: "park-run", runId: parked.runId, intentId: parked.intentId, phase: parked.state });
 
-	// 3. Enqueue accepted requests whose cancel window has elapsed.
+	// 4. Enqueue accepted requests whose cancel window has elapsed.
 	for (const intent of openIntents) {
 		if (mayDispatch(intent.openedAt, now)) actions.push({ kind: "enqueue-intent", intentId: intent.id });
 	}
 
-	// 4. Drive the single active run's current waiting phase.
+	// 5. Drive the single active run's current waiting phase.
 	const active = activeRun(swept);
 	if (active?.state === "verifying" && active.verification) {
 		actions.push({ kind: "observe-ci", runId: active.runId, attemptId: active.attemptId, prNumber: active.verification.prNumber, headSha: active.verification.headSha });
@@ -53,14 +62,14 @@ export function decide(snapshot) {
 	// state === "running" needs no action: the runner reports by push and the
 	// TTL in step 2 is the backstop.
 
-	// 5. Post-deploy liveness watchdog: inside the window, every cycle does a
+	// 6. Post-deploy liveness watchdog: inside the window, every cycle does a
 	// synthetic fetch of the product. Suppressed while a revert is already in
 	// flight — one deterministic recovery at a time.
 	if (!revert && watchdog && Number.isSafeInteger(watchdog.until) && now < watchdog.until) {
 		actions.push({ kind: "liveness-check", sha: watchdog.sha, migration: watchdog.migration === true });
 	}
 
-	// 6. Dispatch the FIFO head — one run at a time, never while frozen or
+	// 7. Dispatch the FIFO head — one run at a time, never while frozen or
 	// while the lane is busy, never past the daily spend budget.
 	if (!frozen && !active) {
 		const head = nextDispatch(swept);

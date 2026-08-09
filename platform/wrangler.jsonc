@@ -31,14 +31,17 @@
 		// The room's daily spend ceiling, enforced at dispatch. The owner
 		// bearer credential is a worker secret, never a var. GitHub App
 		// credentials (GITHUB_APP_ID, GITHUB_APP_INSTALLATION_ID,
-		// GITHUB_APP_PRIVATE_KEY) and the webhook secret
-		// (GITHUB_WEBHOOK_SECRET) are worker secrets too.
+		// GITHUB_APP_PRIVATE_KEY), the webhook secret (GITHUB_WEBHOOK_SECRET),
+		// and the Doctor's model credential (ANTHROPIC_API_KEY — optional;
+		// without it the Doctor degrades to the deterministic park-for-human
+		// stub) are worker secrets too.
 		"ROOM_DAILY_BUDGET_USD": "25",
 		// The one repository this platform may read, merge, and deploy.
 		"REPOSITORY": "callil/autonomous-live-chat",
-		// The live product origin: /version observation, liveness watchdog,
-		// and the feed link in commit trailers.
-		"PRODUCT_URL": "https://autonomous-live-chat.coda-a.workers.dev"
+		// The live PRODUCT worker origin (phase 3 product/platform split):
+		// /version observation, liveness watchdog, and the feed link in
+		// commit trailers. The legacy demo worker is not part of this loop.
+		"PRODUCT_URL": "https://app-harness-product.coda-a.workers.dev"
 	},
 	"services": [
 		{
