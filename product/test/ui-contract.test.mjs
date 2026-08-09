@@ -40,6 +40,24 @@ test("the queue wraps the app and the toolbar reports active build sessions imme
 	assert.match(css, /\.queue-status-dot\.is-busy[^}]*animation:\s*queue-pulse/u);
 });
 
+test("each speaker gets a stable generated colour shared by their initials placeholder and name", () => {
+	assert.match(client, /function avatarColor\(name\)/u, "the per-user colour is generated from the name");
+	assert.match(client, /hash = Math\.imul\(hash, 16777619\)/u, "FNV-1a keeps the colour stable across sessions and clients");
+	assert.match(client, /avatar\.style\.color = color; avatar\.setAttribute\("aria-hidden", "true"\)/u, "the placeholder is decorative and carries the colour");
+	assert.match(client, /author\.style\.color = color/u, "the author name shares the same generated colour");
+	assert.match(client, /avatar\.textContent = initials\(/u, "the placeholder shows the speaker's initials");
+	assert.match(css, /\.message-avatar \{[^}]*border-radius/u, "the placeholder has its own presentation");
+	assert.match(css, /\.message \{[^}]*grid-template-columns: 1\.75rem/u, "messages lead with the avatar column");
+});
+
+test("the room intro keeps both its heading and its explanatory paragraph", () => {
+	assert.match(html, /<h1>[^<]+<\/h1>/u, "the intro keeps a heading (its wording is the room's to change)");
+	assert.match(html, /<p>Chat with the room, or use Target, Comment, and Draw/u);
+	assert.match(html, /<span class="room-meta">shape this app together<\/span>/u);
+	assert.match(css, /\.room-intro p \{/u);
+	assert.match(css, /\.room-meta \{/u);
+});
+
 test("the error boundary falls back to the platform's frozen minimal UI", () => {
 	assert.match(html, /<meta name="ahp-fallback" content="\/fallback">/u);
 	assert.match(html, /location\.replace\(target\)/u);

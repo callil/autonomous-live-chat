@@ -17,6 +17,7 @@ body { margin: 0; font: 15px/1.5 ui-sans-serif, system-ui, sans-serif; height: 1
 
 .topbar { display: flex; justify-content: space-between; align-items: baseline; gap: .75rem; padding: .65rem 1rem; border-bottom: 1px solid var(--line); }
 .room-title { font-weight: 650; }
+.room-meta { margin-left: .5rem; font-size: .8rem; opacity: .65; }
 .topbar-status, .app-update { display: inline-flex; align-items: center; gap: .65rem; }
 .app-update { padding: .12rem .25rem .12rem .6rem; border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent); border-radius: 999px; background: color-mix(in srgb, var(--accent) 9%, Canvas); font-size: .75rem; }
 .app-update button { padding: .15rem .5rem; border: 0; border-radius: 999px; background: var(--accent); color: #fff; font: inherit; cursor: pointer; }
@@ -37,12 +38,17 @@ body { margin: 0; font: 15px/1.5 ui-sans-serif, system-ui, sans-serif; height: 1
 
 .columns { display: grid; grid-template-columns: 1fr minmax(17rem, 23rem); min-height: 0; }
 .conversation { overflow-y: auto; padding: 1rem 1.25rem; }
-.room-intro h1 { margin: .25rem 0 1rem; font-size: 1.15rem; }
-.messages { display: flex; flex-direction: column; align-items: flex-start; gap: .65rem; }
-.message { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .15rem .75rem; width: fit-content; min-width: 10rem; max-width: min(46rem, 100%); padding: .5rem .7rem; border: 1px solid var(--line); border-radius: .75rem; background: var(--soft); }
-.message .author { grid-column: 1; grid-row: 1; min-width: 0; overflow: hidden; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
-.message .message-text { grid-column: 1 / -1; grid-row: 2; overflow-wrap: anywhere; }
-.message time { grid-column: 2; grid-row: 1; align-self: center; font-size: .72rem; opacity: .55; white-space: nowrap; }
+.room-intro h1 { margin: .25rem 0; font-size: 1.15rem; }
+.room-intro p { margin: 0 0 1rem; opacity: .75; max-width: 46rem; }
+.messages { display: flex; flex-direction: column; gap: .55rem; }
+/* Each message leads with a small initials placeholder; the author name and
+   the placeholder share one generated per-user color (see room.client.js). */
+.message { display: grid; grid-template-columns: 1.75rem minmax(0, 1fr); gap: .6rem; max-width: 46rem; }
+.message-avatar { display: grid; width: 1.75rem; height: 1.75rem; place-items: center; border-radius: .5rem; background: var(--soft); font-size: .7rem; font-weight: 650; text-transform: uppercase; }
+.message-body { min-width: 0; }
+.message .author { font-weight: 600; margin-right: .45rem; }
+.message .message-text { overflow-wrap: anywhere; }
+.message time { font-size: .72rem; opacity: .55; margin-left: .4rem; }
 
 .feed-rail { border-left: 1px solid var(--line); overflow-y: auto; padding: .85rem 1rem; font-size: .82rem; }
 .rail-section h2 { margin: .2rem 0 .5rem; }
@@ -61,7 +67,7 @@ button:disabled { opacity: .5; cursor: default; }
 
 /* Overlay */
 .overlay-frame { position: fixed; inset: 0; pointer-events: none; z-index: 10; }
-.authoring-tools { position: absolute; right: 1rem; bottom: 4.5rem; display: flex; align-items: center; gap: .25rem; padding: .3rem; border-radius: 999px; background: #20242c; color: #fff; box-shadow: 0 6px 24px rgb(0 0 0 / .35); pointer-events: auto; }
+.authoring-tools { position: absolute; right: 1rem; bottom: 1rem; display: flex; align-items: center; gap: .25rem; padding: .3rem; border-radius: 999px; background: #20242c; color: #fff; box-shadow: 0 6px 24px rgb(0 0 0 / .35); pointer-events: auto; }
 .tool { font: inherit; font-size: .82rem; padding: .4rem .8rem; border: 0; border-radius: 999px; background: transparent; color: inherit; cursor: pointer; }
 .tool[aria-pressed="true"] { background: var(--accent); }
 .active-sessions { display: inline-flex; align-items: center; gap: .35rem; min-height: 1.7rem; margin-left: .2rem; padding: 0 .6rem; border-left: 1px solid rgb(255 255 255 / .2); font-size: .72rem; white-space: nowrap; }
