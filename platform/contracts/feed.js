@@ -34,6 +34,7 @@ const TEMPLATES = {
 	"run-queued": (payload) => `Run ${payload.runId} queued for intent ${payload.intentId}.`,
 	"run-started": (payload) => `Run ${payload.runId} started building.`,
 	"run-heartbeat": () => null, // Progress facts are durable but not feed lines.
+	"run-timing": () => null, // Measurement facts are durable but not feed lines.
 	"run-verifying": (payload) => `Run ${payload.runId} pushed ${clip(payload.branch, 60) || "its branch"}${Number.isSafeInteger(payload.prNumber) ? ` (PR #${payload.prNumber})` : ""} — CI is verifying.`,
 	"pr-merged": (payload) => `PR #${payload.prNumber} squash-merged at ${payload.mergeSha.slice(0, 7)} for run ${payload.runId}.`,
 	"run-merged": (payload) => `Run ${payload.runId} is live${typeof payload.mergeSha === "string" ? ` at ${payload.mergeSha.slice(0, 7)}` : ""} — the deploy was observed serving.`,

@@ -13,6 +13,7 @@ export type LedgerEventKind =
 	| "run-queued"
 	| "run-started"
 	| "run-heartbeat"
+	| "run-timing"
 	| "run-verifying"
 	| "pr-merged"
 	| "run-merged"

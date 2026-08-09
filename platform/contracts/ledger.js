@@ -34,6 +34,11 @@ export const LEDGER_EVENT_KINDS = [
 	// The builder's step heartbeats, recorded as durable progress facts. They
 	// never render in the feed and never substitute for a terminal fact.
 	"run-heartbeat",
+	// Per-phase wall-clock durations reported by the builder at the end of a
+	// run (boot/clone/agent/test/push ms) plus the tier it ran at. A pure
+	// measurement fact: it never renders in the feed and never gates anything,
+	// but it makes the fast path's cost breakdown durable and auditable.
+	"run-timing",
 	"run-verifying",
 	// The platform's exact-SHA squash merge landed on main.
 	"pr-merged",
