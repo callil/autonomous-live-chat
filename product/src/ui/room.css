@@ -1,5 +1,5 @@
 /* The room UI (product surface — agent-editable). Kept dependency-free and
-   adaptive to light/dark; the overlay chrome sits above the app. */
+   adaptive to light/dark; the overlay chrome sits around the app. */
 :root {
   color-scheme: light dark;
   --line: color-mix(in srgb, currentColor 16%, transparent);
@@ -13,13 +13,24 @@
    and leave the join scrim covering the room forever. */
 [hidden] { display: none !important; }
 body { margin: 0; font: 15px/1.5 ui-sans-serif, system-ui, sans-serif; height: 100dvh; }
-.app { display: grid; grid-template-rows: auto 1fr auto; height: 100dvh; }
+.app { display: grid; grid-template-rows: auto auto 1fr auto; height: 100dvh; }
 
 .topbar { display: flex; justify-content: space-between; align-items: baseline; padding: .65rem 1rem; border-bottom: 1px solid var(--line); }
 .room-title { font-weight: 650; }
 .connection { display: inline-flex; align-items: center; gap: .4rem; font-size: .8rem; opacity: .8; }
 .dot { width: .5rem; height: .5rem; border-radius: 50%; background: #c9822f; display: inline-block; }
 .dot.live { background: var(--live); }
+
+/* The queue is harness chrome above the app rather than content competing
+   with the app in the feed rail. */
+.queue-bar { display: flex; align-items: center; gap: .65rem; min-height: 2.65rem; padding: .45rem 1rem; border-bottom: 1px solid var(--line); background: var(--soft); font-size: .8rem; overflow-x: auto; }
+.queue-bar h2, .rail-section h2 { margin: 0; flex: 0 0 auto; font-size: .72rem; text-transform: uppercase; letter-spacing: .08em; opacity: .6; }
+.queue-chips { display: flex; align-items: center; flex: 0 0 auto; }
+.queue-chips:empty::after { content: "The build lane is idle."; opacity: .55; }
+.queue-chip { display: inline-block; margin-right: .3rem; padding: .12rem .55rem; border: 1px solid var(--line); border-radius: 999px; background: Canvas; }
+.pending-acks { display: flex; align-items: center; gap: .35rem; }
+.pending-ack { display: flex; align-items: center; white-space: nowrap; padding: .2rem .55rem; border: 1px solid var(--accent); border-radius: 999px; }
+.pending-ack button { margin-left: .5rem; font: inherit; border: 0; background: transparent; color: var(--accent); cursor: pointer; text-decoration: underline; }
 
 .columns { display: grid; grid-template-columns: 1fr minmax(17rem, 23rem); min-height: 0; }
 .conversation { overflow-y: auto; padding: 1rem 1.25rem; }
@@ -31,11 +42,7 @@ body { margin: 0; font: 15px/1.5 ui-sans-serif, system-ui, sans-serif; height: 1
 .message time { grid-column: 2; grid-row: 1; align-self: center; font-size: .72rem; opacity: .55; white-space: nowrap; }
 
 .feed-rail { border-left: 1px solid var(--line); overflow-y: auto; padding: .85rem 1rem; font-size: .82rem; }
-.rail-section h2 { margin: .2rem 0 .5rem; font-size: .72rem; text-transform: uppercase; letter-spacing: .08em; opacity: .6; }
-.queue-chips:empty::after { content: "The build lane is idle."; opacity: .55; }
-.queue-chip { display: inline-block; margin: 0 .3rem .3rem 0; padding: .12rem .55rem; border: 1px solid var(--line); border-radius: 999px; background: var(--soft); }
-.pending-ack { margin: .35rem 0; padding: .45rem .6rem; border: 1px solid var(--accent); border-radius: .5rem; }
-.pending-ack button { margin-left: .5rem; font: inherit; border: 0; background: transparent; color: var(--accent); cursor: pointer; text-decoration: underline; }
+.rail-section h2 { margin: .2rem 0 .5rem; }
 .feed-items { list-style: none; margin: 0; padding: 0; }
 .feed-items li { margin: 0 0 .45rem; padding: .45rem .6rem; border: 1px solid var(--line); border-radius: .5rem; background: var(--soft); }
 .feed-items li.kind-run-merged, .feed-items li.kind-deploy-observed { border-color: var(--live); }
@@ -51,11 +58,14 @@ button:disabled { opacity: .5; cursor: default; }
 
 /* Overlay */
 .overlay-frame { position: fixed; inset: 0; pointer-events: none; z-index: 10; }
-/* Keep the floating controls above the chat composer so they cannot cover its
-   Send button. The request composer sits above this toolbar in turn. */
-.authoring-tools { position: absolute; right: 1rem; bottom: 4.5rem; display: flex; gap: .25rem; padding: .3rem; border-radius: 999px; background: #20242c; color: #fff; box-shadow: 0 6px 24px rgb(0 0 0 / .35); pointer-events: auto; }
+.authoring-tools { position: absolute; right: 1rem; bottom: 4.5rem; display: flex; align-items: center; gap: .25rem; padding: .3rem; border-radius: 999px; background: #20242c; color: #fff; box-shadow: 0 6px 24px rgb(0 0 0 / .35); pointer-events: auto; }
 .tool { font: inherit; font-size: .82rem; padding: .4rem .8rem; border: 0; border-radius: 999px; background: transparent; color: inherit; cursor: pointer; }
 .tool[aria-pressed="true"] { background: var(--accent); }
+.active-sessions { display: inline-flex; align-items: center; gap: .35rem; min-height: 1.7rem; margin-left: .2rem; padding: 0 .6rem; border-left: 1px solid rgb(255 255 255 / .2); font-size: .72rem; white-space: nowrap; }
+.queue-status-dot { display: inline-block; width: .5rem; height: .5rem; border-radius: 50%; background: #77808f; }
+.queue-status-dot.is-busy { background: var(--live); animation: queue-pulse 1.4s ease-out infinite; }
+@keyframes queue-pulse { 0% { box-shadow: 0 0 0 0 rgb(47 180 107 / .7); } 70%, 100% { box-shadow: 0 0 0 .45rem rgb(47 180 107 / 0); } }
+@media (prefers-reduced-motion: reduce) { .queue-status-dot.is-busy { animation: none; } }
 .draw-layer { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
 body.mode-draw .draw-layer { pointer-events: auto; cursor: crosshair; }
 .draw-layer path { fill: none; stroke: var(--accent); stroke-width: 3; stroke-linecap: round; }
@@ -77,4 +87,4 @@ body.mode-target, body.mode-comment { cursor: crosshair; }
 .join-card h2 { margin: 0 0 .25rem; font-size: 1rem; }
 .join-card input { font: inherit; padding: .5rem .6rem; border-radius: .5rem; border: 1px solid var(--line); background: transparent; color: inherit; }
 
-@media (max-width: 52rem) { .columns { grid-template-columns: 1fr; } .feed-rail { display: none; } }
+@media (max-width: 52rem) { .columns { grid-template-columns: 1fr; } .feed-rail { display: none; } .queue-bar { padding-inline: .75rem; } .authoring-tools { right: .5rem; } }

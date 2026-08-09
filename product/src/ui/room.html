@@ -29,6 +29,11 @@
     </span>
     <span class="connection"><i class="dot" id="dot"></i><span id="connection">Connecting</span></span>
   </header>
+  <section class="queue-bar" id="queue-section" aria-label="Build queue">
+    <h2>Build queue</h2>
+    <div class="queue-chips" id="queue-chips"></div>
+    <div class="pending-acks" id="pending-acks"></div>
+  </section>
   <main class="columns">
     <section class="conversation" aria-live="polite">
       <div class="room-intro">
@@ -37,11 +42,6 @@
       <div class="messages" id="messages"></div>
     </section>
     <aside class="feed-rail" aria-label="Build feed">
-      <div class="rail-section" id="queue-section">
-        <h2>Build queue</h2>
-        <div class="queue-chips" id="queue-chips"></div>
-        <div class="pending-acks" id="pending-acks"></div>
-      </div>
       <div class="rail-section">
         <h2>Live feed</h2>
         <ol class="feed-items" id="feed-items"></ol>
@@ -59,6 +59,7 @@
     <button class="tool" id="tool-target" type="button" aria-pressed="false" title="Target an element and request a change">Target</button>
     <button class="tool" id="tool-comment" type="button" aria-pressed="false" title="Comment on an element">Comment</button>
     <button class="tool" id="tool-draw" type="button" aria-pressed="false" title="Draw feedback">Draw</button>
+    <span class="active-sessions" id="active-sessions" aria-live="polite" title="Active build sessions"><i class="queue-status-dot" id="queue-status-dot"></i><span id="active-session-count">0</span> active</span>
   </div>
   <form class="request-composer" id="request-composer" hidden aria-label="Change request">
     <span class="request-context" id="request-context"></span>
