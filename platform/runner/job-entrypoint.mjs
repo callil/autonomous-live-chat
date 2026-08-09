@@ -12,6 +12,10 @@ import { writeFileSync } from "node:fs";
  * observed deploy.
  */
 
+// The first instruction of the process: everything before the clone (module
+// load, request read, validation) is charged to bootMs.
+const processStartedAt = Date.now();
+
 // Boot heartbeat: written before ANY other work — the first observable line of
 // this process. startRun polls for this file; its absence means the job died
 // before its first line, which becomes an immediate classified refusal.
@@ -72,7 +76,7 @@ function safeCallback(value) {
 
 function safeRequest(input) {
 	if (!input || typeof input !== "object") return null;
-	const { repository, runId, attemptId, intentId, branch, evidence, feedUrl, model, checkoutDirectory } = input;
+	const { repository, runId, attemptId, intentId, branch, evidence, feedUrl, model, tier, checkoutDirectory } = input;
 	if (typeof repository !== "string" || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(repository)) return null;
 	if (typeof runId !== "string" || !IDENTIFIER.test(runId) || typeof attemptId !== "string" || !IDENTIFIER.test(attemptId)) return null;
 	if (typeof intentId !== "string" || !IDENTIFIER.test(intentId)) return null;
@@ -83,7 +87,26 @@ function safeRequest(input) {
 	if (!evidence || typeof evidence !== "object" || typeof evidence.requestText !== "string" || typeof evidence.requestedBy !== "string" || !AUTHOR.test(evidence.requestedBy) || !Array.isArray(evidence.annotations)) return null;
 	const callback = safeCallback(input.callback);
 	if (!callback) return null;
-	return { repository, runId, attemptId, intentId, branch, evidence, feedUrl, model, checkoutDirectory, callback };
+	// An unrecognised tier takes the normal budget; the job never guesses cheap.
+	return { repository, runId, attemptId, intentId, branch, evidence, feedUrl, model, tier: tier === "small" ? "small" : "normal", checkoutDirectory, callback };
+}
+
+/**
+ * Per-tier agent budgets, mirroring platform/contracts/tier.js. Smalls get low
+ * reasoning effort, a tighter tool ceiling, and no repository tree in the
+ * prompt — the annotation's data-loc anchor already names the file. Nothing
+ * here relaxes the local gate, CI, or the write firewall.
+ */
+const TIER_BUDGETS = {
+	small: { effort: "low", maxToolCalls: 6, includeTree: false },
+	normal: { effort: "medium", maxToolCalls: 12, includeTree: true },
+};
+
+/** Per-phase wall clock, reported on the terminal callback as a run-timing fact. */
+const timings = {};
+async function timed(phase, work) {
+	const started = Date.now();
+	try { return await work(); } finally { timings[phase] = Date.now() - started; }
 }
 
 // Every step transition is appended here and rides along on the terminal
@@ -273,10 +296,14 @@ async function main() {
 	if (!request) throw new Error("input-invalid");
 	terminalCallback = request.callback;
 	appendProgress("request-validated");
+	// Everything up to here is process boot: module load, request read, validate.
+	timings.bootMs = Date.now() - processStartedAt;
 
 	// Always from LATEST main: the singleton pipeline previews every change
 	// against the actual composed state.
-	const clone = await run("git", ["clone", "--branch", "main", `https://github.com/${request.repository}.git`, request.checkoutDirectory], { timeoutMs: CLONE_TIMEOUT_MS });
+	// A shallow single-branch clone: this pipeline only ever builds from the tip
+	// of main, so the full history is bytes on the critical path for nothing.
+	const clone = await timed("cloneMs", () => run("git", ["clone", "--depth", "1", "--single-branch", "--branch", "main", `https://github.com/${request.repository}.git`, request.checkoutDirectory], { timeoutMs: CLONE_TIMEOUT_MS }));
 	if (!clone.success) return failure(classifyGitTransportFailure(clone.stderr), stderrTail(clone));
 	const base = await run("git", ["-C", request.checkoutDirectory, "rev-parse", "HEAD"], { timeoutMs: GIT_TIMEOUT_MS });
 	const baseSha = base.stdout.trim();
@@ -287,13 +314,17 @@ async function main() {
 	if (!branched.success) return failure("branch-create-failed", stderrTail(branched));
 
 	postHeartbeat("agent-started");
+	const budgets = TIER_BUDGETS[request.tier] ?? TIER_BUDGETS.normal;
 	const agentInput = JSON.stringify({
 		prompt: buildAgentPrompt(request.evidence),
 		instructions: buildAgentInstructions(request),
 		cwd: request.checkoutDirectory,
 		model: request.model,
+		effort: budgets.effort,
+		maxToolCalls: budgets.maxToolCalls,
+		includeTree: budgets.includeTree,
 	});
-	const agentExecution = await run("node", ["/opt/app-harness/agent-entrypoint.mjs"], { cwd: request.checkoutDirectory, input: agentInput, timeoutMs: AGENT_TIMEOUT_MS });
+	const agentExecution = await timed("agentMs", () => run("node", ["/opt/app-harness/agent-entrypoint.mjs"], { cwd: request.checkoutDirectory, input: agentInput, timeoutMs: AGENT_TIMEOUT_MS }));
 	const agent = parseAgentSummary(agentExecution.stdout);
 	postHeartbeat("agent-done");
 	if (!agentExecution.success || !agent?.ok) {
@@ -321,18 +352,18 @@ async function main() {
 	// Local fast-fail gate BEFORE anything is pushed: the product's own test
 	// file is the cheapest honest signal a candidate is broken.
 	postHeartbeat("local-tests");
-	const localTests = await run("node", ["product/test/ui-contract.test.mjs"], { cwd: request.checkoutDirectory, timeoutMs: LOCAL_TEST_TIMEOUT_MS });
+	const localTests = await timed("testMs", () => run("node", ["product/test/ui-contract.test.mjs"], { cwd: request.checkoutDirectory, timeoutMs: LOCAL_TEST_TIMEOUT_MS }));
 	if (!localTests.success) return failure(localTests.stderr === "step-timeout" ? "local-tests-timeout" : "local-tests-failed", stderrTail(localTests));
 	postHeartbeat("local-tests-passed");
 
-	const pushed = await run("git", ["-C", request.checkoutDirectory, "push", "origin", `${request.branch}:${request.branch}`], { timeoutMs: GIT_TIMEOUT_MS });
+	const pushed = await timed("pushMs", () => run("git", ["-C", request.checkoutDirectory, "push", "origin", `${request.branch}:${request.branch}`], { timeoutMs: GIT_TIMEOUT_MS }));
 	if (!pushed.success) return failure(classifyGitTransportFailure(pushed.stderr), stderrTail(pushed));
 	postHeartbeat("pushed");
 
 	// Plain PR against main — no stacks, and no merge automation armed here:
 	// the PLATFORM merges at the exact verified head SHA once CI is green.
 	const title = (request.evidence.requestText.split("\n")[0].trim() || `Live-room change ${request.intentId}`).slice(0, 100);
-	const created = await run("gh", ["pr", "create", "--base", "main", "--head", request.branch, "--title", title, "--body", pullRequestBody(request, agent.summary)], { cwd: request.checkoutDirectory, timeoutMs: GH_TIMEOUT_MS });
+	const created = await timed("prMs", () => run("gh", ["pr", "create", "--base", "main", "--head", request.branch, "--title", title, "--body", pullRequestBody(request, agent.summary)], { cwd: request.checkoutDirectory, timeoutMs: GH_TIMEOUT_MS }));
 	if (!created.success) return failure("pull-request-create-failed", stderrTail(created));
 	const urlMatch = created.stdout.match(/\/pull\/(\d{1,9})\s*$/u) ?? created.stdout.match(/\/pull\/(\d{1,9})/u);
 	let prNumber = urlMatch ? Number.parseInt(urlMatch[1], 10) : null;
@@ -344,7 +375,7 @@ async function main() {
 	}
 	postHeartbeat("pr-opened");
 
-	return { state: "verifying", branch: request.branch, prNumber, headSha };
+	return { state: "verifying", branch: request.branch, prNumber, headSha, tier: request.tier, timings: { ...timings, totalMs: Date.now() - processStartedAt } };
 }
 
 // A wedged child process must never exceed the run budget silently: emit a

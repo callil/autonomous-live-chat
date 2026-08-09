@@ -6,3 +6,4 @@ export * from "./feed.js";
 export * from "./checks.js";
 export * from "./reconcile.js";
 export * from "./session.js";
+export * from "./tier.js";

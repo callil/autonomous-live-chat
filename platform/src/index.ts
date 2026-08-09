@@ -27,6 +27,7 @@ import {
 	type Intent,
 } from "../contracts/intent.js";
 import { cancelDeadline, parseRequestEnvelope } from "../contracts/envelope.js";
+import { classifyRunTier, type RunTier } from "../contracts/tier.js";
 import { renderFeed, renderFeedItem, renderQueueChips } from "../contracts/feed.js";
 import { classifyCheckRuns, includesMigrationMarker } from "../contracts/checks.js";
 import { decide, type ReconcileAction } from "../contracts/reconcile.js";
@@ -76,6 +77,14 @@ const DOCTOR_QUEUE_KEY = "doctor-queue";
 
 /** Level-triggered cadence: the reconciler re-reads state every minute no matter what. */
 const RECONCILE_INTERVAL_MS = 60_000;
+/**
+ * The idle cadence is a safety net, not a pipeline clock. While a run is
+ * actually waiting on an external system — CI to go green, the deploy to serve
+ * the merged SHA — the reconciler re-reads on this much tighter cadence, so a
+ * missed or delayed webhook costs seconds instead of most of a minute. Webhook
+ * pokes remain the fast path; this is what makes the polling floor honest.
+ */
+const ACTIVE_RECONCILE_INTERVAL_MS = 5_000;
 /** How soon a poke pulls the reconciler forward. */
 const POKE_DELAY_MS = 1_000;
 /** Snapshot depth for a fresh connection; older history pages via feed:history. */
@@ -108,6 +117,28 @@ const utf8Bytes = (value: string): number => encoder.encode(value).byteLength;
 
 function budgetDay(now: number): string {
 	return new Date(now).toISOString().slice(0, 10);
+}
+
+/** The per-phase durations a run-timing fact may carry. */
+const TIMING_PHASES = ["bootMs", "cloneMs", "agentMs", "testMs", "pushMs", "prMs", "totalMs"] as const;
+/** A day of milliseconds: any "duration" beyond this is a broken clock, not a slow run. */
+const MAX_TIMING_MS = 86_400_000;
+
+/**
+ * Accept only sane, bounded per-phase durations from the builder's report.
+ * Timings are measurement, not truth the pipeline acts on, so anything
+ * malformed is dropped rather than allowed to poison the ledger.
+ */
+function sanitizeTimings(value: unknown): Record<string, number> | null {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+	const source = value as Record<string, unknown>;
+	const timing: Record<string, number> = {};
+	for (const phase of TIMING_PHASES) {
+		const raw = source[phase];
+		if (typeof raw !== "number" || !Number.isFinite(raw) || raw < 0 || raw > MAX_TIMING_MS) continue;
+		timing[phase] = Math.round(raw);
+	}
+	return Object.keys(timing).length ? timing : null;
 }
 
 /**
@@ -170,7 +201,23 @@ export class RoomDO extends DurableObject<RuntimeEnv> {
 
 	async alarm(): Promise<void> {
 		await this.reconcile();
-		await this.scheduleReconcile(Date.now() + RECONCILE_INTERVAL_MS);
+		await this.scheduleReconcile(Date.now() + (await this.nextReconcileDelayMs()));
+	}
+
+	/**
+	 * How long until the reconciler MUST look again. A run parked on an
+	 * external system (CI verdict, deploy observation) is polled tightly; an
+	 * idle room falls back to the minute cadence. This only ever schedules the
+	 * alarm — every decision still comes from re-read durable state, so the
+	 * cadence can never change what the reconciler concludes, only how soon.
+	 */
+	private async nextReconcileDelayMs(): Promise<number> {
+		const active = (await this.loadQueue()).find((run) => run.state === "verifying" || run.state === "deploying");
+		if (active) return ACTIVE_RECONCILE_INTERVAL_MS;
+		// A pending revert is also waiting on an observation.
+		const revert = await this.ctx.storage.get<RevertRecord>(REVERT_KEY);
+		if (revert) return ACTIVE_RECONCILE_INTERVAL_MS;
+		return RECONCILE_INTERVAL_MS;
 	}
 
 	private socketIdentity(socket: WebSocket): { id: string; name: string } | null {
@@ -257,6 +304,10 @@ export class RoomDO extends DurableObject<RuntimeEnv> {
 					queue = beginVerifying(queue, { runId, attemptId, at: now, verification });
 					await this.ctx.storage.put(QUEUE_KEY, queue);
 					await this.appendEvent("run-verifying", { runId, intentId: run.intentId, ...verification }, now);
+					// Measurement rides alongside the terminal report, never gating
+					// it: a malformed timings block costs the fact, not the run.
+					const timing = sanitizeTimings(input.timings);
+					if (timing) await this.appendEvent("run-timing", { runId, intentId: run.intentId, tier: input.tier === "small" ? "small" : "normal", ...timing }, now);
 				} else {
 					const reason = typeof input.reason === "string" ? input.reason.slice(0, 500) : "unspecified";
 					queue = completeRun(queue, { runId, attemptId, state: "failed", at: now, detail: reason });
@@ -481,13 +532,16 @@ export class RoomDO extends DurableObject<RuntimeEnv> {
 		// from latest main. No stacks, no parents, no expected order.
 		const intentSeq = intent && Number.isSafeInteger(intent.openSeq) ? intent.openSeq : 0;
 		const branch = `room/${intentSeq}/${attemptId.slice(8, 16)}`;
+		// Sizing is deterministic and recorded, so error rates by tier stay
+		// measurable. It tunes only the agent's own budgets — never the gates.
+		const tier = this.runTier(evidence);
 		await this.ctx.storage.transaction(async () => {
 			const current = startRun(await this.loadQueue(), { runId: head.runId, attemptId, startedAt: now });
 			await this.ctx.storage.put(QUEUE_KEY, current);
 			await this.ctx.storage.put(BUDGET_KEY, { ...budget, spentUsd: budget.spentUsd + ESTIMATED_RUN_COST_USD } satisfies BudgetRecord);
-			await this.appendEvent("run-started", { runId: head.runId, intentId: head.intentId, attemptId, branch }, now);
+			await this.appendEvent("run-started", { runId: head.runId, intentId: head.intentId, attemptId, branch, tier }, now);
 		});
-		const result = await this.startRunViaPort({ runId: head.runId, attemptId, intentId: head.intentId, branch, evidence });
+		const result = await this.startRunViaPort({ runId: head.runId, attemptId, intentId: head.intentId, branch, evidence, tier });
 		if (result.accepted) return;
 		await this.ctx.storage.transaction(async () => {
 			let current = await this.loadQueue();
@@ -499,7 +553,7 @@ export class RoomDO extends DurableObject<RuntimeEnv> {
 	}
 
 	/** Mint the per-dispatch Git credential and hand the runner its complete job. */
-	private async startRunViaPort(input: { runId: string; attemptId: string; intentId: string; branch: string; evidence: { requestText: string; requestedBy: string; annotations: unknown[] } }): Promise<{ accepted: true } | { accepted: false; reason: string }> {
+	private async startRunViaPort(input: { runId: string; attemptId: string; intentId: string; branch: string; evidence: { requestText: string; requestedBy: string; annotations: unknown[] }; tier: RunTier }): Promise<{ accepted: true } | { accepted: false; reason: string }> {
 		const app = this.githubApp();
 		if (!app) return { accepted: false, reason: "github-app-not-configured" };
 		let gitToken: string;
@@ -537,7 +591,15 @@ export class RoomDO extends DurableObject<RuntimeEnv> {
 		}
 		// Green: derive the deterministic migration marker from the real diff,
 		// then merge exactly the verified head SHA — nothing else can ride in.
-		const migration = includesMigrationMarker(await app.listChangedFiles(action.prNumber));
+		const changedFiles = await app.listChangedFiles(action.prNumber);
+		const migration = includesMigrationMarker(changedFiles);
+		// deploy-product.yml also triggers on pushes to main under product/**.
+		// When the merge touches that path the push trigger already covers it,
+		// and dispatching as well produced a second identical run that queued
+		// behind the first on the deploy concurrency group — pure tail on the
+		// observed-deploy path. Dispatch only when the push trigger will NOT
+		// fire, so a deploy always has exactly one cause.
+		const pushTriggerCovers = changedFiles.some((file) => file.startsWith("product/"));
 		const merge = await app.squashMerge(action.prNumber, action.headSha);
 		if (!merge.merged) {
 			const detail = `GitHub refused the exact-SHA squash merge (${merge.reason}).`;
@@ -559,8 +621,11 @@ export class RoomDO extends DurableObject<RuntimeEnv> {
 			await this.appendEvent("pr-merged", { runId: action.runId, intentId: run.intentId, prNumber: action.prNumber, mergeSha: merge.mergeSha }, now);
 			await this.appendEvent("deploy-requested", { sha: merge.mergeSha, runId: action.runId }, now);
 		});
-		// Dispatch the deploy leg. Best effort: the push-to-main trigger on the
-		// same workflow is the backstop, and observe-deploy polls /version either way.
+		// Dispatch the deploy leg only when the push trigger will not already do
+		// it. Either way observe-deploy is the sole authority on "Live": it polls
+		// /version until the merged SHA is actually served, so a missed trigger
+		// costs the run its deploy TTL and parks honestly rather than hanging.
+		if (pushTriggerCovers) return;
 		try {
 			await app.dispatchWorkflow(DEPLOY_WORKFLOW_FILE, { sha: merge.mergeSha });
 		} catch (error) {
@@ -660,6 +725,21 @@ export class RoomDO extends DurableObject<RuntimeEnv> {
 			if (event.kind === "request-accepted" && typeof event.payload.text === "string") requestText = event.payload.text;
 		}
 		return { requestText, requestedBy: intent.openedBy, annotations };
+	}
+
+	/**
+	 * Size this run from durable evidence alone: the envelope kind carried by
+	 * the anchoring annotation, the verbatim request text, and how many anchors
+	 * the intent collected. Deterministic — the same facts always pick the same
+	 * tier — and biased to "normal" whenever smallness is not positively proven.
+	 */
+	private runTier(evidence: { requestText: string; annotations: unknown[] }): RunTier {
+		const first = evidence.annotations[0] as { annotation?: { kind?: unknown } } | undefined;
+		return classifyRunTier({
+			kind: first?.annotation?.kind,
+			text: evidence.requestText,
+			annotationCount: evidence.annotations.length,
+		});
 	}
 
 	private async handleChat(socket: WebSocket, message: Extract<ClientMessage, { type: "chat:send" }>, identity: { id: string; name: string }): Promise<void> {
@@ -851,7 +931,7 @@ export class RoomDO extends DurableObject<RuntimeEnv> {
 		return Number.isFinite(parsed) && parsed >= 0 ? parsed : DEFAULT_DAILY_BUDGET_USD;
 	}
 
-	/** Only ever pulls the alarm EARLIER; the steady 60s cadence is the floor. */
+	/** Only ever pulls the alarm EARLIER; the cadence chosen by the caller is the floor. */
 	private async scheduleReconcile(at: number): Promise<void> {
 		const existing = await this.ctx.storage.getAlarm();
 		if (existing !== null && existing <= at) return;

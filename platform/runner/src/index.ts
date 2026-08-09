@@ -30,6 +30,7 @@ type RunnerDispatch = {
 	evidence?: unknown;
 	feedUrl?: unknown;
 	gitToken?: unknown;
+	tier?: unknown;
 };
 
 type SafeDispatch = {
@@ -40,6 +41,7 @@ type SafeDispatch = {
 	evidence: { requestText: string; requestedBy: string; annotations: unknown[] };
 	feedUrl: string;
 	gitToken: string;
+	tier: "small" | "normal";
 };
 
 type DispatchResult = { accepted: true } | { accepted: false; reason: string };
@@ -72,7 +74,7 @@ async function deterministicId(scope: string): Promise<string> {
 }
 
 function safeDispatch(input: RunnerDispatch): SafeDispatch | null {
-	const { runId, attemptId, intentId, branch, evidence, feedUrl, gitToken } = input;
+	const { runId, attemptId, intentId, branch, evidence, feedUrl, gitToken, tier } = input;
 	if (typeof runId !== "string" || !IDENTIFIER.test(runId)) return null;
 	if (typeof attemptId !== "string" || !IDENTIFIER.test(attemptId)) return null;
 	if (typeof intentId !== "string" || !IDENTIFIER.test(intentId)) return null;
@@ -90,6 +92,9 @@ function safeDispatch(input: RunnerDispatch): SafeDispatch | null {
 		evidence: { requestText: requestText.slice(0, MAX_REQUEST_TEXT_CHARS), requestedBy, annotations: annotations.slice(0, MAX_ANNOTATIONS) },
 		feedUrl,
 		gitToken,
+		// An unrecognised or absent tier takes the normal budget: the runner
+		// never guesses cheap.
+		tier: tier === "small" ? "small" : "normal",
 	};
 }
 
@@ -168,6 +173,7 @@ export class PlatformRunner extends WorkerEntrypoint<RunnerEnv> {
 			evidence: dispatch.evidence,
 			feedUrl: dispatch.feedUrl,
 			model: this.env.AGENT_MODEL ?? DEFAULT_AGENT_MODEL,
+			tier: dispatch.tier,
 			checkoutDirectory,
 			callback: { url: callbackUrl, runId: dispatch.runId, attemptId: dispatch.attemptId },
 		};

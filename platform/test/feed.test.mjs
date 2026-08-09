@@ -20,6 +20,7 @@ test("every ledger event kind has a deterministic template", () => {
 		"run-queued": { runId: "run-1", intentId: "intent-1" },
 		"run-started": { runId: "run-1", intentId: "intent-1", attemptId: "attempt-1", branch: "room/12/abcd1234" },
 		"run-heartbeat": { runId: "run-1", intentId: "intent-1", step: "cloned" },
+		"run-timing": { runId: "run-1", intentId: "intent-1", tier: "small", bootMs: 900, cloneMs: 400, agentMs: 21_000, testMs: 40, pushMs: 5_000, totalMs: 27_340 },
 		"run-verifying": { runId: "run-1", intentId: "intent-1", branch: "room/12/abcd1234", prNumber: 7, headSha: "a".repeat(40) },
 		"pr-merged": { runId: "run-1", intentId: "intent-1", prNumber: 7, mergeSha: "e".repeat(40) },
 		"run-merged": { runId: "run-1", intentId: "intent-1", mergeSha: "e".repeat(40) },
@@ -36,7 +37,7 @@ test("every ledger event kind has a deterministic template", () => {
 		"budget-exhausted": { day: "2026-08-09" },
 		"doctor-note": { note: "The deploy crossed a migration; a human needs to look." },
 	};
-	const silentKinds = new Set(["utterance", "run-heartbeat"]);
+	const silentKinds = new Set(["utterance", "run-heartbeat", "run-timing"]);
 	for (const kind of LEDGER_EVENT_KINDS) {
 		assert.ok(kind in payloads, `test coverage for ${kind}`);
 		const item = renderFeedItem(createLedgerEvent({ seq: 1, kind, at: 1, payload: payloads[kind] }));

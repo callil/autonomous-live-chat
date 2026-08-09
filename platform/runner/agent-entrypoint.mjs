@@ -14,10 +14,10 @@ const AGENT_MODEL = "gpt-5.6-sol";
 // the direct-API analogue of the old JSONL inactivity watchdog.
 const AGENT_WALL_CLOCK_MS = 240_000;
 const MODEL_REQUEST_TIMEOUT_MS = Number(process.env.AGENT_REQUEST_TIMEOUT_MS_OVERRIDE) || 120_000;
-// The bounded loop: at most 12 tool executions, and a few extra model turns so
-// the final no-tool answer after the twelfth call is still reachable.
-const MAX_TOOL_CALLS = Number(process.env.AGENT_MAX_TOOL_CALLS_OVERRIDE) || 12;
-const MAX_MODEL_CALLS = MAX_TOOL_CALLS + 4;
+// The bounded loop: at most this many tool executions, and a few extra model
+// turns so the final no-tool answer after the last call is still reachable.
+// The dispatch's per-tier budget narrows this; it can never widen it.
+const MAX_TOOL_CALLS_CEILING = Number(process.env.AGENT_MAX_TOOL_CALLS_OVERRIDE) || 12;
 const MODEL_RETRY_BACKOFF_MS = Number(process.env.AGENT_RETRY_BACKOFF_MS_OVERRIDE) || 4_000;
 const MAX_FILE_BYTES = 256_000;
 const MAX_TOOL_RESULT_BYTES = 24_000;
@@ -84,6 +84,17 @@ if (
 
 const apiKey = process.env.OPENAI_API_KEY;
 if (typeof apiKey !== "string" || !apiKey) await fail("agent-credential-missing");
+
+// Per-tier budgets from the dispatch. Each one may only TIGHTEN the ceiling:
+// a malformed or oversized request can never buy itself a bigger budget.
+const EFFORT = request.effort === "low" ? "low" : "medium";
+const MAX_TOOL_CALLS = Number.isSafeInteger(request.maxToolCalls)
+	? Math.max(1, Math.min(request.maxToolCalls, MAX_TOOL_CALLS_CEILING))
+	: MAX_TOOL_CALLS_CEILING;
+const MAX_MODEL_CALLS = MAX_TOOL_CALLS + 4;
+// Smalls skip the repository tree: the annotation's data-loc anchor already
+// names the file, so the tree is prompt weight that buys nothing.
+const INCLUDE_TREE = request.includeTree !== false;
 
 const root = resolve(request.cwd);
 const startedAt = Date.now();
@@ -268,14 +279,23 @@ const system = [
 	"",
 	"You operate through exactly three tools: read_file, write_file, and list_dir.",
 	"You have no shell, no network, no package manager, and no Git. Do not claim to have run tests, builds, or commands; the execution harness commits your staged writes and CI validates them.",
-	"Explore with list_dir and read_file before editing. write_file stages a whole replacement file, so read a file before rewriting it.",
+	INCLUDE_TREE
+		? "Explore with list_dir and read_file before editing. write_file stages a whole replacement file, so read a file before rewriting it."
+		: "Go straight to the file the annotation's data-loc ref names: read it, then write it. write_file stages a whole replacement file, so read a file before rewriting it. Do not survey the repository — list_dir is available if the anchor turns out to be wrong, not as a first step.",
 	"Never read, print, copy, or reproduce credentials, tokens, or private keys. Paths containing them are blocked and you must not attempt to reach them.",
 	`You have a hard budget of ${MAX_TOOL_CALLS} tool calls. Make the smallest coherent change that satisfies the request, then answer in plain text (no tool call) with one or two sentences describing what changed.`,
 ].join("\n");
 
-const tree = await boundedTree();
+// The tree is only walked when it will actually ride the prompt: for a small
+// run it is neither computed nor sent.
+const tree = INCLUDE_TREE ? await boundedTree() : null;
 const transcript = [
-	{ role: "user", content: `${request.prompt}\n\nRepository tree (bounded to ${MAX_TREE_ENTRIES} entries, depth ${MAX_TREE_DEPTH}):\n${tree}` },
+	{
+		role: "user",
+		content: tree === null
+			? `${request.prompt}\n\nThis is a small, tightly-scoped change. The annotation's data-loc ref above names the exact source file and line: read that file first and edit it directly. Do not survey the repository.`
+			: `${request.prompt}\n\nRepository tree (bounded to ${MAX_TREE_ENTRIES} entries, depth ${MAX_TREE_DEPTH}):\n${tree}`,
+	},
 ];
 let toolCalls = 0;
 let modelCalls = 0;
@@ -301,7 +321,7 @@ try {
 			// transcript as encrypted content and MUST be replayed between tool
 			// calls, or the model loses its chain of thought.
 			include: ["reasoning.encrypted_content"],
-			reasoning: { effort: request.effort === "low" ? "low" : "medium" },
+			reasoning: { effort: EFFORT },
 			max_output_tokens: 25_000,
 		});
 

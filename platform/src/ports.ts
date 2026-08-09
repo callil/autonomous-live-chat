@@ -18,6 +18,12 @@ export type RunnerDispatch = {
 	feedUrl: string;
 	/** Short-lived GitHub App installation token minted by the platform for this dispatch. */
 	gitToken: string;
+	/**
+	 * The deterministic size class for this run. It tunes only the agent's own
+	 * budgets (reasoning effort, tool ceiling, whether the repository tree
+	 * rides the prompt) — never the local gate, never CI, never the firewall.
+	 */
+	tier: "small" | "normal";
 };
 
 export type RunnerDispatchResult =

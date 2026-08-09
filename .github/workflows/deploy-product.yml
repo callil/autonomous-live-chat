@@ -24,6 +24,12 @@ on:
 
 permissions: {}
 
+# ONE global group on purpose. Deploys of different revisions — including a
+# revert of a prior good SHA racing a forward deploy — must never overlap:
+# whichever finished last would silently become the live one. The duplicate
+# same-SHA run costs some tail, but it is collapsed at the source instead (the
+# reconciler no longer dispatches when the push trigger already covers the
+# merge), which removes the waste without weakening this ordering guarantee.
 concurrency:
   group: app-harness-product-deploy
   cancel-in-progress: false
