@@ -17,23 +17,29 @@ test("every ledger event kind has a deterministic template", () => {
 		"intent-parked": { intentId: "intent-1", reason: "run-ttl-exceeded" },
 		"intent-withdrawn": { intentId: "intent-1" },
 		"run-queued": { runId: "run-1", intentId: "intent-1" },
-		"run-started": { runId: "run-1", intentId: "intent-1", attemptId: "attempt-1" },
-		"run-verifying": { runId: "run-1", intentId: "intent-1" },
-		"run-merged": { runId: "run-1", intentId: "intent-1", headSha: "a".repeat(40) },
+		"run-started": { runId: "run-1", intentId: "intent-1", attemptId: "attempt-1", branch: "room/12/abcd1234" },
+		"run-heartbeat": { runId: "run-1", intentId: "intent-1", step: "cloned" },
+		"run-verifying": { runId: "run-1", intentId: "intent-1", branch: "room/12/abcd1234", prNumber: 7, headSha: "a".repeat(40) },
+		"pr-merged": { runId: "run-1", intentId: "intent-1", prNumber: 7, mergeSha: "e".repeat(40) },
+		"run-merged": { runId: "run-1", intentId: "intent-1", mergeSha: "e".repeat(40) },
 		"run-failed": { runId: "run-1", intentId: "intent-1", reason: "ci-red" },
 		"run-parked": { runId: "run-1", intentId: "intent-1", note: "over budget" },
+		"deploy-requested": { sha: "b".repeat(40), runId: "run-1" },
 		"deploy-observed": { sha: "b".repeat(40) },
+		"rollback-requested": { sha: "c".repeat(40), reason: "liveness-fetch-failed" },
 		"rollback-observed": { sha: "c".repeat(40) },
+		"liveness-failed": { reason: "status-500" },
 		"room-frozen": { by: "owner" },
 		"room-unfrozen": { by: "owner" },
 		"revert-requested": { sha: "d".repeat(40), by: "owner" },
 		"budget-exhausted": { day: "2026-08-09" },
 	};
+	const silentKinds = new Set(["utterance", "run-heartbeat"]);
 	for (const kind of LEDGER_EVENT_KINDS) {
 		assert.ok(kind in payloads, `test coverage for ${kind}`);
 		const item = renderFeedItem(createLedgerEvent({ seq: 1, kind, at: 1, payload: payloads[kind] }));
-		if (kind === "utterance") {
-			assert.equal(item, null, "chat renders in the chat lane, not the feed");
+		if (silentKinds.has(kind)) {
+			assert.equal(item, null, "chat and heartbeats render outside the feed");
 		} else {
 			assert.equal(typeof item.text, "string");
 			assert.ok(item.text.length, `template for ${kind} renders text`);

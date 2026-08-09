@@ -12,13 +12,15 @@ import {
 	withdrawIntent,
 } from "../contracts/intent.js";
 
-const base = createIntent({ id: "intent-1", openedBy: "callil", at: 10, refs: { utteranceSeqs: [3], annotationSeqs: [4] } });
+const base = createIntent({ id: "intent-1", openedBy: "callil", at: 10, refs: { utteranceSeqs: [3], annotationSeqs: [4] }, openSeq: 5 });
 
 test("an intent is a versioned pointer into the ledger", () => {
 	assert.equal(base.state, "open");
 	assert.equal(base.version, 1);
 	assert.deepEqual(base.refs, { utteranceSeqs: [3], annotationSeqs: [4] });
-	assert.throws(() => createIntent({ id: "intent-x", openedBy: "callil", at: 10, refs: { utteranceSeqs: [0], annotationSeqs: [] } }), /positive ledger sequences/u);
+	assert.equal(base.openSeq, 5, "the intent-opened seq names the run branch room/<openSeq>/<attempt>");
+	assert.throws(() => createIntent({ id: "intent-x", openedBy: "callil", at: 10, refs: { utteranceSeqs: [0], annotationSeqs: [] }, openSeq: 5 }), /positive ledger sequences/u);
+	assert.throws(() => createIntent({ id: "intent-x", openedBy: "callil", at: 10, refs: { utteranceSeqs: [], annotationSeqs: [] } }), /openSeq/u, "an intent without its ledger ordinal is a caller bug");
 });
 
 test("amendments while open bump the version and append pointers", () => {
@@ -52,9 +54,9 @@ test("lifecycle guards: open -> dispatched -> live|parked; open -> withdrawn", (
 test("per-user open-intent rate limit counts open and dispatched, not terminal", () => {
 	const intents = [
 		base,
-		dispatchIntent(createIntent({ id: "intent-2", openedBy: "callil", at: 1, refs: { utteranceSeqs: [], annotationSeqs: [1] } }), { runId: "run-9", at: 2 }),
-		recordIntentOutcome(dispatchIntent(createIntent({ id: "intent-3", openedBy: "callil", at: 1, refs: { utteranceSeqs: [], annotationSeqs: [2] } }), { runId: "run-8", at: 2 }), { state: "live", at: 3 }),
-		createIntent({ id: "intent-4", openedBy: "guest", at: 1, refs: { utteranceSeqs: [], annotationSeqs: [3] } }),
+		dispatchIntent(createIntent({ id: "intent-2", openedBy: "callil", at: 1, refs: { utteranceSeqs: [], annotationSeqs: [1] }, openSeq: 6 }), { runId: "run-9", at: 2 }),
+		recordIntentOutcome(dispatchIntent(createIntent({ id: "intent-3", openedBy: "callil", at: 1, refs: { utteranceSeqs: [], annotationSeqs: [2] }, openSeq: 7 }), { runId: "run-8", at: 2 }), { state: "live", at: 3 }),
+		createIntent({ id: "intent-4", openedBy: "guest", at: 1, refs: { utteranceSeqs: [], annotationSeqs: [3] }, openSeq: 8 }),
 	];
 	assert.equal(countOpenIntents(intents, "callil"), 2);
 	assert.equal(countOpenIntents(intents, "guest"), 1);

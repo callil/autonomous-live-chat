@@ -1,15 +1,22 @@
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,191}$/u;
+const SHA = /^[0-9a-f]{40}$/u;
+const BRANCH = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,159}$/u;
 
-export const RUN_STATES = ["queued", "running", "verifying", "merged", "failed", "parked"];
+export const RUN_STATES = ["queued", "running", "verifying", "deploying", "merged", "failed", "parked"];
 export const TERMINAL_RUN_STATES = new Set(["merged", "failed", "parked"]);
-export const ACTIVE_RUN_STATES = new Set(["running", "verifying"]);
+export const ACTIVE_RUN_STATES = new Set(["running", "verifying", "deploying"]);
 
 /**
  * The hard run TTL (v1 scope ruling #20): a run past this wall-clock budget
  * is parked with an honest explanation and the queue advances. This replaces
- * all lease machinery.
+ * all lease machinery. Each phase carries its own budget from its own start
+ * mark: a run that reached verifying earned a fresh CI budget, and a run that
+ * reached deploying (already squash-merged) earned a fresh observation
+ * budget — parking a merged change on the BUILD clock would be dishonest.
  */
 export const RUN_TTL_MS = 10 * 60_000;
+export const VERIFY_TTL_MS = 10 * 60_000;
+export const DEPLOY_TTL_MS = 10 * 60_000;
 
 /**
  * The honest-ETA planning number: serial capacity is 10-15 runs/hour, so one
@@ -100,32 +107,80 @@ export function assertLiveAttempt(queue, { runId, attemptId }) {
 	return run;
 }
 
-/** running -> verifying. */
-export function beginVerifying(queue, { runId, attemptId, at }) {
+/** The verification context the runner reports: what the platform verifies, merges, and deploys. */
+export function validateVerification(value) {
+	if (!value || typeof value !== "object") throw new Error("Verification context must be an object.");
+	const { branch, prNumber, headSha } = value;
+	if (typeof branch !== "string" || !BRANCH.test(branch) || branch.includes("..") || branch.startsWith("-") || branch.endsWith("/")) throw new Error("Verification must carry the pushed branch name.");
+	if (!Number.isSafeInteger(prNumber) || prNumber < 1) throw new Error("Verification must carry the opened PR number.");
+	if (typeof headSha !== "string" || !SHA.test(headSha)) throw new Error("Verification must carry the exact 40-hex head SHA.");
+	return { branch, prNumber, headSha };
+}
+
+/**
+ * running -> verifying. The runner reports {branch, prNumber, headSha}; from
+ * here the PLATFORM owns the pipeline — it reads CI, merges at exactly that
+ * head SHA, and observes the deploy. The exact SHA recorded now is the only
+ * revision that may ever merge for this run.
+ */
+export function beginVerifying(queue, { runId, attemptId, at, verification }) {
 	timestamp(at, "Verifying timestamp");
 	const run = assertLiveAttempt(queue, { runId, attemptId });
 	if (run.state !== "running") throw new Error(`Run ${runId} is ${run.state}, not running.`);
-	return replaceRun(queue, { ...run, state: "verifying", verifyingAt: at });
+	return replaceRun(queue, { ...run, state: "verifying", verifyingAt: at, verification: validateVerification(verification) });
 }
 
-/** running|verifying -> merged|failed, attempt-guarded. */
+/**
+ * verifying -> deploying: CI was green and the exact-SHA squash merge landed
+ * as mergeSha. The change is now irreversibly on main; from here the run can
+ * only complete merged (deploy observed serving) or park loudly — never fail
+ * back into the queue as if the merge had not happened.
+ */
+export function beginDeploying(queue, { runId, attemptId, at, mergeSha, migration }) {
+	timestamp(at, "Deploying timestamp");
+	if (typeof mergeSha !== "string" || !SHA.test(mergeSha)) throw new Error("Deploying requires the squash-merge commit SHA.");
+	const run = assertLiveAttempt(queue, { runId, attemptId });
+	if (run.state !== "verifying") throw new Error(`Run ${runId} is ${run.state}, not verifying.`);
+	// The migration marker (derived from the ACTUAL changed files) rides the
+	// run record so the post-deploy watchdog knows auto-revert is refused.
+	return replaceRun(queue, { ...run, state: "deploying", deployingAt: at, mergeSha, migration: migration === true });
+}
+
+/** running|verifying|deploying -> merged|failed, attempt-guarded. A deploying run never "fails": its merge already landed. */
 export function completeRun(queue, { runId, attemptId, state, at, detail }) {
 	timestamp(at, "Completion timestamp");
 	if (state !== "merged" && state !== "failed") throw new Error("A run completes as merged or failed.");
 	const run = assertLiveAttempt(queue, { runId, attemptId });
+	if (state === "merged" && run.state !== "deploying") throw new Error(`Run ${runId} is ${run.state}; merged means the observed deploy of a squash-merged run, nothing earlier.`);
+	if (state === "failed" && run.state === "deploying") throw new Error(`Run ${runId} is deploying; its merge already landed, so it parks loudly instead of failing.`);
 	return replaceRun(queue, { ...run, state, completedAt: at, ...(detail === undefined ? {} : { detail }) });
 }
 
+/** Each active phase runs on its own clock from its own start mark. */
+const PHASE_BUDGETS = [
+	["running", "startedAt", () => RUN_TTL_MS],
+	["verifying", "verifyingAt", (ttls) => ttls.verifyMs],
+	["deploying", "deployingAt", (ttls) => ttls.deployMs],
+];
+
 /**
- * TTL enforcement (park-and-explain): an active run past RUN_TTL_MS is
- * parked so the queue advances. Returns the parked run so the caller can
- * record the honest ledger fact and consult the Doctor seam.
+ * TTL enforcement (park-and-explain): an active run past its current phase's
+ * wall-clock budget is parked so the queue advances. Returns the parked run
+ * so the caller can record the honest ledger fact and consult the Doctor
+ * seam. The detail names the phase that expired, because "the build hung"
+ * and "the merge landed but the deploy was never observed" are different
+ * public truths.
  */
-export function parkExpiredRun(queue, now, ttlMs = RUN_TTL_MS) {
+export function parkExpiredRun(queue, now, ttlMs = RUN_TTL_MS, verifyMs = VERIFY_TTL_MS, deployMs = DEPLOY_TTL_MS) {
 	timestamp(now, "Clock");
 	const run = activeRun(queue);
-	if (!run || typeof run.startedAt !== "number" || now - run.startedAt < ttlMs) return { queue, parked: null };
-	return { queue: replaceRun(queue, { ...run, state: "parked", completedAt: now, detail: "run-ttl-exceeded" }), parked: run };
+	if (!run) return { queue, parked: null };
+	const budget = PHASE_BUDGETS.find(([state]) => state === run.state);
+	if (!budget) return { queue, parked: null };
+	const [, startKey, pick] = budget;
+	const start = run[startKey];
+	if (typeof start !== "number" || now - start < (run.state === "running" ? ttlMs : pick({ verifyMs, deployMs }))) return { queue, parked: null };
+	return { queue: replaceRun(queue, { ...run, state: "parked", completedAt: now, detail: `${run.state}-ttl-exceeded` }), parked: run };
 }
 
 /**

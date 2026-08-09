@@ -30,7 +30,8 @@ function refs(value) {
  * (utterances, verbatim annotations) lives in the ledger; the intent names it
  * and tracks lifecycle. It is never a frozen ticket.
  */
-export function createIntent({ id, openedBy, at, refs: pointers }) {
+export function createIntent({ id, openedBy, at, refs: pointers, openSeq }) {
+	if (!Number.isSafeInteger(openSeq) || openSeq < 1) throw new Error("Intent openSeq must be a positive ledger sequence.");
 	return {
 		schemaVersion: 1,
 		id: identifier(id, "Intent ID"),
@@ -38,6 +39,8 @@ export function createIntent({ id, openedBy, at, refs: pointers }) {
 		state: "open",
 		version: 1,
 		refs: refs(pointers),
+		/** The ledger seq of this intent's intent-opened fact: the room-unique ordinal that names its branch (room/<openSeq>/<attempt>). */
+		openSeq,
 		openedAt: timestamp(at, "Open timestamp"),
 		updatedAt: at,
 	};

@@ -3,3 +3,5 @@ export * from "./queue.js";
 export * from "./intent.js";
 export * from "./envelope.js";
 export * from "./feed.js";
+export * from "./checks.js";
+export * from "./reconcile.js";

@@ -9,6 +9,8 @@ export type Intent = {
 	state: IntentState;
 	version: number;
 	refs: IntentRefs;
+	/** The ledger seq of the intent-opened fact; names the run branch room/<openSeq>/<attempt>. */
+	openSeq: number;
 	runId?: string;
 	detail?: unknown;
 	openedAt: number;
@@ -19,7 +21,7 @@ export const INTENT_STATES: readonly IntentState[];
 export const TERMINAL_INTENT_STATES: ReadonlySet<IntentState>;
 export const OPEN_INTENT_LIMIT: number;
 
-export function createIntent(input: { id: string; openedBy: string; at: number; refs: IntentRefs }): Intent;
+export function createIntent(input: { id: string; openedBy: string; at: number; refs: IntentRefs; openSeq: number }): Intent;
 export function amendmentDisposition(intent: Intent): "amend" | "follow-up";
 export function amendIntent(intent: Intent, input: { refs: IntentRefs; at: number }): Intent;
 export function dispatchIntent(intent: Intent, input: { runId: string; at: number }): Intent;
