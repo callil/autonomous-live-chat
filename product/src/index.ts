@@ -36,6 +36,7 @@ const STAMPED_ROOM_PAGE: string | null = (() => {
 })();
 
 const NO_STORE = { "cache-control": "no-store" };
+const validDeploySha = (sha: string | undefined): sha is string => typeof sha === "string" && /^[0-9a-f]{40}$/u.test(sha);
 
 export default {
 	async fetch(request: Request, env: ProductEnv): Promise<Response> {
@@ -44,8 +45,7 @@ export default {
 		if (request.method === "GET" && url.pathname === "/version") {
 			// The deployed revision. The platform's observed-deploy loop polls
 			// this: "Live" only posts once it serves the merged SHA.
-			const sha = env.DEPLOY_SHA;
-			return Response.json({ sha: typeof sha === "string" && /^[0-9a-f]{40}$/u.test(sha) ? sha : null }, { headers: NO_STORE });
+			return Response.json({ sha: validDeploySha(env.DEPLOY_SHA) ? env.DEPLOY_SHA : null }, { headers: NO_STORE });
 		}
 
 		if (url.pathname === "/api/rooms/main" || url.pathname.startsWith("/api/")) {
@@ -62,13 +62,12 @@ export default {
 
 		if (url.pathname === "/" || url.pathname === "/index.html") {
 			if (STAMPED_ROOM_PAGE === null) return Response.redirect(new URL("/fallback", env.PLATFORM_ORIGIN).toString(), 302);
-			// The in-page error boundary points at the platform's frozen
-			// fallback via this meta ref (absolute, so it works even when the
-			// product worker itself is the broken part).
+			// Runtime values are inserted after stamping so structural source refs
+			// continue to point at the verbatim room template.
 			const page = STAMPED_ROOM_PAGE.replace(
 				'<meta name="ahp-fallback" content="/fallback">',
 				`<meta name="ahp-fallback" content="${new URL("/fallback", env.PLATFORM_ORIGIN).toString()}">`,
-			);
+			).replace("__DEPLOY_SHA__", validDeploySha(env.DEPLOY_SHA) ? env.DEPLOY_SHA : "");
 			return new Response(page, { headers: { "content-type": "text/html; charset=utf-8", ...NO_STORE } });
 		}
 		if (url.pathname === "/assets/room.css") {
