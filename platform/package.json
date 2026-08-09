@@ -1,0 +1,18 @@
+{
+  "name": "@app-harness/platform",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "cf-typegen": "wrangler types",
+    "typecheck": "tsc --noEmit --noUnusedLocals --noUnusedParameters",
+    "test": "node test/ledger.test.mjs && node test/queue.test.mjs && node test/intent.test.mjs && node test/envelope.test.mjs && node test/feed.test.mjs && node test/platform-worker.test.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.2",
+    "typescript": "^5.9.3",
+    "wrangler": "^4.119.0"
+  }
+}
