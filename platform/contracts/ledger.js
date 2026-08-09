@@ -1,4 +1,5 @@
-const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,191}$/u;
+/** Display names allow spaces (session-contract shape); ids do not. */
+const DISPLAY_NAME = /^[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}$/u;
 const SHA = /^[0-9a-f]{40}$/u;
 
 /**
@@ -63,11 +64,6 @@ export const LEDGER_EVENT_KINDS = [
 
 const KIND_SET = new Set(LEDGER_EVENT_KINDS);
 
-function identifier(value, label) {
-	if (typeof value !== "string" || !IDENTIFIER.test(value)) throw new Error(`${label} must be a bounded identifier.`);
-	return value;
-}
-
 function timestamp(value, label) {
 	if (!Number.isSafeInteger(value) || value < 0) throw new Error(`${label} must be a non-negative integer timestamp.`);
 	return value;
@@ -112,7 +108,7 @@ export function createLedgerEvent({ seq, kind, at, payload }) {
 	if (payload === undefined || payload === null || typeof payload !== "object") throw new Error("Event payload must be an object.");
 	if (kind === "annotation") validateAnnotationPayload(payload.annotation);
 	if (kind === "utterance") {
-		identifier(payload.author, "Utterance author");
+		if (typeof payload.author !== "string" || !DISPLAY_NAME.test(payload.author)) throw new Error("Utterance author must be a bounded display name.");
 		if (typeof payload.text !== "string" || !payload.text.length) throw new Error("Utterance text must be a non-empty string.");
 	}
 	if ((kind === "revert-requested" || kind === "rollback-requested" || kind === "deploy-requested" || kind === "deploy-observed" || kind === "rollback-observed") && (typeof payload.sha !== "string" || !SHA.test(payload.sha))) throw new Error(`A ${kind} fact must carry a full Git SHA.`);

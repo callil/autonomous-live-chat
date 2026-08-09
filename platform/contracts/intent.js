@@ -1,4 +1,6 @@
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,191}$/u;
+/** Display names allow spaces (same shape the session contract and runner enforce); ids do not. */
+const DISPLAY_NAME = /^[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}$/u;
 
 export const INTENT_STATES = ["open", "dispatched", "live", "parked", "withdrawn"];
 export const TERMINAL_INTENT_STATES = new Set(["live", "parked", "withdrawn"]);
@@ -8,6 +10,11 @@ export const OPEN_INTENT_LIMIT = 5;
 
 function identifier(value, label) {
 	if (typeof value !== "string" || !IDENTIFIER.test(value)) throw new Error(`${label} must be a bounded identifier.`);
+	return value;
+}
+
+function displayName(value, label) {
+	if (typeof value !== "string" || !DISPLAY_NAME.test(value)) throw new Error(`${label} must be a bounded display name.`);
 	return value;
 }
 
@@ -35,7 +42,7 @@ export function createIntent({ id, openedBy, openedById, at, refs: pointers, ope
 	return {
 		schemaVersion: 1,
 		id: identifier(id, "Intent ID"),
-		openedBy: identifier(openedBy, "Intent opener"),
+		openedBy: displayName(openedBy, "Intent opener"),
 		/** The STABLE session id (phase 3 identity): the attribution and rate-limit key. Display names are presentation only. */
 		openedById: identifier(openedById ?? openedBy, "Intent opener id"),
 		state: "open",

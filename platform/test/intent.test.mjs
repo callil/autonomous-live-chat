@@ -77,6 +77,13 @@ test("the Doctor's retry is exactly once, and only while dispatched", () => {
 	assert.throws(() => retryIntent(retried, { runId: "run-3", at: 4 }), /already used its one retry/u);
 });
 
+test("display names with spaces open intents; ids never carry spaces", () => {
+	const spaced = createIntent({ id: "intent-12", openedBy: "Phase3 E2E", openedById: "user-33333333-3333-3333-3333-333333333333", at: 1, refs: { utteranceSeqs: [], annotationSeqs: [1] }, openSeq: 3 });
+	assert.equal(spaced.openedBy, "Phase3 E2E");
+	assert.throws(() => createIntent({ id: "intent-13", openedBy: "Ada", openedById: "user with spaces", at: 1, refs: { utteranceSeqs: [], annotationSeqs: [1] }, openSeq: 4 }), /identifier/u);
+	assert.throws(() => createIntent({ id: "intent-14", openedBy: "a\nb", openedById: "user-4", at: 1, refs: { utteranceSeqs: [], annotationSeqs: [1] }, openSeq: 5 }), /display name/u);
+});
+
 test("attribution and the open-intent cap key on the stable session id", () => {
 	const byId = createIntent({ id: "intent-10", openedBy: "Ada", openedById: "user-22222222-2222-2222-2222-222222222222", at: 1, refs: { utteranceSeqs: [], annotationSeqs: [1] }, openSeq: 2 });
 	assert.equal(countOpenIntents([byId], "user-22222222-2222-2222-2222-222222222222"), 1, "the stable id counts");
