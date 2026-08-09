@@ -1,0 +1,38 @@
+/**
+ * The platform's sandbox runner: one disposable container per run, dispatched
+ * only over the platform Worker's private RUNNER service binding. Part of the
+ * FROZEN platform surface — agent branches (room/*) can never touch this.
+ */
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "app-harness-platform-runner",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-08-05",
+	"compatibility_flags": ["nodejs_compat"],
+	"observability": { "enabled": true },
+	"vars": {
+		// The model credential is a worker secret, never a var.
+		"ALLOWED_REPOSITORY": "callil/autonomous-live-chat",
+		"AGENT_MODEL": "gpt-5.6-sol",
+		"SANDBOX_CLOUDFLARE_ACCOUNT_ID": "8942a6623f97627c7c62b64b259e5585",
+		// The platform's push-based completion callback; the per-dispatch runId
+		// inside the payload is the bearer credential.
+		"PLATFORM_CALLBACK_URL": "https://app-harness-platform.coda-a.workers.dev/api/runner/complete"
+	},
+	"containers": [
+		{
+			"class_name": "Sandbox",
+			"image": "./Dockerfile",
+			"instance_type": "lite",
+			"max_instances": 4
+		}
+	],
+	"durable_objects": {
+		"bindings": [
+			{ "class_name": "Sandbox", "name": "Sandbox" }
+		]
+	},
+	"migrations": [
+		{ "new_sqlite_classes": ["Sandbox"], "tag": "v1" }
+	]
+}

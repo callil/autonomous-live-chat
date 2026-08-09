@@ -7,14 +7,15 @@
     "apps/demo",
     "packages/*",
     "infra/workers/*",
-    "platform"
+    "platform",
+    "platform/runner"
   ],
   "scripts": {
     "dev": "npm --workspace @app-harness/demo run dev",
     "deploy": "npm --workspace @app-harness/demo run deploy",
-    "cf-typegen": "npm --workspace @app-harness/demo run cf-typegen && npm --workspace @app-harness/native-git-runner run cf-typegen && npm --workspace @app-harness/github-bridge run cf-typegen && npm --workspace @app-harness/operator run cf-typegen && npm --workspace @app-harness/platform run cf-typegen",
-    "typecheck": "npm run cf-typegen && npm --workspace @app-harness/demo run typecheck && npm --workspace @app-harness/react run typecheck && npm --workspace @app-harness/native-git-runner run typecheck && npm --workspace @app-harness/github-bridge run typecheck && npm --workspace @app-harness/operator run typecheck && npm --workspace @app-harness/platform run typecheck",
-    "test": "npm --workspace @app-harness/demo test && node infra/tests/platform-policy.test.mjs && node infra/tests/control-plane-boundary.test.mjs && node infra/tests/ledger-contract.test.mjs && node infra/tests/load-readiness.test.mjs && node infra/tests/operator-contract.test.mjs && node infra/tests/operator-worker.test.mjs && node infra/tests/room-stack.test.mjs && node infra/tests/stack-ledger.test.mjs && node infra/tests/webhook-contract.test.mjs && node infra/tests/os-stack-gate.test.mjs && npm --workspace @app-harness/react test && npm --workspace @app-harness/native-git-runner test && npm --workspace @app-harness/github-bridge test && npm --workspace @app-harness/platform test",
+    "cf-typegen": "npm --workspace @app-harness/demo run cf-typegen && npm --workspace @app-harness/native-git-runner run cf-typegen && npm --workspace @app-harness/github-bridge run cf-typegen && npm --workspace @app-harness/operator run cf-typegen && npm --workspace @app-harness/platform run cf-typegen && npm --workspace @app-harness/platform-runner run cf-typegen",
+    "typecheck": "npm run cf-typegen && npm --workspace @app-harness/demo run typecheck && npm --workspace @app-harness/react run typecheck && npm --workspace @app-harness/native-git-runner run typecheck && npm --workspace @app-harness/github-bridge run typecheck && npm --workspace @app-harness/operator run typecheck && npm --workspace @app-harness/platform run typecheck && npm --workspace @app-harness/platform-runner run typecheck",
+    "test": "npm --workspace @app-harness/demo test && node infra/tests/platform-policy.test.mjs && node infra/tests/control-plane-boundary.test.mjs && node infra/tests/ledger-contract.test.mjs && node infra/tests/load-readiness.test.mjs && node infra/tests/operator-contract.test.mjs && node infra/tests/operator-worker.test.mjs && node infra/tests/room-stack.test.mjs && node infra/tests/stack-ledger.test.mjs && node infra/tests/webhook-contract.test.mjs && node infra/tests/os-stack-gate.test.mjs && npm --workspace @app-harness/react test && npm --workspace @app-harness/native-git-runner test && npm --workspace @app-harness/github-bridge test && npm --workspace @app-harness/platform test && npm --workspace @app-harness/platform-runner test",
     "check": "npm run typecheck && npm test && git diff --check"
   }
 }
