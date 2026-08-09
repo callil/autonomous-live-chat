@@ -83,7 +83,9 @@ function safeDispatch(input: RunnerDispatch): SafeDispatch | null {
 	if (typeof feedUrl !== "string" || !feedUrl.startsWith("https://") || feedUrl.length > 512) return null;
 	if (!evidence || typeof evidence !== "object") return null;
 	const { requestText, requestedBy, annotations } = evidence as Record<string, unknown>;
-	if (typeof requestText !== "string" || typeof requestedBy !== "string" || !AUTHOR.test(requestedBy) || !Array.isArray(annotations)) return null;
+	// A blank requestText is refused here too: the platform must never be able
+	// to dispatch a builder that has an anchor but no instructions.
+	if (typeof requestText !== "string" || !requestText.trim().length || typeof requestedBy !== "string" || !AUTHOR.test(requestedBy) || !Array.isArray(annotations)) return null;
 	return {
 		runId,
 		attemptId,

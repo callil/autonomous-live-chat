@@ -32,9 +32,11 @@ import { renderFeed, renderFeedItem, renderQueueChips } from "../contracts/feed.
 import { classifyCheckRuns, includesMigrationMarker } from "../contracts/checks.js";
 import { decide, type ReconcileAction } from "../contracts/reconcile.js";
 import { admitRateLimited, mintSessionToken, verifySessionToken, SESSION_TTL_MS, type SessionIdentity } from "../contracts/session.js";
+import { INSTALLED_TENANT } from "../contracts/tenant.js";
 import { GitHubApp, observeDeployedVersion, syntheticLivenessCheck, verifyWebhookSignature } from "./github.js";
 import { OpenAiDoctorPort } from "./doctor.js";
 import { FALLBACK_HTML } from "./fallback.js";
+import OVERLAY_CLIENT from "./overlay/overlay.client.js";
 import { BindingRunnerPort, RETRYABLE_DOCTOR_KINDS, StubDoctorPort, StubRunnerPort, type DoctorCase, type DoctorCaseKind, type DoctorPort, type RunnerBinding, type RunnerPort } from "./ports.js";
 
 type RuntimeEnv = Env & {
@@ -528,6 +530,26 @@ export class RoomDO extends DurableObject<RuntimeEnv> {
 		const attemptId = `attempt-${crypto.randomUUID()}`;
 		const intent = await this.ctx.storage.get<Intent>(`${INTENT_PREFIX}${head.intentId}`);
 		const evidence = intent ? await this.collectEvidence(intent) : { requestText: "", requestedBy: "unknown", annotations: [] };
+
+		// THE BLIND-BUILD INVARIANT. A builder with an anchor but no
+		// instructions does not fail — it invents a plausible change and ships
+		// it green, which is exactly how requests came back as work nobody
+		// asked for. Refuse structurally, park with an honest public reason,
+		// and let the queue advance rather than spend a run on a guess.
+		if (!evidence.requestText.trim().length) {
+			const detail = "This request reached the builder with no instructions attached, so no build was started and nothing was changed. Re-send it with a sentence describing the change you want.";
+			await this.ctx.storage.transaction(async () => {
+				// Start-then-fail so the queue contract's attempt guard holds; the
+				// run never leaves the platform, and no sandbox is ever spent.
+				let current = startRun(await this.loadQueue(), { runId: head.runId, attemptId, startedAt: now });
+				current = completeRun(current, { runId: head.runId, attemptId, state: "failed", at: now, detail: "request-text-missing" });
+				await this.ctx.storage.put(QUEUE_KEY, pruneTerminalRuns(current));
+				await this.appendEvent("run-started", { runId: head.runId, intentId: head.intentId, attemptId, branch: "" }, now);
+				await this.appendEvent("run-failed", { runId: head.runId, intentId: head.intentId, reason: "request-text-missing" }, now);
+				await this.recordIntentOutcomeFact(head.intentId, "parked", now, detail);
+			});
+			return;
+		}
 		// The branch is the platform's to name: plain room/<intentSeq>/<attempt>
 		// from latest main. No stacks, no parents, no expected order.
 		const intentSeq = intent && Number.isSafeInteger(intent.openSeq) ? intent.openSeq : 0;
@@ -714,17 +736,38 @@ export class RoomDO extends DurableObject<RuntimeEnv> {
 		});
 	}
 
-	/** Every anchored payload rides to the builder verbatim, per-requester attributed. */
+	/**
+	 * Every anchored payload rides to the builder verbatim, per-requester
+	 * attributed.
+	 *
+	 * `requestText` is the requester's OWN WORDS and is what the builder is
+	 * actually asked to do; the annotations are context identifying what was
+	 * pointed at. Three envelope kinds carry those words differently:
+	 * target/draw type them into the composer (the request-accepted fact), and
+	 * comment carries them inside the annotation payload. All three are
+	 * recovered here, so no kind can dispatch a build blind.
+	 */
 	private async collectEvidence(intent: Intent): Promise<{ requestText: string; requestedBy: string; annotations: unknown[] }> {
 		const annotations: unknown[] = [];
 		let requestText = "";
+		let annotationText = "";
 		for (const seq of [...intent.refs.annotationSeqs, ...intent.refs.utteranceSeqs]) {
 			const event = await this.ctx.storage.get<LedgerEvent>(eventStorageKey(seq));
 			if (!event) continue;
-			if (event.kind === "annotation") annotations.push(event.payload);
-			if (event.kind === "request-accepted" && typeof event.payload.text === "string") requestText = event.payload.text;
+			if (event.kind === "annotation") {
+				annotations.push(event.payload);
+				const annotation = event.payload.annotation as { text?: unknown } | undefined;
+				if (typeof annotation?.text === "string" && annotation.text.trim().length) annotationText = annotation.text.trim();
+			}
+			if (event.kind === "request-accepted" && typeof event.payload.text === "string" && event.payload.text.trim().length) {
+				requestText = event.payload.text.trim();
+			}
+			// A plain utterance attached to an intent is requester speech too.
+			if (event.kind === "utterance" && typeof event.payload.text === "string" && !requestText.trim().length) {
+				requestText = event.payload.text.trim();
+			}
 		}
-		return { requestText, requestedBy: intent.openedBy, annotations };
+		return { requestText: requestText || annotationText, requestedBy: intent.openedBy, annotations };
 	}
 
 	/**
@@ -785,10 +828,24 @@ export class RoomDO extends DurableObject<RuntimeEnv> {
 			// The intent-opened seq is the room-unique ordinal that later names
 			// the run branch: room/<openSeq>/<attempt>.
 			const openedEvent = await this.appendEvent("intent-opened", { intentId, by: identity.name }, now);
-			const intent = createIntent({ id: intentId, openedBy: identity.name, openedById: identity.id, at: now, refs: { utteranceSeqs: [], annotationSeqs: [annotationEvent.seq] }, openSeq: openedEvent.seq });
-			await this.ctx.storage.put(`${INTENT_PREFIX}${intentId}`, intent);
 			deadline = cancelDeadline(now);
-			await this.appendEvent("request-accepted", { intentId, by: identity.name, text: envelope.text, at: now, cancelDeadline: deadline }, now);
+			// The request-accepted fact carries the requester's TYPED WORDS, and
+			// it is appended BEFORE the intent so its seq can be recorded in the
+			// intent's refs. That pointer is the only path by which the typed
+			// text reaches the builder (collectEvidence walks refs and nothing
+			// else): recording the intent first and this fact afterwards — the
+			// original order — left requestText permanently empty and dispatched
+			// every build with an anchor and no instructions.
+			const acceptedEvent = await this.appendEvent("request-accepted", { intentId, by: identity.name, text: envelope.text, at: now, cancelDeadline: deadline }, now);
+			const intent = createIntent({
+				id: intentId,
+				openedBy: identity.name,
+				openedById: identity.id,
+				at: now,
+				refs: { utteranceSeqs: [acceptedEvent.seq], annotationSeqs: [annotationEvent.seq] },
+				openSeq: openedEvent.seq,
+			});
+			await this.ctx.storage.put(`${INTENT_PREFIX}${intentId}`, intent);
 		});
 		// The immediate public ack, with its cancel window, straight back to the
 		// requester and out to the room.
@@ -1013,6 +1070,32 @@ export default {
 				);
 			}
 			return new Response("Method not allowed", { status: 405 });
+		}
+
+		if (pathname === "/overlay.js") {
+			// THE OVERLAY (task #13): the platform-owned authoring tools and
+			// status surface, served to whatever app has App Harness installed.
+			// It is frozen here — the CI path firewall bars agent branches from
+			// platform/** — so an agent change to the app can never break or
+			// falsify the queue, the activity feed, or its provenance links.
+			if (request.method !== "GET") return new Response("Method not allowed", { status: 405 });
+			return new Response(OVERLAY_CLIENT, {
+				headers: {
+					"content-type": "text/javascript; charset=utf-8",
+					"cache-control": "public, max-age=60",
+					"x-content-type-options": "nosniff",
+				},
+			});
+		}
+
+		if (pathname === "/overlay/tenant") {
+			// The installed tenant's public descriptor: exactly what the overlay
+			// needs to attach itself, and nothing about the app's internals.
+			if (request.method !== "GET") return new Response("Method not allowed", { status: 405 });
+			return Response.json(
+				{ id: INSTALLED_TENANT.id, anchorMode: INSTALLED_TENANT.anchorMode, repoUrl: `https://github.com/${INSTALLED_TENANT.repository}` },
+				{ headers: { "cache-control": "no-store" } },
+			);
 		}
 
 		if (pathname === "/fallback") {
