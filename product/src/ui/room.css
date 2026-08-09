@@ -6,6 +6,8 @@
   --soft: color-mix(in srgb, currentColor 7%, transparent);
   --accent: #4f7cff;
   --live: #2fb46b;
+  /* Width the fixed authoring toolbar occupies in the bottom-right corner. */
+  --toolbar-reserve: 20rem;
 }
 * { box-sizing: border-box; }
 /* The hidden attribute must always win: author display rules (grid/flex) on
@@ -59,7 +61,10 @@ body { margin: 0; font: 15px/1.5 ui-sans-serif, system-ui, sans-serif; height: 1
 .feed-items .provenance { display: block; margin-top: .25rem; font-size: .75rem; }
 .feed-items .provenance a { color: var(--accent); margin-right: .6rem; }
 
-.composer { display: flex; gap: .5rem; padding: .6rem 1rem .8rem; border-top: 1px solid var(--line); }
+/* The authoring toolbar is fixed over the bottom-right corner, so the composer
+   reserves that much room on its right edge — otherwise the toolbar sits on
+   top of Send and swallows the click. */
+.composer { display: flex; gap: .5rem; padding: .6rem 1rem .8rem; padding-right: calc(var(--toolbar-reserve) + 1.5rem); border-top: 1px solid var(--line); }
 .composer textarea { flex: 1; resize: none; font: inherit; padding: .5rem .7rem; border-radius: .6rem; border: 1px solid var(--line); background: transparent; color: inherit; }
 button.send, button.primary { font: inherit; padding: .5rem .9rem; border-radius: .6rem; border: 0; background: var(--accent); color: #fff; cursor: pointer; }
 button.secondary { font: inherit; padding: .5rem .9rem; border-radius: .6rem; border: 1px solid var(--line); background: transparent; color: inherit; cursor: pointer; }
@@ -96,5 +101,7 @@ body.mode-target, body.mode-comment { cursor: crosshair; }
 .join-card h2 { margin: 0 0 .25rem; font-size: 1rem; }
 .join-card input { font: inherit; padding: .5rem .6rem; border-radius: .5rem; border: 1px solid var(--line); background: transparent; color: inherit; }
 
-@media (max-width: 52rem) { .columns { grid-template-columns: 1fr; } .feed-rail { display: none; } .queue-bar { padding-inline: .75rem; } .authoring-tools { right: .5rem; } }
+/* Too narrow to reserve a corner: stack the toolbar above the composer and give
+   the composer its normal padding back. */
+@media (max-width: 52rem) { .columns { grid-template-columns: 1fr; } .feed-rail { display: none; } .queue-bar { padding-inline: .75rem; } .authoring-tools { right: .5rem; bottom: 4.5rem; } .composer { padding-right: 1rem; } }
 @media (max-width: 34rem) { .app-update > span { display: none; } .topbar-status { gap: .4rem; } }

@@ -58,6 +58,16 @@ test("the room intro keeps both its heading and its explanatory paragraph", () =
 	assert.match(css, /\.room-meta \{/u);
 });
 
+test("the authoring toolbar never covers the composer's Send button", () => {
+	// Regression: the toolbar is fixed over the bottom-right corner, so with a
+	// full-width composer it sat on top of Send and swallowed the click.
+	assert.match(css, /--toolbar-reserve:/u, "the space the toolbar occupies is declared once");
+	assert.match(css, /\.composer \{[^}]*padding-right: calc\(var\(--toolbar-reserve\)/u, "the composer reserves that space on its right edge");
+	const narrow = css.match(/@media \(max-width: 52rem\) \{(.*)\}/u)?.[1] ?? "";
+	assert.match(narrow, /\.authoring-tools \{[^}]*bottom: 4\.5rem/u, "when it is too narrow to reserve a corner the toolbar stacks above the composer");
+	assert.match(narrow, /\.composer \{[^}]*padding-right: 1rem/u, "and the composer takes its normal padding back");
+});
+
 test("the error boundary falls back to the platform's frozen minimal UI", () => {
 	assert.match(html, /<meta name="ahp-fallback" content="\/fallback">/u);
 	assert.match(html, /location\.replace\(target\)/u);
