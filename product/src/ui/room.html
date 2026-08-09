@@ -5,19 +5,43 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>App Harness — live room</title>
 <meta name="ahp-fallback" content="/fallback">
+<meta name="ahp-version" content="__DEPLOY_SHA__">
 <link rel="stylesheet" href="/assets/room.css">
 <script>
 /* The product error boundary (task 13): if the room bundle fails to load or
    never finishes booting, fall back to the platform's frozen minimal UI. */
 (function () {
-  var meta = document.querySelector('meta[name=ahp-fallback]');
-  var target = meta ? meta.content : '/fallback';
+  var fallbackMeta = document.querySelector('meta[name=ahp-fallback]');
+  var target = fallbackMeta ? fallbackMeta.content : '/fallback';
   function bail() { if (!window.__ahpBooted) location.replace(target); }
   window.addEventListener('error', function (event) {
     var el = event.target;
     if (el && (el.tagName === 'SCRIPT' || el.tagName === 'LINK')) bail();
   }, true);
   setTimeout(bail, 8000);
+
+  /* Compare the revision that rendered this document with the currently
+     deployed revision. The user chooses when to reload, so drafts are safe. */
+  window.addEventListener('DOMContentLoaded', function () {
+    var versionMeta = document.querySelector('meta[name=ahp-version]');
+    var loadedSha = versionMeta && versionMeta.content;
+    var notice = document.getElementById('app-update');
+    var button = document.getElementById('app-update-button');
+    if (!/^[0-9a-f]{40}$/.test(loadedSha || '') || !notice || !button) return;
+    async function checkVersion() {
+      try {
+        var response = await fetch('/version', { cache: 'no-store' });
+        if (!response.ok) return;
+        var current = await response.json();
+        if (/^[0-9a-f]{40}$/.test(current.sha || '') && current.sha !== loadedSha) notice.hidden = false;
+      } catch (_) { /* Connection state already reports outages. */ }
+    }
+    button.addEventListener('click', function () { location.reload(); });
+    document.addEventListener('visibilitychange', function () { if (!document.hidden) checkVersion(); });
+    window.addEventListener('focus', checkVersion);
+    checkVersion();
+    setInterval(checkVersion, 60000);
+  });
 })();
 </script>
 </head>
@@ -27,7 +51,13 @@
     <span class="room-heading">
       <span class="room-title">Main room</span>
     </span>
-    <span class="connection"><i class="dot" id="dot"></i><span id="connection">Connecting</span></span>
+    <span class="topbar-status">
+      <span class="app-update" id="app-update" role="status" hidden>
+        <span>A newer version is ready.</span>
+        <button id="app-update-button" type="button">Update</button>
+      </span>
+      <span class="connection"><i class="dot" id="dot"></i><span id="connection">Connecting</span></span>
+    </span>
   </header>
   <section class="queue-bar" id="queue-section" aria-label="Build queue">
     <h2>Build queue</h2>
