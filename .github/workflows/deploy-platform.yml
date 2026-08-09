@@ -1,0 +1,52 @@
+name: Deploy platform
+
+# The frozen platform's own deploy leg: every push to main that touches
+# platform/ deploys the platform Worker and its sandbox runner. Agent branches
+# (room/*) can never reach this path — the platform firewall fails any such
+# diff before merge.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "platform/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: app-harness-platform-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install and verify the platform
+        run: |
+          npm ci
+          npm --workspace @app-harness/platform run cf-typegen
+          npm --workspace @app-harness/platform run typecheck
+          npm --workspace @app-harness/platform test
+          npm --workspace @app-harness/platform-runner run cf-typegen
+          npm --workspace @app-harness/platform-runner run typecheck
+          npm --workspace @app-harness/platform-runner test
+
+      # GitHub-hosted Ubuntu supplies Docker. Wrangler builds and pushes the
+      # sandbox image to Cloudflare's registry. The runner deploys FIRST so
+      # the platform Worker's RUNNER service binding always has a target.
+      - name: Build image and deploy the platform runner
+        run: npm --workspace @app-harness/platform-runner run deploy
+
+      - name: Deploy the platform Worker
+        run: npm --workspace @app-harness/platform run deploy

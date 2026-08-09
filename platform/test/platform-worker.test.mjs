@@ -4,11 +4,14 @@ import test from "node:test";
 
 const worker = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
 const ports = await readFile(new URL("../src/ports.ts", import.meta.url), "utf8");
+const github = await readFile(new URL("../src/github.ts", import.meta.url), "utf8");
 const wrangler = await readFile(new URL("../wrangler.jsonc", import.meta.url), "utf8");
 const firewall = await readFile(new URL("../../.github/workflows/platform-firewall.yml", import.meta.url), "utf8");
+const deployWorkflow = await readFile(new URL("../../.github/workflows/deploy-platform.yml", import.meta.url), "utf8");
+const productDeploy = await readFile(new URL("../../.github/workflows/deploy-demo-on-main.yml", import.meta.url), "utf8");
 
 test("the platform worker never imports the legacy operator machinery", () => {
-	for (const source of [worker, ports]) {
+	for (const source of [worker, ports, github]) {
 		assert.doesNotMatch(source, /@app-harness\/(demo|operator|contracts)/u, "the rebuild ports patterns, not modules");
 		assert.doesNotMatch(source, /apps\/demo|infra\/workers|infra\/orchestration/u);
 		assert.doesNotMatch(source, /OperatorGateway|LedgerService|ChatRoom/u);
@@ -28,21 +31,57 @@ test("the runner callback is guarded by runId-as-bearer plus the attempt ID zomb
 	assert.match(worker, /outcome\.accepted \? 200 : 403/u);
 });
 
-test("pokes only set the dirty mark; the level-triggered reconciler drives the delta", () => {
+test("pokes only set the dirty mark; the level-triggered reconciler drives the delta through decide()", () => {
 	assert.match(worker, /async poke\(\)/u);
 	assert.match(worker, /DIRTY_KEY, true/u);
 	assert.match(worker, /RECONCILE_INTERVAL_MS = 60_000/u);
 	assert.match(worker, /await this\.reconcile\(\);\s*await this\.scheduleReconcile\(Date\.now\(\) \+ RECONCILE_INTERVAL_MS\);/u, "the alarm reconciles then reschedules the steady cadence");
+	assert.match(worker, /const actions = decide\(\{/u, "decisions come from the pure policy, not inline judgment");
 });
 
-test("phase-2 seams are stubbed ports, not half-built integrations", () => {
+test("webhook pokes are HMAC-verified and fail closed; even a verified poke decides nothing", () => {
+	assert.match(worker, /verifyWebhookSignature\(env\.GITHUB_WEBHOOK_SECRET, body, request\.headers\.get\("X-Hub-Signature-256"\)\)/u);
+	assert.match(worker, /if \(!verified\) return new Response\("Invalid signature", \{ status: 401 \}\);/u);
+	assert.match(github, /crypto\.subtle\.verify\("HMAC", key, signature, encoder\.encode\(body\)\)/u, "constant-time verification via WebCrypto");
+});
+
+test("the runner port is the real service binding with an honest stub fallback; the Doctor stays a stub seam", () => {
 	assert.match(ports, /interface RunnerPort/u);
 	assert.match(ports, /interface DoctorPort/u);
+	assert.match(ports, /class BindingRunnerPort/u);
 	assert.match(ports, /class StubRunnerPort/u);
 	assert.match(ports, /class StubDoctorPort/u);
-	assert.match(ports, /TODO\(phase 2\)/u);
-	assert.match(worker, /new StubRunnerPort\(\)/u);
+	assert.match(ports, /TODO\(phase 3\)/u);
+	assert.match(worker, /new BindingRunnerPort\(binding as RunnerBinding\) : new StubRunnerPort\(\)/u);
 	assert.match(worker, /new StubDoctorPort\(\)/u);
+	assert.match(wrangler, /"binding": "RUNNER"/u);
+	assert.match(wrangler, /"service": "app-harness-platform-runner"/u);
+});
+
+test("the pipeline merges at the exact verified head SHA and posts Live only on observation", () => {
+	assert.match(github, /merge_method: "squash", sha: headSha/u, "the REST form of --match-head-commit");
+	assert.match(worker, /squashMerge\(action\.prNumber, action\.headSha\)/u);
+	assert.match(worker, /classifyCheckRuns\(await app\.listCheckRuns\(action\.headSha\)\)/u, "CI verdicts are read for the exact SHA and classified mechanically");
+	assert.match(worker, /const observed = await observeDeployedVersion\(this\.env\.PRODUCT_URL\);\s*if \(observed !== action\.mergeSha\) return;/u, "merged completes only when /version serves the merge SHA");
+	assert.match(worker, /includesMigrationMarker\(await app\.listChangedFiles\(action\.prNumber\)\)/u, "the migration marker comes from the actual diff");
+	assert.match(worker, /dispatchWorkflow\(DEPLOY_WORKFLOW_FILE/u);
+});
+
+test("the liveness watchdog reverts deterministically and refuses to cross migrations", () => {
+	assert.match(worker, /syntheticLivenessCheck\(this\.env\.PRODUCT_URL\)/u);
+	assert.match(worker, /WATCHDOG_WINDOW_MS = 5 \* 60_000/u);
+	assert.match(worker, /if \(action\.migration \|\| !good\.previous\)/u, "auto-revert refuses when the deploy included a migration");
+	assert.match(worker, /"rollback-requested"/u);
+	assert.match(worker, /"rollback-observed"/u);
+});
+
+test("the deploy legs exist: platform deploy workflow, and the product deploy stamps /version with the exact SHA", () => {
+	assert.match(deployWorkflow, /paths:\s*\n\s*- "platform\/\*\*"/u, "pushes to main touching platform/ deploy the platform");
+	assert.match(deployWorkflow, /workflow_dispatch:/u);
+	assert.match(deployWorkflow, /@app-harness\/platform-runner run deploy/u);
+	assert.match(productDeploy, /inputs\.sha \|\| github\.sha/u, "the deploy leg accepts an exact SHA for merges and reverts");
+	assert.match(productDeploy, /--var "DEPLOY_SHA:\$DEPLOY_SHA"/u, "the deployed revision is stamped into /version");
+	assert.match(productDeploy, /git merge-base --is-ancestor/u, "only revisions reachable from main may deploy");
 });
 
 test("the worker uses websocket hibernation, not in-memory socket bookkeeping", () => {

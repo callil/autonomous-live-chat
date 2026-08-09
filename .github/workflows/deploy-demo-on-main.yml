@@ -12,6 +12,15 @@ on:
       - "apps/demo/**"
       - "packages/**"
   workflow_dispatch:
+    inputs:
+      sha:
+        description: >
+          Exact commit to deploy. Must be reachable from main (the ancestor
+          check below enforces this). The platform reconciler dispatches this
+          after each squash merge, and again with a PRIOR good SHA to execute
+          a revert. Empty means the current main head.
+        required: false
+        default: ""
 
 permissions: {}
 
@@ -29,12 +38,12 @@ jobs:
     env:
       GH_REPO: ${{ github.repository }}
       GH_TOKEN: ${{ github.token }}
-      DEPLOY_SHA: ${{ github.sha }}
+      DEPLOY_SHA: ${{ inputs.sha || github.sha }}
     steps:
-      - name: Check out the exact pushed main revision
+      - name: Check out the exact requested revision
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ inputs.sha || github.sha }}
           fetch-depth: 0
           persist-credentials: false
       - name: Require the deployed revision to still be reachable from main
@@ -49,7 +58,11 @@ jobs:
           cache: npm
       - name: Install exact merged-main dependencies without deployment credentials
         run: npm ci
-      - name: Deploy the verified main revision
+      # DEPLOY_SHA is injected as a Worker var so the product's /version
+      # endpoint serves the exact deployed revision — the platform's observed
+      # deploy ("Live" posts only when /version serves the merged SHA) and the
+      # liveness watchdog both read it.
+      - name: Deploy the verified revision with its SHA stamped into /version
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: npm run deploy
+        run: npm --workspace @app-harness/demo run deploy -- --var "DEPLOY_SHA:$DEPLOY_SHA"
