@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>App Harness — live room</title>
+<meta name="ahp-fallback" content="/fallback">
+<link rel="stylesheet" href="/assets/room.css">
+<script>
+/* The product error boundary (task 13): if the room bundle fails to load or
+   never finishes booting, fall back to the platform's frozen minimal UI. */
+(function () {
+  var meta = document.querySelector('meta[name=ahp-fallback]');
+  var target = meta ? meta.content : '/fallback';
+  function bail() { if (!window.__ahpBooted) location.replace(target); }
+  window.addEventListener('error', function (event) {
+    var el = event.target;
+    if (el && (el.tagName === 'SCRIPT' || el.tagName === 'LINK')) bail();
+  }, true);
+  setTimeout(bail, 8000);
+})();
+</script>
+</head>
+<body>
+<div class="app">
+  <header class="topbar">
+    <span class="room-heading">
+      <span class="room-title">Live Main room</span>
+      <span class="room-meta">shape this app together</span>
+    </span>
+    <span class="connection"><i class="dot" id="dot"></i><span id="connection">Connecting</span></span>
+  </header>
+  <main class="columns">
+    <section class="conversation" aria-live="polite">
+      <div class="room-intro">
+        <h1>Point at anything. Ask for a change.</h1>
+        <p>Chat with the room, or use Target, Comment, and Draw to request a change — the agent builds it, CI verifies it, and the feed tells the truth about every step.</p>
+      </div>
+      <div class="messages" id="messages"></div>
+    </section>
+    <aside class="feed-rail" aria-label="Build feed">
+      <div class="rail-section" id="queue-section">
+        <h2>Queue</h2>
+        <div class="queue-chips" id="queue-chips"></div>
+        <div class="pending-acks" id="pending-acks"></div>
+      </div>
+      <div class="rail-section">
+        <h2>Feed</h2>
+        <ol class="feed-items" id="feed-items"></ol>
+      </div>
+    </aside>
+  </main>
+  <form class="composer" id="composer">
+    <textarea id="chat-input" rows="1" placeholder="Message the room" aria-label="Message"></textarea>
+    <button class="send" id="send" type="submit" aria-label="Send message">Send</button>
+  </form>
+</div>
+<div class="overlay-frame" aria-label="Authoring overlay">
+  <svg class="draw-layer" id="draw-layer" aria-label="Drawing layer"></svg>
+  <div class="authoring-tools" id="authoring-tools">
+    <button class="tool" id="tool-target" type="button" aria-pressed="false" title="Target an element and request a change">Target</button>
+    <button class="tool" id="tool-comment" type="button" aria-pressed="false" title="Comment on an element">Comment</button>
+    <button class="tool" id="tool-draw" type="button" aria-pressed="false" title="Draw feedback">Draw</button>
+  </div>
+  <form class="request-composer" id="request-composer" hidden aria-label="Change request">
+    <span class="request-context" id="request-context"></span>
+    <textarea id="request-input" placeholder="Describe the change" aria-label="Describe the change"></textarea>
+    <div class="request-actions">
+      <button type="button" class="secondary" id="request-cancel">Cancel</button>
+      <button type="submit" class="primary" id="request-submit">Start</button>
+    </div>
+    <p class="request-error" id="request-error" role="alert"></p>
+  </form>
+</div>
+<div class="join-scrim" id="join" hidden>
+  <form class="join-card" id="join-form">
+    <h2>Join the room</h2>
+    <label for="join-name">Display name</label>
+    <input id="join-name" maxlength="64" autocomplete="nickname" placeholder="Ada">
+    <button type="submit" class="primary">Join</button>
+    <p class="request-error" id="join-error" role="alert"></p>
+  </form>
+</div>
+<script src="/assets/room.client.js" defer></script>
+</body>
+</html>

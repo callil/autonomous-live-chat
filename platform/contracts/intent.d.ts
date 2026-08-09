@@ -6,12 +6,16 @@ export type Intent = {
 	schemaVersion: 1;
 	id: string;
 	openedBy: string;
+	/** The stable session id (attribution and rate-limit key); pre-identity records fall back to openedBy. */
+	openedById?: string;
 	state: IntentState;
 	version: number;
 	refs: IntentRefs;
 	/** The ledger seq of the intent-opened fact; names the run branch room/<openSeq>/<attempt>. */
 	openSeq: number;
 	runId?: string;
+	/** Set once the Doctor's one retry has been spent. */
+	retried?: boolean;
 	detail?: unknown;
 	openedAt: number;
 	updatedAt: number;
@@ -21,10 +25,11 @@ export const INTENT_STATES: readonly IntentState[];
 export const TERMINAL_INTENT_STATES: ReadonlySet<IntentState>;
 export const OPEN_INTENT_LIMIT: number;
 
-export function createIntent(input: { id: string; openedBy: string; at: number; refs: IntentRefs; openSeq: number }): Intent;
+export function createIntent(input: { id: string; openedBy: string; openedById?: string; at: number; refs: IntentRefs; openSeq: number }): Intent;
 export function amendmentDisposition(intent: Intent): "amend" | "follow-up";
 export function amendIntent(intent: Intent, input: { refs: IntentRefs; at: number }): Intent;
 export function dispatchIntent(intent: Intent, input: { runId: string; at: number }): Intent;
+export function retryIntent(intent: Intent, input: { runId: string; at: number }): Intent;
 export function recordIntentOutcome(intent: Intent, input: { state: "live" | "parked"; at: number; detail?: unknown }): Intent;
 export function withdrawIntent(intent: Intent, input: { at: number }): Intent;
 export function countOpenIntents(intents: Intent[], userId: string): number;

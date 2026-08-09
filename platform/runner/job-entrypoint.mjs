@@ -228,7 +228,7 @@ function buildAgentInstructions(request) {
 		"You are the coding agent for a live collaborative room, working on a fresh isolated checkout of the repository.",
 		"You operate through exactly three tools: read_file, write_file, and list_dir. You have no shell, no network, no package manager, and no Git.",
 		"Inspect the relevant parts of the checked-out repository and every applicable AGENTS.md before changing anything.",
-		"The product surface is apps/demo (frontend and backend) and packages/react. You may ONLY change product code: writes to platform/, infra/, .github/, dependency manifests, lockfiles, or wrangler configs are blocked here and would fail the platform firewall anyway.",
+		"The product surface is product/ — the live room UI Worker (product/src, its ui/ sources, and product/test). Annotation data-loc refs like product/src/ui/room.html:41 point at exact source lines there. You may ONLY change product code: writes to platform/, infra/, .github/, apps/ (the legacy demo), dependency manifests, lockfiles, or wrangler configs are blocked here and would fail the platform firewall anyway.",
 		"Make the smallest coherent repository change that actually satisfies the request, including tests when appropriate.",
 		"Preserve user data and unrelated work. Never read, print, copy, commit, or expose credentials. Refuse illegal, harmful, offensive, intentionally availability-destroying, or externally unsupported work.",
 		"Do not claim to have run tests, builds, or commands: you cannot. The execution harness commits your staged writes, runs the local test gate, pushes, and opens the pull request; CI is the merge authority.",
@@ -321,7 +321,7 @@ async function main() {
 	// Local fast-fail gate BEFORE anything is pushed: the product's own test
 	// file is the cheapest honest signal a candidate is broken.
 	postHeartbeat("local-tests");
-	const localTests = await run("node", ["apps/demo/test/composer.test.mjs"], { cwd: request.checkoutDirectory, timeoutMs: LOCAL_TEST_TIMEOUT_MS });
+	const localTests = await run("node", ["product/test/ui-contract.test.mjs"], { cwd: request.checkoutDirectory, timeoutMs: LOCAL_TEST_TIMEOUT_MS });
 	if (!localTests.success) return failure(localTests.stderr === "step-timeout" ? "local-tests-timeout" : "local-tests-failed", stderrTail(localTests));
 	postHeartbeat("local-tests-passed");
 

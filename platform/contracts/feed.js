@@ -30,6 +30,7 @@ const TEMPLATES = {
 	"intent-live": (payload) => `Intent ${payload.intentId} is live.`,
 	"intent-parked": (payload) => `Intent ${payload.intentId} parked: ${clip(payload.reason, 200)}`,
 	"intent-withdrawn": (payload) => `Intent ${payload.intentId} withdrawn.`,
+	"intent-retried": (payload) => `Intent ${payload.intentId} gets one fresh build (run ${payload.runId}) — Doctor: ${clip(payload.note, 200)}`,
 	"run-queued": (payload) => `Run ${payload.runId} queued for intent ${payload.intentId}.`,
 	"run-started": (payload) => `Run ${payload.runId} started building.`,
 	"run-heartbeat": () => null, // Progress facts are durable but not feed lines.
@@ -47,6 +48,24 @@ const TEMPLATES = {
 	"room-unfrozen": () => "The room is unfrozen: requests resume.",
 	"revert-requested": (payload) => `Owner requested a revert to ${payload.sha.slice(0, 7)}.`,
 	"budget-exhausted": () => "Today's build budget is spent — queued work resumes after the daily reset.",
+	"doctor-note": (payload) => `Doctor: ${clip(payload.note, 240)}`,
+};
+
+/**
+ * Structured provenance refs for feed items that point at real external
+ * artifacts (PRs, commits). Purely mechanical projections of the payload —
+ * the product UI renders them as links, and because they come from the same
+ * durable facts as the text, they cannot disagree with it.
+ */
+const REFS = {
+	"run-verifying": (payload) => (Number.isSafeInteger(payload.prNumber) ? { prNumber: payload.prNumber } : null),
+	"pr-merged": (payload) => ({ prNumber: payload.prNumber, sha: payload.mergeSha }),
+	"run-merged": (payload) => (typeof payload.mergeSha === "string" ? { sha: payload.mergeSha } : null),
+	"deploy-requested": (payload) => ({ sha: payload.sha }),
+	"deploy-observed": (payload) => ({ sha: payload.sha }),
+	"rollback-requested": (payload) => ({ sha: payload.sha }),
+	"rollback-observed": (payload) => ({ sha: payload.sha }),
+	"revert-requested": (payload) => ({ sha: payload.sha }),
 };
 
 /**
@@ -58,7 +77,9 @@ export function renderFeedItem(event) {
 	const template = TEMPLATES[event.kind];
 	if (!template) throw new Error(`No feed template for ledger event kind: ${String(event.kind)}.`);
 	const text = template(event.payload);
-	return text === null ? null : { seq: event.seq, at: event.at, kind: event.kind, text };
+	if (text === null) return null;
+	const refs = REFS[event.kind]?.(event.payload) ?? null;
+	return { seq: event.seq, at: event.at, kind: event.kind, text, ...(refs === null ? {} : { refs }) };
 }
 
 /** Honest queue chips: position and moving ETA for every queued run. */

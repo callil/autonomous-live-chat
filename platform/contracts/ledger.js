@@ -25,6 +25,8 @@ export const LEDGER_EVENT_KINDS = [
 	"intent-live",
 	"intent-parked",
 	"intent-withdrawn",
+	// The Doctor granted a parked-course intent its one fresh run (phase 3).
+	"intent-retried",
 	// Run lifecycle facts (strict FIFO singleton runs).
 	"run-queued",
 	"run-started",
@@ -54,6 +56,9 @@ export const LEDGER_EVENT_KINDS = [
 	// Honest resource facts: a dispatch refused by the spend budget is a
 	// recorded, visible state, not a silent stall.
 	"budget-exhausted",
+	// The Doctor's public status note for cases with no intent to park
+	// (for example a liveness failure across a migration deploy).
+	"doctor-note",
 ];
 
 const KIND_SET = new Set(LEDGER_EVENT_KINDS);

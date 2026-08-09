@@ -1,6 +1,6 @@
 {
-  "name": "@app-harness/platform",
-  "version": "0.1.0",
+  "name": "@app-harness/product",
+  "version": "0.0.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -8,7 +8,7 @@
     "deploy": "wrangler deploy",
     "cf-typegen": "wrangler types",
     "typecheck": "tsc --noEmit --noUnusedLocals --noUnusedParameters",
-    "test": "node test/ledger.test.mjs && node test/queue.test.mjs && node test/intent.test.mjs && node test/envelope.test.mjs && node test/feed.test.mjs && node test/checks.test.mjs && node test/reconcile.test.mjs && node test/session.test.mjs && node test/platform-worker.test.mjs"
+    "test": "node test/ui-contract.test.mjs"
   },
   "devDependencies": {
     "@types/node": "^26.1.2",

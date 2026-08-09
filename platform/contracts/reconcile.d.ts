@@ -8,6 +8,7 @@ export type ReconcileSnapshot = {
 	budget: { spentUsd: number; budgetUsd: number; estimatedRunUsd: number };
 	revert: { sha: string; dispatchedAt: number | null } | null;
 	watchdog: { sha: string; until: number; migration: boolean } | null;
+	doctorQueue?: unknown[];
 };
 
 export type ReconcileAction =
@@ -19,6 +20,7 @@ export type ReconcileAction =
 	| { kind: "observe-deploy"; runId: string; attemptId?: string; mergeSha: string }
 	| { kind: "liveness-check"; sha: string; migration: boolean }
 	| { kind: "dispatch"; runId: string; intentId: string }
-	| { kind: "announce-budget-exhausted" };
+	| { kind: "announce-budget-exhausted" }
+	| { kind: "consult-doctor" };
 
 export function decide(snapshot: ReconcileSnapshot): ReconcileAction[];

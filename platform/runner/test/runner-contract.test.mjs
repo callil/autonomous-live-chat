@@ -43,9 +43,9 @@ test("annotation payloads ride to the agent verbatim as CONTEXT, never scope aut
 });
 
 test("local tests gate the push, heartbeats flow, and the callback carries runId bearer plus attemptId", () => {
-	assert.match(job, /apps\/demo\/test\/composer\.test\.mjs/u, "the local gate runs before push");
+	assert.match(job, /product\/test\/ui-contract\.test\.mjs/u, "the local gate runs the PRODUCT's own dependency-free tests");
 	const pushIndex = job.indexOf('"push", "origin"');
-	const testsIndex = job.indexOf("apps/demo/test/composer.test.mjs");
+	const testsIndex = job.indexOf("product/test/ui-contract.test.mjs");
 	assert.ok(testsIndex !== -1 && pushIndex !== -1 && testsIndex < pushIndex, "local tests run BEFORE the push");
 	assert.match(job, /progress: true, step/u, "step heartbeats post to the platform");
 	assert.match(job, /runId: terminalCallback\.runId, attemptId: terminalCallback\.attemptId/u);
@@ -65,6 +65,8 @@ test("the agent is the bounded three-tool loop on the sol model, with frozen sur
 	assert.match(agent, /WRITE_DENIED_PATHS/u);
 	assert.match(agent, /\^platform\\\//u, "platform/ writes are denied in code");
 	assert.match(agent, /\^\\\.github\\\//u, ".github/ writes are denied in code");
+	assert.match(agent, /\^apps\\\//u, "the legacy demo (apps/) is write-denied: the product surface is product/ only");
+	assert.match(job, /product surface is product\//u, "the agent instructions name the product surface");
 	assert.match(agent, /reasoning\.encrypted_content/u, "reasoning items replay across tool calls");
 });
 

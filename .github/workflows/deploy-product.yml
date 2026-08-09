@@ -1,0 +1,68 @@
+name: Deploy product
+run-name: Product deploy · ${{ inputs.sha || github.sha }}
+
+# The PRODUCT worker's deploy leg (phase 3 product/platform split): the ONLY
+# workflow the platform reconciler dispatches for agent changes, and it is
+# physically only capable of deploying the product worker. The platform's own
+# deploy leg (deploy-platform.yml) is separate and never reachable from an
+# agent branch — the platform firewall fails any room/* diff touching it.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "product/**"
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: >
+          Exact commit to deploy. Must be reachable from main (the ancestor
+          check below enforces this). The platform reconciler dispatches this
+          after each squash merge, and again with a PRIOR good SHA to execute
+          a revert. Empty means the current main head.
+        required: false
+        default: ""
+
+permissions: {}
+
+concurrency:
+  group: app-harness-product-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      GH_REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ github.token }}
+      DEPLOY_SHA: ${{ inputs.sha || github.sha }}
+    steps:
+      - name: Check out the exact requested revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require the deployed revision to still be reachable from main
+        run: |
+          test "$(git rev-parse HEAD)" = "$DEPLOY_SHA"
+          remote_main="$(gh api "repos/${GH_REPO}/git/ref/heads/main" --jq '.object.sha')"
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$DEPLOY_SHA" "$remote_main"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install exact merged-main dependencies without deployment credentials
+        run: npm ci
+      - name: Run the product's own test gate
+        run: npm --workspace @app-harness/product test
+      # DEPLOY_SHA is injected as a Worker var so the product's /version
+      # endpoint serves the exact deployed revision — the platform's observed
+      # deploy ("Live" posts only when /version serves the merged SHA) and the
+      # liveness watchdog both read it.
+      - name: Deploy the verified revision with its SHA stamped into /version
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: npm --workspace @app-harness/product run deploy -- --var "DEPLOY_SHA:$DEPLOY_SHA"

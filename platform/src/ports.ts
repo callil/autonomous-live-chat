@@ -58,31 +58,67 @@ export class BindingRunnerPort implements RunnerPort {
 	}
 }
 
-/** The full case file the Doctor sees on a deviation. */
+export type DoctorCaseKind =
+	| "run-ttl-exceeded"
+	| "verify-ttl-exceeded"
+	| "deploy-ttl-exceeded"
+	| "ci-red"
+	| "merge-refused"
+	| "run-failed"
+	| "dispatch-refused"
+	| "liveness-failed-migration"
+	| "zombie-result"
+	| "unrecognized-state";
+
+/**
+ * The full case file the Doctor sees on a park event: the mechanical
+ * classification, the verbatim request, and the recent ledger facts. The
+ * Doctor never sees anything the ledger does not record.
+ */
 export type DoctorCase = {
-	kind:
-		| "run-ttl-exceeded"
-		| "verify-ttl-exceeded"
-		| "deploy-ttl-exceeded"
-		| "ci-red"
-		| "merge-refused"
-		| "liveness-failed-migration"
-		| "zombie-result"
-		| "unrecognized-state";
+	kind: DoctorCaseKind;
 	runId?: string;
 	intentId?: string;
 	detail: string;
+	requestText?: string;
+	requestedBy?: string;
+	/** Whether the retry-once lever is mechanically available for this case. */
+	retryAvailable?: boolean;
+	/** Bounded recent ledger facts, oldest first. */
+	recentEvents?: string[];
 };
 
+/**
+ * The Doctor's output is CONSTRAINED to two dispositions plus a public note.
+ * retry-once re-runs the intent exactly once from latest main; anything else
+ * stays parked for a human. No patch DSL, no free-form commands (task #17 is
+ * deferred; task #20 binds the output surface).
+ */
 export type DoctorVerdict = {
-	disposition: "park-for-human";
-	/** Deterministic public status note; phase 2 has no model in this path. */
+	disposition: "stay-parked" | "retry-once";
+	/** The public status note, shown verbatim in the room feed. */
 	publicNote: string;
 };
 
 /**
- * TODO(phase 3): strong-model Doctor invoked only on deviations, output
- * constrained to typed commands + park-for-human + a public status note.
+ * The case kinds where a fresh attempt can honestly change the outcome. A
+ * deploy-phase park (merge already landed) or a migration-crossed liveness
+ * failure can never be retried by re-building — those park for a human no
+ * matter what the model says.
+ */
+export const RETRYABLE_DOCTOR_KINDS: ReadonlySet<DoctorCaseKind> = new Set([
+	"run-ttl-exceeded",
+	"verify-ttl-exceeded",
+	"ci-red",
+	"merge-refused",
+	"run-failed",
+]);
+
+/**
+ * The Doctor seam (phase 3): a strong model invoked ONLY on park events, fed
+ * the full case file, output constrained to DoctorVerdict. The deterministic
+ * stub remains the fail-open floor when the model or its credential is
+ * unavailable.
  */
 export interface DoctorPort {
 	consult(caseFile: DoctorCase): Promise<DoctorVerdict>;
@@ -95,9 +131,9 @@ export class StubRunnerPort implements RunnerPort {
 	}
 }
 
-/** Phase 2: every deviation parks for a human with a deterministic note. */
+/** The deterministic floor: every deviation parks for a human with an honest note. */
 export class StubDoctorPort implements DoctorPort {
 	async consult(caseFile: DoctorCase): Promise<DoctorVerdict> {
-		return { disposition: "park-for-human", publicNote: `Parked for human review (${caseFile.kind}): ${caseFile.detail}` };
+		return { disposition: "stay-parked", publicNote: `Parked for human review (${caseFile.kind}): ${caseFile.detail}` };
 	}
 }

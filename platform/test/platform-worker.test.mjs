@@ -5,10 +5,12 @@ import test from "node:test";
 const worker = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
 const ports = await readFile(new URL("../src/ports.ts", import.meta.url), "utf8");
 const github = await readFile(new URL("../src/github.ts", import.meta.url), "utf8");
+const doctor = await readFile(new URL("../src/doctor.ts", import.meta.url), "utf8");
 const wrangler = await readFile(new URL("../wrangler.jsonc", import.meta.url), "utf8");
 const firewall = await readFile(new URL("../../.github/workflows/platform-firewall.yml", import.meta.url), "utf8");
 const deployWorkflow = await readFile(new URL("../../.github/workflows/deploy-platform.yml", import.meta.url), "utf8");
-const productDeploy = await readFile(new URL("../../.github/workflows/deploy-demo-on-main.yml", import.meta.url), "utf8");
+const productDeploy = await readFile(new URL("../../.github/workflows/deploy-product.yml", import.meta.url), "utf8");
+const provisionWorkflow = await readFile(new URL("../../.github/workflows/provision-runtime-secrets.yml", import.meta.url), "utf8");
 
 test("the platform worker never imports the legacy operator machinery", () => {
 	for (const source of [worker, ports, github]) {
@@ -45,17 +47,40 @@ test("webhook pokes are HMAC-verified and fail closed; even a verified poke deci
 	assert.match(github, /crypto\.subtle\.verify\("HMAC", key, signature, encoder\.encode\(body\)\)/u, "constant-time verification via WebCrypto");
 });
 
-test("the runner port is the real service binding with an honest stub fallback; the Doctor stays a stub seam", () => {
+test("the runner port is the real service binding with an honest stub fallback", () => {
 	assert.match(ports, /interface RunnerPort/u);
 	assert.match(ports, /interface DoctorPort/u);
 	assert.match(ports, /class BindingRunnerPort/u);
 	assert.match(ports, /class StubRunnerPort/u);
 	assert.match(ports, /class StubDoctorPort/u);
-	assert.match(ports, /TODO\(phase 3\)/u);
 	assert.match(worker, /new BindingRunnerPort\(binding as RunnerBinding\) : new StubRunnerPort\(\)/u);
-	assert.match(worker, /new StubDoctorPort\(\)/u);
 	assert.match(wrangler, /"binding": "RUNNER"/u);
 	assert.match(wrangler, /"service": "app-harness-platform-runner"/u);
+});
+
+test("the Doctor is claude-opus-5 on park events only, constrained and fail-open (task #18)", () => {
+	assert.match(worker, /env\.ANTHROPIC_API_KEY \? new AnthropicDoctorPort\(env\.ANTHROPIC_API_KEY\) : new StubDoctorPort\(\)/u, "no credential means the deterministic stub");
+	assert.match(doctor, /"claude-opus-5"/u);
+	assert.match(doctor, /output_config: \{ format: \{ type: "json_schema", schema: VERDICT_SCHEMA \} \}/u, "the verdict is schema-constrained on the API side");
+	assert.match(doctor, /enum: \["stay-parked", "retry-once"\]/u, "the output surface is exactly two dispositions plus a note");
+	assert.match(doctor, /return this\.fallback\.consult\(caseFile\);/u, "every failure fails open to park-for-human");
+	assert.match(doctor, /AbortSignal\.timeout\(DOCTOR_TIMEOUT_MS\)/u, "the consult is bounded");
+	assert.match(ports, /RETRYABLE_DOCTOR_KINDS/u);
+	assert.doesNotMatch(ports.slice(ports.indexOf("RETRYABLE_DOCTOR_KINDS")).split("]")[0], /deploy-ttl-exceeded|liveness/u, "a landed merge or a migration-crossed liveness failure can never be re-built");
+	assert.match(doctor, /verdict\.disposition === "retry-once" && retryAvailable \? "retry-once" : "stay-parked"/u, "the mechanical clamp overrides the model");
+});
+
+test("park events queue durable Doctor cases; the reconciler consults and applies the verdict", () => {
+	assert.match(worker, /DOCTOR_QUEUE_KEY = "doctor-queue"/u);
+	assert.match(worker, /queueDoctorCase\(\{ kind: "ci-red"/u);
+	assert.match(worker, /queueDoctorCase\(\{ kind: "merge-refused"/u);
+	assert.match(worker, /queueDoctorCase\(\{ kind: "run-failed"/u);
+	assert.match(worker, /queueDoctorCase\(\{ kind: "dispatch-refused"/u);
+	assert.match(worker, /queueDoctorCase\(\{ kind: "liveness-failed-migration"/u);
+	assert.match(worker, /case "consult-doctor": return this\.executeConsultDoctor\(now\);/u);
+	assert.match(worker, /retryIntent\(intent, \{ runId, at: now \}\)/u, "retry-once re-queues the intent exactly once");
+	assert.match(worker, /"intent-retried"/u);
+	assert.match(worker, /if \(verdict\.disposition === "retry-once" && !retryAvailable\) verdict = \{ disposition: "stay-parked"/u, "the DO clamps the disposition again");
 });
 
 test("the pipeline merges at the exact verified head SHA and posts Live only on observation", () => {
@@ -82,6 +107,30 @@ test("the deploy legs exist: platform deploy workflow, and the product deploy st
 	assert.match(productDeploy, /inputs\.sha \|\| github\.sha/u, "the deploy leg accepts an exact SHA for merges and reverts");
 	assert.match(productDeploy, /--var "DEPLOY_SHA:\$DEPLOY_SHA"/u, "the deployed revision is stamped into /version");
 	assert.match(productDeploy, /git merge-base --is-ancestor/u, "only revisions reachable from main may deploy");
+});
+
+test("identity gates the room: signed session verified by the worker, forwarded to the DO, attached to the socket", () => {
+	assert.match(worker, /if \(!env\.ADMIN_TOKEN\) return new Response\("Identity is not provisioned yet\.", \{ status: 503 \}\);/u, "sessions fail closed without the secret");
+	assert.match(worker, /const identity = token \? await verifySessionToken\(env\.ADMIN_TOKEN, token\) : null;/u);
+	assert.match(worker, /return new Response\("A signed session is required\.", \{ status: 401 \}\);/u, "the room WebSocket refuses anonymous upgrades");
+	assert.match(worker, /server\.serializeAttachment\(\{ id, name \}/u, "identity survives hibernation on the socket attachment");
+	assert.match(worker, /openedById: identity\.id/u, "attribution keys on the stable id, not the display name");
+	assert.match(worker, /underOpenIntentLimit\(intents, identity\.id\)/u, "the open-intent cap keys on the stable id");
+	assert.match(worker, /admitRateLimited\(this\.chatWindows, identity\.id/u, "chat is rate limited per stable id");
+	assert.match(worker, /HttpOnly; SameSite=Lax/u, "the session cookie is HttpOnly");
+	assert.doesNotMatch(worker, /message\.author/u, "client-supplied author names are gone; the session is the author");
+});
+
+test("the platform serves the frozen minimal fallback UI (task #13)", () => {
+	assert.match(worker, /pathname === "\/fallback"/u);
+	assert.match(worker, /FALLBACK_HTML/u);
+	assert.match(wrangler, /app-harness-product\.coda-a\.workers\.dev/u, "the observed-deploy loop watches the PRODUCT worker, not the legacy demo");
+});
+
+test("the provisioning workflow owns the platform and runner secrets from repo-level Actions secrets", () => {
+	for (const fragment of ["wrangler secret put ADMIN_TOKEN --name app-harness-platform", "wrangler secret put GITHUB_APP_PRIVATE_KEY --name app-harness-platform", "wrangler secret put GITHUB_WEBHOOK_SECRET --name app-harness-platform", "wrangler secret put ANTHROPIC_API_KEY --name app-harness-platform", "wrangler secret put OPENAI_API_KEY --name app-harness-platform-runner"]) {
+		assert.ok(provisionWorkflow.includes(fragment), fragment);
+	}
 });
 
 test("the worker uses websocket hibernation, not in-memory socket bookkeeping", () => {

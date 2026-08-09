@@ -8,6 +8,7 @@ import {
 	dispatchIntent,
 	OPEN_INTENT_LIMIT,
 	recordIntentOutcome,
+	retryIntent,
 	underOpenIntentLimit,
 	withdrawIntent,
 } from "../contracts/intent.js";
@@ -63,4 +64,23 @@ test("per-user open-intent rate limit counts open and dispatched, not terminal",
 	assert.equal(OPEN_INTENT_LIMIT, 5);
 	assert.ok(underOpenIntentLimit(intents, "callil"));
 	assert.ok(!underOpenIntentLimit(intents, "callil", 2), "the cap refuses the sixth open intent at the default limit");
+});
+
+test("the Doctor's retry is exactly once, and only while dispatched", () => {
+	let intent = createIntent({ id: "intent-9", openedBy: "Ada", openedById: "user-11111111-1111-1111-1111-111111111111", at: 1, refs: { utteranceSeqs: [], annotationSeqs: [1] }, openSeq: 1 });
+	assert.throws(() => retryIntent(intent, { runId: "run-9", at: 2 }), /only a dispatched intent/u);
+	intent = dispatchIntent(intent, { runId: "run-1", at: 2 });
+	const retried = retryIntent(intent, { runId: "run-2", at: 3 });
+	assert.equal(retried.runId, "run-2");
+	assert.equal(retried.retried, true);
+	assert.equal(retried.state, "dispatched", "the intent stays dispatched through its retry");
+	assert.throws(() => retryIntent(retried, { runId: "run-3", at: 4 }), /already used its one retry/u);
+});
+
+test("attribution and the open-intent cap key on the stable session id", () => {
+	const byId = createIntent({ id: "intent-10", openedBy: "Ada", openedById: "user-22222222-2222-2222-2222-222222222222", at: 1, refs: { utteranceSeqs: [], annotationSeqs: [1] }, openSeq: 2 });
+	assert.equal(countOpenIntents([byId], "user-22222222-2222-2222-2222-222222222222"), 1, "the stable id counts");
+	assert.equal(countOpenIntents([byId], "Ada"), 0, "the display name does not");
+	const legacy = { ...byId, openedById: undefined, id: "intent-11" };
+	assert.equal(countOpenIntents([legacy], "Ada"), 1, "pre-identity records fall back to the display name");
 });

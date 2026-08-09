@@ -9,6 +9,7 @@ export type LedgerEventKind =
 	| "intent-live"
 	| "intent-parked"
 	| "intent-withdrawn"
+	| "intent-retried"
 	| "run-queued"
 	| "run-started"
 	| "run-heartbeat"
@@ -25,7 +26,8 @@ export type LedgerEventKind =
 	| "room-frozen"
 	| "room-unfrozen"
 	| "revert-requested"
-	| "budget-exhausted";
+	| "budget-exhausted"
+	| "doctor-note";
 
 export type AnnotationPayload = {
 	kind: "target" | "comment" | "draw";

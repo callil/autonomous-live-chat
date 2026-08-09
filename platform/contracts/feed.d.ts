@@ -1,7 +1,7 @@
 import type { LedgerEvent } from "./ledger.js";
 import type { QueuedRun, QueueChipStatus } from "./queue.js";
 
-export type FeedItem = { seq: number; at: number; kind: string; text: string };
+export type FeedItem = { seq: number; at: number; kind: string; text: string; refs?: { prNumber?: number; sha?: string } };
 export type QueueChip = QueueChipStatus & { label: string };
 export type FeedPayload = { items: FeedItem[]; queue: QueueChip[]; frozen: boolean };
 
