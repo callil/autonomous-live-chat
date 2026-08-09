@@ -32,9 +32,10 @@
 		// bearer credential is a worker secret, never a var. GitHub App
 		// credentials (GITHUB_APP_ID, GITHUB_APP_INSTALLATION_ID,
 		// GITHUB_APP_PRIVATE_KEY), the webhook secret (GITHUB_WEBHOOK_SECRET),
-		// and the Doctor's model credential (ANTHROPIC_API_KEY — optional;
-		// without it the Doctor degrades to the deterministic park-for-human
-		// stub) are worker secrets too.
+		// and the Doctor's model credential (OPENAI_API_KEY — the same key the
+		// platform runner rides; optional here, and without it the Doctor
+		// degrades to the deterministic park-for-human stub) are worker
+		// secrets too.
 		"ROOM_DAILY_BUDGET_USD": "25",
 		// The one repository this platform may read, merge, and deploy.
 		"REPOSITORY": "callil/autonomous-live-chat",

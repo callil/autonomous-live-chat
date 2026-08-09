@@ -1,23 +1,23 @@
 import { RETRYABLE_DOCTOR_KINDS, StubDoctorPort, type DoctorCase, type DoctorPort, type DoctorVerdict } from "./ports.js";
 
 /**
- * The real Doctor (phase 3): claude-opus-5 over the Anthropic Messages API,
- * invoked ONLY on park events with the full case file. The output is doubly
- * constrained — a strict JSON schema on the API side, and a mechanical
- * disposition clamp on ours (retry-once is honored only when the case is
- * mechanically retryable). EVERY failure — missing credential, timeout,
- * refusal, malformed output — fails open to the deterministic stub, which
- * parks for a human. The Doctor can never wedge the pipeline.
+ * The real Doctor (phase 3): gpt-5.6-sol over the OpenAI Responses API — the
+ * same model and credential the platform runner's agent rides — invoked ONLY
+ * on park events with the full case file. The output is doubly constrained —
+ * a strict JSON schema on the API side, and a mechanical disposition clamp on
+ * ours (retry-once is honored only when the case is mechanically retryable).
+ * EVERY failure — missing credential, timeout, refusal, malformed output —
+ * fails open to the deterministic stub, which parks for a human. The Doctor
+ * can never wedge the pipeline.
  *
  * Raw fetch on purpose: the frozen platform Worker carries zero runtime
  * dependencies (same convention as the GitHub App capability in github.ts).
  */
 
-const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
-const ANTHROPIC_VERSION = "2023-06-01";
-const DOCTOR_MODEL = "claude-opus-5";
-/** Thinking is on by default on claude-opus-5 and max_tokens caps thinking + text together. */
-const DOCTOR_MAX_TOKENS = 8_000;
+const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
+const DOCTOR_MODEL = "gpt-5.6-sol";
+/** Reasoning tokens and the verdict text share this cap (Responses API semantics). */
+const DOCTOR_MAX_OUTPUT_TOKENS = 8_000;
 const DOCTOR_TIMEOUT_MS = 45_000;
 const MAX_NOTE_CHARS = 400;
 
@@ -43,7 +43,7 @@ const SYSTEM_PROMPT = [
 	"Also write publicNote: one or two sentences shown verbatim in the public room feed. Be honest and specific about what happened and what happens next. Never blame the requester. Never promise anything beyond the chosen disposition.",
 ].join("\n");
 
-export class AnthropicDoctorPort implements DoctorPort {
+export class OpenAiDoctorPort implements DoctorPort {
 	private readonly apiKey: string;
 	private readonly fallback: DoctorPort;
 
@@ -55,27 +55,31 @@ export class AnthropicDoctorPort implements DoctorPort {
 	async consult(caseFile: DoctorCase): Promise<DoctorVerdict> {
 		const retryAvailable = caseFile.retryAvailable === true && RETRYABLE_DOCTOR_KINDS.has(caseFile.kind);
 		try {
-			const response = await fetch(ANTHROPIC_URL, {
+			const response = await fetch(OPENAI_RESPONSES_URL, {
 				method: "POST",
 				headers: {
 					"content-type": "application/json",
-					"x-api-key": this.apiKey,
-					"anthropic-version": ANTHROPIC_VERSION,
+					Authorization: `Bearer ${this.apiKey}`,
 				},
 				body: JSON.stringify({
 					model: DOCTOR_MODEL,
-					max_tokens: DOCTOR_MAX_TOKENS,
-					system: SYSTEM_PROMPT,
-					output_config: { format: { type: "json_schema", schema: VERDICT_SCHEMA } },
-					messages: [{ role: "user", content: JSON.stringify({ ...caseFile, retryAvailable }, null, 1) }],
+					instructions: SYSTEM_PROMPT,
+					input: JSON.stringify({ ...caseFile, retryAvailable }, null, 1),
+					store: false,
+					reasoning: { effort: "medium" },
+					max_output_tokens: DOCTOR_MAX_OUTPUT_TOKENS,
+					text: { format: { type: "json_schema", name: "doctor_verdict", strict: true, schema: VERDICT_SCHEMA } },
 				}),
 				signal: AbortSignal.timeout(DOCTOR_TIMEOUT_MS),
 			});
-			if (!response.ok) throw new Error(`anthropic-${response.status}`);
-			const body = await response.json() as { stop_reason?: unknown; content?: Array<{ type?: unknown; text?: unknown }> };
-			// A refusal or truncation means no trustworthy verdict: fail open.
-			if (body.stop_reason !== "end_turn") throw new Error(`doctor-stop-${String(body.stop_reason)}`);
-			const text = (body.content ?? []).find((block) => block.type === "text")?.text;
+			if (!response.ok) throw new Error(`openai-${response.status}`);
+			const body = await response.json() as { status?: unknown; output?: Array<{ type?: unknown; content?: Array<{ type?: unknown; text?: unknown }> }> };
+			// A refusal, truncation, or failed response means no trustworthy verdict: fail open.
+			if (body.status !== "completed") throw new Error(`doctor-status-${String(body.status)}`);
+			const text = (body.output ?? [])
+				.filter((item) => item.type === "message")
+				.flatMap((item) => item.content ?? [])
+				.find((part) => part.type === "output_text")?.text;
 			if (typeof text !== "string") throw new Error("doctor-no-text");
 			const verdict = JSON.parse(text) as { disposition?: unknown; publicNote?: unknown };
 			if (verdict.disposition !== "stay-parked" && verdict.disposition !== "retry-once") throw new Error("doctor-disposition-invalid");
