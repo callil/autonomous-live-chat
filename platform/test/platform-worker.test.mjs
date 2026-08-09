@@ -58,10 +58,11 @@ test("the runner port is the real service binding with an honest stub fallback",
 	assert.match(wrangler, /"service": "app-harness-platform-runner"/u);
 });
 
-test("the Doctor is claude-opus-5 on park events only, constrained and fail-open (task #18)", () => {
-	assert.match(worker, /env\.ANTHROPIC_API_KEY \? new AnthropicDoctorPort\(env\.ANTHROPIC_API_KEY\) : new StubDoctorPort\(\)/u, "no credential means the deterministic stub");
-	assert.match(doctor, /"claude-opus-5"/u);
-	assert.match(doctor, /output_config: \{ format: \{ type: "json_schema", schema: VERDICT_SCHEMA \} \}/u, "the verdict is schema-constrained on the API side");
+test("the Doctor is gpt-5.6-sol on park events only, constrained and fail-open (task #18)", () => {
+	assert.match(worker, /env\.OPENAI_API_KEY \? new OpenAiDoctorPort\(env\.OPENAI_API_KEY\) : new StubDoctorPort\(\)/u, "no credential means the deterministic stub");
+	assert.match(doctor, /"gpt-5\.6-sol"/u);
+	assert.match(doctor, /text: \{ format: \{ type: "json_schema", name: "doctor_verdict", strict: true, schema: VERDICT_SCHEMA \} \}/u, "the verdict is schema-constrained on the API side");
+	assert.doesNotMatch(doctor, /anthropic/iu, "the Anthropic code path is gone; the Doctor rides the runner's OpenAI key");
 	assert.match(doctor, /enum: \["stay-parked", "retry-once"\]/u, "the output surface is exactly two dispositions plus a note");
 	assert.match(doctor, /return this\.fallback\.consult\(caseFile\);/u, "every failure fails open to park-for-human");
 	assert.match(doctor, /AbortSignal\.timeout\(DOCTOR_TIMEOUT_MS\)/u, "the consult is bounded");
@@ -128,9 +129,10 @@ test("the platform serves the frozen minimal fallback UI (task #13)", () => {
 });
 
 test("the provisioning workflow owns the platform and runner secrets from repo-level Actions secrets", () => {
-	for (const fragment of ["wrangler secret put ADMIN_TOKEN --name app-harness-platform", "wrangler secret put GITHUB_APP_PRIVATE_KEY --name app-harness-platform", "wrangler secret put GITHUB_WEBHOOK_SECRET --name app-harness-platform", "wrangler secret put ANTHROPIC_API_KEY --name app-harness-platform", "wrangler secret put OPENAI_API_KEY --name app-harness-platform-runner"]) {
+	for (const fragment of ["wrangler secret put ADMIN_TOKEN --name app-harness-platform", "wrangler secret put GITHUB_APP_PRIVATE_KEY --name app-harness-platform", "wrangler secret put GITHUB_WEBHOOK_SECRET --name app-harness-platform", "wrangler secret put OPENAI_API_KEY --name app-harness-platform", "wrangler secret put OPENAI_API_KEY --name app-harness-platform-runner"]) {
 		assert.ok(provisionWorkflow.includes(fragment), fragment);
 	}
+	assert.ok(!provisionWorkflow.includes("ANTHROPIC"), "the Anthropic secret plumbing is gone; the Doctor rides APP_HARNESS_OPENAI_API_KEY");
 });
 
 test("the worker uses websocket hibernation, not in-memory socket bookkeeping", () => {

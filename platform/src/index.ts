@@ -32,7 +32,7 @@ import { classifyCheckRuns, includesMigrationMarker } from "../contracts/checks.
 import { decide, type ReconcileAction } from "../contracts/reconcile.js";
 import { admitRateLimited, mintSessionToken, verifySessionToken, SESSION_TTL_MS, type SessionIdentity } from "../contracts/session.js";
 import { GitHubApp, observeDeployedVersion, syntheticLivenessCheck, verifyWebhookSignature } from "./github.js";
-import { AnthropicDoctorPort } from "./doctor.js";
+import { OpenAiDoctorPort } from "./doctor.js";
 import { FALLBACK_HTML } from "./fallback.js";
 import { BindingRunnerPort, RETRYABLE_DOCTOR_KINDS, StubDoctorPort, StubRunnerPort, type DoctorCase, type DoctorCaseKind, type DoctorPort, type RunnerBinding, type RunnerPort } from "./ports.js";
 
@@ -42,7 +42,7 @@ type RuntimeEnv = Env & {
 	GITHUB_APP_INSTALLATION_ID?: string;
 	GITHUB_APP_PRIVATE_KEY?: string;
 	GITHUB_WEBHOOK_SECRET?: string;
-	ANTHROPIC_API_KEY?: string;
+	OPENAI_API_KEY?: string;
 };
 
 type ClientMessage =
@@ -130,9 +130,10 @@ export class RoomDO extends DurableObject<RuntimeEnv> {
 		super(ctx, env);
 		const binding = env.RUNNER as unknown as RunnerBinding | undefined;
 		this.runnerPort = binding ? new BindingRunnerPort(binding as RunnerBinding) : new StubRunnerPort();
-		// The real Doctor rides the ANTHROPIC_API_KEY secret; without it the
-		// deterministic stub parks every deviation for a human (fail-open).
-		this.doctorPort = env.ANTHROPIC_API_KEY ? new AnthropicDoctorPort(env.ANTHROPIC_API_KEY) : new StubDoctorPort();
+		// The real Doctor rides the OPENAI_API_KEY secret (the same credential
+		// the platform runner's agent uses); without it the deterministic stub
+		// parks every deviation for a human (fail-open).
+		this.doctorPort = env.OPENAI_API_KEY ? new OpenAiDoctorPort(env.OPENAI_API_KEY) : new StubDoctorPort();
 		this.ctx.blockConcurrencyWhile(async () => {
 			await this.scheduleReconcile(Date.now() + RECONCILE_INTERVAL_MS);
 		});
