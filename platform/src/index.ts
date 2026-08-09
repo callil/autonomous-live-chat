@@ -591,7 +591,15 @@ export class RoomDO extends DurableObject<RuntimeEnv> {
 		}
 		// Green: derive the deterministic migration marker from the real diff,
 		// then merge exactly the verified head SHA — nothing else can ride in.
-		const migration = includesMigrationMarker(await app.listChangedFiles(action.prNumber));
+		const changedFiles = await app.listChangedFiles(action.prNumber);
+		const migration = includesMigrationMarker(changedFiles);
+		// deploy-product.yml also triggers on pushes to main under product/**.
+		// When the merge touches that path the push trigger already covers it,
+		// and dispatching as well produced a second identical run that queued
+		// behind the first on the deploy concurrency group — pure tail on the
+		// observed-deploy path. Dispatch only when the push trigger will NOT
+		// fire, so a deploy always has exactly one cause.
+		const pushTriggerCovers = changedFiles.some((file) => file.startsWith("product/"));
 		const merge = await app.squashMerge(action.prNumber, action.headSha);
 		if (!merge.merged) {
 			const detail = `GitHub refused the exact-SHA squash merge (${merge.reason}).`;
@@ -613,8 +621,11 @@ export class RoomDO extends DurableObject<RuntimeEnv> {
 			await this.appendEvent("pr-merged", { runId: action.runId, intentId: run.intentId, prNumber: action.prNumber, mergeSha: merge.mergeSha }, now);
 			await this.appendEvent("deploy-requested", { sha: merge.mergeSha, runId: action.runId }, now);
 		});
-		// Dispatch the deploy leg. Best effort: the push-to-main trigger on the
-		// same workflow is the backstop, and observe-deploy polls /version either way.
+		// Dispatch the deploy leg only when the push trigger will not already do
+		// it. Either way observe-deploy is the sole authority on "Live": it polls
+		// /version until the merged SHA is actually served, so a missed trigger
+		// costs the run its deploy TTL and parks honestly rather than hanging.
+		if (pushTriggerCovers) return;
 		try {
 			await app.dispatchWorkflow(DEPLOY_WORKFLOW_FILE, { sha: merge.mergeSha });
 		} catch (error) {

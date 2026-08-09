@@ -95,8 +95,19 @@ test("the pipeline merges at the exact verified head SHA and posts Live only on 
 	assert.match(worker, /squashMerge\(action\.prNumber, action\.headSha\)/u);
 	assert.match(worker, /classifyCheckRuns\(await app\.listCheckRuns\(action\.headSha\)\)/u, "CI verdicts are read for the exact SHA and classified mechanically");
 	assert.match(worker, /const observed = await observeDeployedVersion\(this\.env\.PRODUCT_URL\);\s*if \(observed !== action\.mergeSha\) return;/u, "merged completes only when /version serves the merge SHA");
-	assert.match(worker, /includesMigrationMarker\(await app\.listChangedFiles\(action\.prNumber\)\)/u, "the migration marker comes from the actual diff");
+	assert.match(worker, /const changedFiles = await app\.listChangedFiles\(action\.prNumber\);/u, "the diff is read from the merged PR");
+	assert.match(worker, /includesMigrationMarker\(changedFiles\)/u, "the migration marker comes from the actual diff");
 	assert.match(worker, /dispatchWorkflow\(DEPLOY_WORKFLOW_FILE/u);
+	// Exactly one cause per deploy: the reconciler dispatches only when the
+	// workflow's own push-on-product/** trigger will not already have fired.
+	assert.match(worker, /const pushTriggerCovers = changedFiles\.some\(\(file\) => file\.startsWith\("product\/"\)\);/u);
+	assert.match(worker, /if \(pushTriggerCovers\) return;/u, "no duplicate dispatch when the push trigger covers the merge");
+	// The skip above is only correct while the workflow really does deploy on
+	// pushes to main under product/**. If that filter ever changes, the
+	// reconciler would stop dispatching for merges nothing else deploys, so
+	// pin the two together here rather than discovering it as a parked run.
+	assert.match(productDeploy, /push:\s*\n\s*branches: \[main\]\s*\n\s*paths:\s*\n\s*- "product\/\*\*"/u, "the push trigger the reconciler defers to still exists");
+	assert.match(productDeploy, /group: app-harness-product-deploy\n/u, "deploys of different revisions stay strictly serialized");
 });
 
 test("the liveness watchdog reverts deterministically and refuses to cross migrations", () => {
