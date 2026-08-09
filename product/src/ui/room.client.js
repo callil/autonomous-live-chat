@@ -340,14 +340,20 @@
 	joinForm.addEventListener("submit", async (event) => {
 		event.preventDefault();
 		const name = joinName.value.trim();
+		const joinButton = joinForm.querySelector("button[type=submit]");
+		joinButton.disabled = true;
+		joinError.textContent = "Joining…";
 		try {
 			const response = await fetch("/api/session", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name }) });
-			if (!response.ok) { joinError.textContent = await response.text(); return; }
+			if (!response.ok) { joinError.textContent = (await response.text()) || `Join failed (${response.status}).`; return; }
 			identity = await response.json();
+			joinError.textContent = "";
 			join.hidden = true;
 			connect();
 		} catch {
 			joinError.textContent = "Could not reach the room. Try again.";
+		} finally {
+			joinButton.disabled = false;
 		}
 	});
 
