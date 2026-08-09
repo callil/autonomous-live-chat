@@ -1,0 +1,39 @@
+/**
+ * The FROZEN platform Worker: chat data plane, ledger, queue, feed, deploy
+ * rails. Agent branches (room/*) can never touch this file — the platform
+ * firewall workflow fails any such diff.
+ */
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "app-harness-platform",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-08-05",
+	"migrations": [
+		{
+			"new_sqlite_classes": [
+				"RoomDO"
+			],
+			"tag": "v1"
+		}
+	],
+	"durable_objects": {
+		"bindings": [
+			{
+				"class_name": "RoomDO",
+				"name": "ROOM_DO"
+			}
+		]
+	},
+	"observability": {
+		"enabled": true
+	},
+	"vars": {
+		// The room's daily spend ceiling, enforced at dispatch. The owner
+		// bearer credential is a worker secret, never a var.
+		"ROOM_DAILY_BUDGET_USD": "25"
+	},
+	"upload_source_maps": true,
+	"compatibility_flags": [
+		"nodejs_compat"
+	]
+}
