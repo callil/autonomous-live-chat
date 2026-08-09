@@ -62,9 +62,12 @@ test("the client speaks only the platform's room protocol, same-origin", () => {
 	assert.doesNotMatch(client, /https:\/\/app-harness-platform/u, "no cross-origin calls: everything rides the product proxy");
 });
 
-test("the product worker is binding-isolated: zero DOs, zero services, only the proxy seam", () => {
-	assert.doesNotMatch(wrangler, /durable_objects|"services"|kv_namespaces|d1_databases|r2_buckets|queues/u, "ZERO ledger access by construction");
+test("the product worker is binding-isolated: zero DOs, only the platform's public fetch seam", () => {
+	assert.doesNotMatch(wrangler, /durable_objects|kv_namespaces|d1_databases|r2_buckets|queues|ROOM_DO|RUNNER/u, "ZERO ledger access by construction");
+	assert.match(wrangler, /"service": "app-harness-platform"\s*\}/u, "the sole service binding targets the platform's PUBLIC fetch handler");
+	assert.doesNotMatch(wrangler, /"entrypoint"/u, "no named entrypoint: only the same narrow HTTP surface the platform origin serves");
 	assert.match(worker, /new URL\(url\.pathname \+ url\.search, env\.PLATFORM_ORIGIN\)/u, "the /api proxy is verbatim");
+	assert.match(worker, /env\.PLATFORM\.fetch\(/u, "the proxy rides the service binding");
 	assert.match(worker, /\/version/u);
 	assert.match(worker, /DEPLOY_SHA/u, "the deployed SHA is served for observed deploys");
 });

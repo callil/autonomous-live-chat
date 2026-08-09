@@ -1,9 +1,12 @@
 /**
  * The PRODUCT worker (phase 3 product/platform split, task #13): the
  * self-modifiable room UI. It speaks ONLY to the platform's room WebSocket
- * and narrow HTTP API through a plain same-origin proxy — ZERO Durable
- * Object bindings, ZERO service bindings, no ledger access of any kind
- * (v1 non-negotiable: binding-level isolation).
+ * and narrow HTTP API — ZERO Durable Object bindings and no ledger access
+ * of any kind (v1 non-negotiable: binding-level isolation). The single
+ * PLATFORM service binding below targets the platform Worker's PUBLIC fetch
+ * handler — the same narrow HTTP surface as its origin, nothing more —
+ * because same-account worker-to-worker fetches over workers.dev are not
+ * routable on Cloudflare.
  *
  * This config file itself is frozen by the platform firewall (agent branches
  * cannot touch any wrangler config); the UI source under src/ is the
@@ -23,9 +26,14 @@
 		{ "type": "Text", "globs": ["**/*.html", "**/*.css", "**/*.client.js"] }
 	],
 	"vars": {
-		// The frozen platform's public origin: every /api/* request (including
-		// the room WebSocket upgrade) proxies there verbatim.
+		// The frozen platform's public origin, used only to name the upstream
+		// URL handed to the PLATFORM binding and the fallback redirect target.
 		"PLATFORM_ORIGIN": "https://app-harness-platform.coda-a.workers.dev"
 	},
+	"services": [
+		// The platform's PUBLIC fetch handler (no entrypoint): exactly the
+		// narrow HTTP API + room WebSocket its origin serves.
+		{ "binding": "PLATFORM", "service": "app-harness-platform" }
+	],
 	"upload_source_maps": true
 }
