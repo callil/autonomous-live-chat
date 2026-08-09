@@ -13,6 +13,8 @@ import { stampDataLoc } from "./stamp.js";
 
 type ProductEnv = {
 	PLATFORM_ORIGIN: string;
+	/** The platform Worker's PUBLIC fetch handler — the same narrow HTTP API its origin serves. */
+	PLATFORM: { fetch(request: Request): Promise<Response> };
 	/** Injected at deploy time (--var DEPLOY_SHA) so /version serves the exact revision. */
 	DEPLOY_SHA?: string;
 };
@@ -50,8 +52,10 @@ export default {
 			// The narrow seam to the platform: same path, same method, same
 			// headers (cookies included), same body — WebSocket upgrades ride
 			// through untouched. Nothing is rewritten and nothing is stored.
+			// The PLATFORM binding reaches the platform Worker's public fetch
+			// handler (same-account workers.dev fetches are not routable).
 			const upstream = new URL(url.pathname + url.search, env.PLATFORM_ORIGIN);
-			return fetch(new Request(upstream.toString(), request));
+			return env.PLATFORM.fetch(new Request(upstream.toString(), request));
 		}
 
 		if (request.method !== "GET") return new Response("Method not allowed", { status: 405 });
