@@ -57,6 +57,8 @@ test("annotation anchors are required per kind", () => {
 
 test("utterance and revert payloads are validated", () => {
 	assert.throws(() => createLedgerEvent({ seq: 1, kind: "utterance", at: 1, payload: { author: "callil", text: "" } }), /non-empty/u);
+	assert.ok(createLedgerEvent({ seq: 1, kind: "utterance", at: 1, payload: { author: "Phase3 E2E", text: "hi" } }), "display names with spaces speak");
+	assert.throws(() => createLedgerEvent({ seq: 1, kind: "utterance", at: 1, payload: { author: "a\nb", text: "hi" } }), /display name/u);
 	assert.throws(() => createLedgerEvent({ seq: 1, kind: "revert-requested", at: 1, payload: { sha: "abc" } }), /full Git SHA/u);
 	assert.ok(createLedgerEvent({ seq: 1, kind: "revert-requested", at: 1, payload: { sha: "a".repeat(40), by: "owner" } }));
 });
