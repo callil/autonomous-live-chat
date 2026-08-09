@@ -37,7 +37,13 @@ test("pokes only set the dirty mark; the level-triggered reconciler drives the d
 	assert.match(worker, /async poke\(\)/u);
 	assert.match(worker, /DIRTY_KEY, true/u);
 	assert.match(worker, /RECONCILE_INTERVAL_MS = 60_000/u);
-	assert.match(worker, /await this\.reconcile\(\);\s*await this\.scheduleReconcile\(Date\.now\(\) \+ RECONCILE_INTERVAL_MS\);/u, "the alarm reconciles then reschedules the steady cadence");
+	// The alarm ALWAYS reconciles and then always reschedules itself: the loop
+	// can never terminate, whatever cadence it picks.
+	assert.match(worker, /await this\.reconcile\(\);\s*await this\.scheduleReconcile\(Date\.now\(\) \+ \(await this\.nextReconcileDelayMs\(\)\)\);/u, "the alarm reconciles then always reschedules");
+	// The cadence is chosen from durable state and is never slower than the
+	// steady floor: waiting on CI or a deploy polls tighter, idle falls back.
+	assert.match(worker, /ACTIVE_RECONCILE_INTERVAL_MS = 5_000/u);
+	assert.match(worker, /return RECONCILE_INTERVAL_MS;/u, "an idle room falls back to the steady cadence");
 	assert.match(worker, /const actions = decide\(\{/u, "decisions come from the pure policy, not inline judgment");
 });
 
