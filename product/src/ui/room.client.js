@@ -39,19 +39,37 @@
 		queueStatusDot.title = count > 0 ? "Build queue active" : "Build queue idle";
 	}
 
+	/* Every speaker gets a stable colour derived from their name (FNV-1a over the
+	   normalised name), shared by their initials placeholder and their author
+	   line so the same person reads the same way everywhere. */
+	function avatarColor(name) {
+		let hash = 2166136261;
+		for (const character of name.trim().normalize("NFKC").toLocaleLowerCase()) {
+			hash ^= character.codePointAt(0);
+			hash = Math.imul(hash, 16777619);
+		}
+		return `hsl(${(hash >>> 0) % 360} 70% 40%)`;
+	}
+	function initials(value) { return value.trim().split(/\s+/u).slice(0, 2).map((part) => part[0]).join("").slice(0, 2) || "G"; }
+
 	function addChat(message) {
 		const key = message.seq ?? `${message.author}:${message.at}:${message.text}`;
 		if (renderedChat.has(key)) return;
 		renderedChat.add(key);
 		const row = stampDynamic(document.createElement("article"), "message");
 		row.className = "message";
+		const color = avatarColor(message.author ?? "");
+		const avatar = document.createElement("div");
+		avatar.className = "message-avatar"; avatar.textContent = initials(message.author ?? ""); avatar.style.color = color; avatar.setAttribute("aria-hidden", "true");
+		const body = document.createElement("div");
+		body.className = "message-body";
 		const author = document.createElement("span");
-		author.className = "author"; author.textContent = message.author;
+		author.className = "author"; author.textContent = message.author; author.style.color = color;
 		const text = document.createElement("span");
 		text.className = "message-text"; text.textContent = message.text;
 		const time = document.createElement("time");
 		if (message.at) { time.dateTime = new Date(message.at).toISOString(); time.textContent = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(message.at); }
-		row.append(author, text, time); messages.append(row);
+		body.append(author, text, time); row.append(avatar, body); messages.append(row);
 		row.scrollIntoView({ block: "end", behavior: renderedChat.size > 1 ? "smooth" : "auto" });
 	}
 
