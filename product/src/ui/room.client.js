@@ -46,6 +46,7 @@
 		author.className = "author";
 		author.textContent = message.author;
 		const text = document.createElement("span");
+		text.className = "message-text";
 		text.textContent = message.text;
 		const time = document.createElement("time");
 		if (message.at) { time.dateTime = new Date(message.at).toISOString(); time.textContent = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(message.at); }

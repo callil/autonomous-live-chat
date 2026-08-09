@@ -24,10 +24,11 @@ body { margin: 0; font: 15px/1.5 ui-sans-serif, system-ui, sans-serif; height: 1
 .columns { display: grid; grid-template-columns: 1fr minmax(17rem, 23rem); min-height: 0; }
 .conversation { overflow-y: auto; padding: 1rem 1.25rem; }
 .room-intro h1 { margin: .25rem 0 1rem; font-size: 1.15rem; }
-.messages { display: flex; flex-direction: column; gap: .45rem; }
-.message { max-width: 46rem; }
-.message .author { font-weight: 600; margin-right: .45rem; }
-.message time { font-size: .72rem; opacity: .55; margin-left: .4rem; }
+.messages { display: flex; flex-direction: column; align-items: flex-start; gap: .65rem; }
+.message { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .15rem .75rem; width: fit-content; min-width: 10rem; max-width: min(46rem, 100%); padding: .5rem .7rem; border: 1px solid var(--line); border-radius: .75rem; background: var(--soft); }
+.message .author { grid-column: 1; grid-row: 1; min-width: 0; overflow: hidden; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.message .message-text { grid-column: 1 / -1; grid-row: 2; overflow-wrap: anywhere; }
+.message time { grid-column: 2; grid-row: 1; align-self: center; font-size: .72rem; opacity: .55; white-space: nowrap; }
 
 .feed-rail { border-left: 1px solid var(--line); overflow-y: auto; padding: .85rem 1rem; font-size: .82rem; }
 .rail-section h2 { margin: .2rem 0 .5rem; font-size: .72rem; text-transform: uppercase; letter-spacing: .08em; opacity: .6; }
