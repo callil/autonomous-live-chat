@@ -28,13 +28,25 @@ export const LEDGER_EVENT_KINDS = [
 	// Run lifecycle facts (strict FIFO singleton runs).
 	"run-queued",
 	"run-started",
+	// The builder's step heartbeats, recorded as durable progress facts. They
+	// never render in the feed and never substitute for a terminal fact.
+	"run-heartbeat",
 	"run-verifying",
+	// The platform's exact-SHA squash merge landed on main.
+	"pr-merged",
 	"run-merged",
 	"run-failed",
 	"run-parked",
 	// Deploy facts: "live" is only ever an observation, never an intention.
+	// A requested deploy or rollback is recorded as a request; "observed" is
+	// reserved for the platform seeing the /version endpoint actually serve it.
+	"deploy-requested",
 	"deploy-observed",
+	"rollback-requested",
 	"rollback-observed",
+	// The post-deploy liveness watchdog's synthetic fetch failed — a public
+	// fact, and the trigger for the deterministic auto-revert.
+	"liveness-failed",
 	// Owner control facts.
 	"room-frozen",
 	"room-unfrozen",
@@ -98,7 +110,8 @@ export function createLedgerEvent({ seq, kind, at, payload }) {
 		identifier(payload.author, "Utterance author");
 		if (typeof payload.text !== "string" || !payload.text.length) throw new Error("Utterance text must be a non-empty string.");
 	}
-	if (kind === "revert-requested" && (typeof payload.sha !== "string" || !SHA.test(payload.sha))) throw new Error("Revert request must carry a full Git SHA.");
+	if ((kind === "revert-requested" || kind === "rollback-requested" || kind === "deploy-requested" || kind === "deploy-observed" || kind === "rollback-observed") && (typeof payload.sha !== "string" || !SHA.test(payload.sha))) throw new Error(`A ${kind} fact must carry a full Git SHA.`);
+	if (kind === "pr-merged" && (typeof payload.mergeSha !== "string" || !SHA.test(payload.mergeSha))) throw new Error("A pr-merged fact must carry the squash-merge commit SHA.");
 	return Object.freeze({ seq, kind, at, payload });
 }
 

@@ -29,9 +29,25 @@
 	},
 	"vars": {
 		// The room's daily spend ceiling, enforced at dispatch. The owner
-		// bearer credential is a worker secret, never a var.
-		"ROOM_DAILY_BUDGET_USD": "25"
+		// bearer credential is a worker secret, never a var. GitHub App
+		// credentials (GITHUB_APP_ID, GITHUB_APP_INSTALLATION_ID,
+		// GITHUB_APP_PRIVATE_KEY) and the webhook secret
+		// (GITHUB_WEBHOOK_SECRET) are worker secrets too.
+		"ROOM_DAILY_BUDGET_USD": "25",
+		// The one repository this platform may read, merge, and deploy.
+		"REPOSITORY": "callil/autonomous-live-chat",
+		// The live product origin: /version observation, liveness watchdog,
+		// and the feed link in commit trailers.
+		"PRODUCT_URL": "https://autonomous-live-chat.coda-a.workers.dev"
 	},
+	"services": [
+		{
+			// Private RPC to the sandbox runner Worker (platform/runner).
+			"binding": "RUNNER",
+			"service": "app-harness-platform-runner",
+			"entrypoint": "PlatformRunner"
+		}
+	],
 	"upload_source_maps": true,
 	"compatibility_flags": [
 		"nodejs_compat"

@@ -261,6 +261,13 @@ type DemoHandler = {
 export default {
 	async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
 		const url = new URL(request.url);
+		if (request.method === "GET" && url.pathname === "/version") {
+			// The deployed revision, injected at deploy time (--var DEPLOY_SHA).
+			// The platform's observed-deploy loop polls this: "Live" only posts
+			// once this endpoint actually serves the merged SHA.
+			const sha = (env as { DEPLOY_SHA?: string }).DEPLOY_SHA;
+			return Response.json({ sha: typeof sha === "string" && /^[0-9a-f]{40}$/u.test(sha) ? sha : null }, { headers: { "cache-control": "no-store" } });
+		}
 		if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/index.html")) {
 			const asset = await env.ASSETS.fetch(request);
 			const headers = new Headers(asset.headers);
