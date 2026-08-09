@@ -29,6 +29,8 @@ body { margin: 0; font: 15px/1.5 ui-sans-serif, system-ui, sans-serif; height: 1
    with the app in the feed rail. */
 .queue-bar { display: flex; align-items: center; gap: .65rem; min-height: 2.65rem; padding: .45rem 1rem; border-bottom: 1px solid var(--line); background: var(--soft); font-size: .8rem; overflow-x: auto; }
 .queue-bar h2, .rail-section h2 { margin: 0; flex: 0 0 auto; font-size: .72rem; text-transform: uppercase; letter-spacing: .08em; opacity: .6; }
+.queue-heading-marker { display: inline-block; width: .5rem; height: .5rem; margin-right: .4rem; border-radius: 50%; background: currentColor; opacity: .35; vertical-align: .02rem; }
+.queue-bar:has(.queue-chip, .pending-ack) .queue-heading-marker { background: var(--live); box-shadow: 0 0 0 .18rem color-mix(in srgb, var(--live) 20%, transparent); opacity: 1; }
 .queue-chips { display: flex; align-items: center; flex: 0 0 auto; }
 .queue-chips:empty::after { content: "The build lane is idle."; opacity: .55; }
 .queue-chip { display: inline-block; margin-right: .3rem; padding: .12rem .55rem; border: 1px solid var(--line); border-radius: 999px; background: Canvas; }
