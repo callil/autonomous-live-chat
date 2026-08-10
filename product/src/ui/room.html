@@ -95,6 +95,18 @@
   </div>
   <button class="toast-dismiss" id="room-intro-dismiss" type="button" aria-label="Dismiss introduction">×</button>
 </aside>
+<script>
+(function () {
+  /* Bump this key only when a major introduction change should be shown again. */
+  var dismissalKey = 'ahp:room-intro-dismissed:v1';
+  var intro = document.getElementById('room-intro');
+  var dismiss = document.getElementById('room-intro-dismiss');
+  try { intro.hidden = localStorage.getItem(dismissalKey) === 'true'; } catch (_) {}
+  dismiss.addEventListener('click', function () {
+    try { localStorage.setItem(dismissalKey, 'true'); } catch (_) {}
+  });
+})();
+</script>
 <div class="join-scrim" id="join" hidden>
   <form class="join-card" id="join-form">
     <h2 id="join-title">Join the room</h2>
