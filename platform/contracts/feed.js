@@ -124,6 +124,7 @@ export function renderQueueChips(queue, now, intents = []) {
 			...(intent.anchor ? { anchor: intent.anchor } : {}),
 			...(typeof intent.requestText === "string" && intent.requestText.length ? { text: clip(intent.requestText, 120) } : {}),
 			...(typeof intent.requestedBy === "string" && intent.requestedBy.length ? { by: intent.requestedBy } : {}),
+			...(intent.requestMode === "fast" ? { mode: "fast" } : {}),
 		};
 	};
 	for (const run of queue) {

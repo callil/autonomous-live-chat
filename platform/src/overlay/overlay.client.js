@@ -215,6 +215,7 @@
 		grip: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" aria-hidden="true"><circle cx="9" cy="6" r="1.3" fill="currentColor"/><circle cx="15" cy="6" r="1.3" fill="currentColor"/><circle cx="9" cy="12" r="1.3" fill="currentColor"/><circle cx="15" cy="12" r="1.3" fill="currentColor"/><circle cx="9" cy="18" r="1.3" fill="currentColor"/><circle cx="15" cy="18" r="1.3" fill="currentColor"/></svg>',
 		sparkle: '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" aria-hidden="true"><path d="M12 5.5l1.1 2.9c.4 1 1.2 1.8 2.2 2.2l2.9 1.1-2.9 1.1c-1 .4-1.8 1.2-2.2 2.2L12 18.5l-1.1-2.9c-.4-1-1.2-1.8-2.2-2.2L5.8 12.3l2.9-1.1c1-.4 1.8-1.2 2.2-2.2L12 5.5Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>',
 		eye: '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" aria-hidden="true"><path d="M4.5 12S7.5 6.75 12 6.75 19.5 12 19.5 12 16.5 17.25 12 17.25 4.5 12 4.5 12Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><circle cx="12" cy="12" r="2.4" stroke="currentColor" stroke-width="1.5"/></svg>',
+		bolt: '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" aria-hidden="true"><path d="M13.2 3.5 6.5 13.4h4.3l-1 7.1 6.7-9.9h-4.3l1-7.1Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>',
 	};
 
 	root.innerHTML = `
@@ -258,7 +259,11 @@
 		.dot.busy { animation: none; }
 	}
 
-	.draw { position: fixed; inset: 0; pointer-events: none; }
+	/* Explicit 100% size: an <svg> is a replaced element, so inset:0 alone
+	   leaves it at its intrinsic 300x150 — a capture surface covering only a
+	   corner of the viewport, with drags everywhere else falling through to
+	   the app (they text-selected it instead of drawing). */
+	.draw { position: fixed; inset: 0; width: 100%; height: 100%; pointer-events: none; }
 	.draw.active { pointer-events: auto; cursor: crosshair; }
 	.draw path { fill: none; stroke: var(--accent); stroke-width: 3; stroke-linecap: round; stroke-linejoin: round; }
 
@@ -469,6 +474,24 @@
 	.btn.primary { background: var(--accent); color: #fff; }
 	.btn.primary:hover:not(:disabled) { filter: brightness(0.9); }
 	.btn:disabled { opacity: 0.55; cursor: not-allowed; }
+	/* The Fast switch (agentation's switch, chip-sized): quicker, rougher
+	   builds, off by default, sticky per user. */
+	.fast-toggle {
+		appearance: none; display: flex; align-items: center; gap: 4px;
+		margin-right: auto; padding: 5px 10px; border-radius: 14px; cursor: pointer;
+		background: transparent; border: 1px solid var(--edge); color: var(--ink-dim);
+		font: inherit; font-size: 11px; font-weight: 500;
+		transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+	}
+	.fast-toggle:hover { color: var(--ink); background: var(--chrome-hover); }
+	.fast-toggle[aria-checked="true"] {
+		color: var(--yellow); border-color: color-mix(in srgb, var(--yellow) 50%, transparent);
+		background: color-mix(in srgb, var(--yellow) 12%, transparent);
+	}
+	.fast-toggle[hidden] { display: none !important; }
+	.bolt { display: inline-flex; color: var(--yellow); }
+	.queue-item .bolt { flex: none; }
+	.marker .bolt { position: absolute; top: -6px; right: -6px; background: var(--chrome); border-radius: 50%; padding: 1px; box-shadow: 0 0 0 1px var(--ring); }
 	.msg { font-size: 11px; color: var(--red); margin: 0; min-height: 1em; }
 	.msg.ok { color: var(--green); }
 
@@ -599,6 +622,7 @@
 		<div class="quote" id="quote" hidden></div>
 		<textarea id="input" rows="2" aria-label="Describe the change"></textarea>
 		<div class="actions">
+			<button type="button" class="fast-toggle" id="fast-toggle" role="switch" aria-checked="false" title="Quicker, rougher pass — you can ask for polish after.">${ICONS.bolt}<span>Fast</span></button>
 			<button type="button" class="btn cancel" id="cancel">Cancel</button>
 			<button type="submit" class="btn primary" id="submit" title="Submit (Cmd/Ctrl + Enter)">Submit</button>
 		</div>
@@ -613,7 +637,7 @@
 	const panel = $("panel"), panelClose = $("panel-close"), panelSub = $("panel-sub"), queueEl = $("queue"), queueEmpty = $("queue-empty");
 	const feedEl = $("feed"), feedEmpty = $("feed-empty"), harnessFeed = $("harness-feed"), harnessFeedLabel = $("harness-feed-label");
 	const statusToggle = $("status-toggle"), statusText = $("status-text"), statusTip = $("status-tip"), dot = $("dot");
-	const composer = $("composer"), context = $("context"), quote = $("quote"), input = $("input"), msg = $("msg");
+	const composer = $("composer"), context = $("context"), quote = $("quote"), input = $("input"), msg = $("msg"), fastToggle = $("fast-toggle");
 	const submit = $("submit"), cancel = $("cancel");
 	const markersEl = $("markers"), markersToggle = $("t-markers");
 	const tools = { target: $("t-target"), comment: $("t-comment"), draw: $("t-draw") };
@@ -632,7 +656,7 @@
 	// `placed` flips once the user positions the dock themselves; until then
 	// the FIRST-RUN default applies: top center, open. `edge`/`along` describe
 	// the closed state's flush edge tab.
-	let dockState = { right: 20, bottom: 20, closed: false, markers: true, placed: false, edge: "bottom", along: 0 };
+	let dockState = { right: 20, bottom: 20, closed: false, markers: true, placed: false, edge: "bottom", along: 0, fast: false };
 	try {
 		const raw = localStorage.getItem(STORAGE_KEY);
 		if (raw) {
@@ -643,6 +667,7 @@
 			if (Number.isFinite(parsed.bottom)) { dockState.bottom = parsed.bottom; dockState.placed = true; }
 			dockState.closed = parsed.closed === true;
 			dockState.markers = parsed.markers !== false;
+			dockState.fast = parsed.fast === true;
 			if (parsed.edge === "top" || parsed.edge === "bottom" || parsed.edge === "left" || parsed.edge === "right") dockState.edge = parsed.edge;
 			if (Number.isFinite(parsed.along)) dockState.along = parsed.along;
 		}
@@ -1008,6 +1033,23 @@
 		}
 	}
 
+	// While ANY tool is armed, dragging must never text-select the app (a
+	// draw stroke or an aimed click is not a selection gesture — agentation
+	// suppresses selection the same way). Saved and restored verbatim.
+	const SELECT_PROPS = ["user-select", "-webkit-user-select"];
+	let savedPageSelect = null;
+	function setPageSelectionSuppressed(on) {
+		const html = document.documentElement;
+		if (!html) return;
+		if (on) {
+			if (savedPageSelect === null) savedPageSelect = new Map(SELECT_PROPS.map((prop) => [prop, html.style.getPropertyValue(prop)]));
+			for (const prop of SELECT_PROPS) html.style.setProperty(prop, "none");
+		} else if (savedPageSelect !== null) {
+			for (const [prop, value] of savedPageSelect) value ? html.style.setProperty(prop, value) : html.style.removeProperty(prop);
+			savedPageSelect = null;
+		}
+	}
+
 	// ---- Hover preview (agentation's deepElementFromPoint + highlight) -------
 
 	/** Pierce open shadow roots to the deepest element at a point. */
@@ -1154,6 +1196,10 @@
 		for (const [name, button] of Object.entries(tools)) button.setAttribute("aria-pressed", String(mode === name));
 		drawLayer.classList.toggle("active", mode === "draw");
 		setPageCursor(mode === "target" || mode === "comment" ? "crosshair" : null);
+		// Draw suppresses page text selection: a stroke is never a selection
+		// gesture. Target/Comment deliberately keep selection — selecting a
+		// phrase and clicking it is how selectedText rides the envelope.
+		setPageSelectionSuppressed(mode === "draw");
 		if (mode !== "target" && mode !== "comment") setHover(null);
 		setHint(mode === "target" ? "Click any element to request a change"
 			: mode === "comment" ? "Click any element to comment"
@@ -1166,6 +1212,7 @@
 		for (const button of Object.values(tools)) button.setAttribute("aria-pressed", "false");
 		drawLayer.classList.remove("active");
 		setPageCursor(null);
+		setPageSelectionSuppressed(false);
 		setHover(null);
 		setHint("");
 		syncFrame();
@@ -1184,6 +1231,8 @@
 	function openComposer(kind, label, anchor) {
 		composer.dataset.kind = kind;
 		context.textContent = label;
+		// Fast is a BUILD option; harness feedback is not a build.
+		fastToggle.hidden = kind === "harness-feedback";
 		// Selected text rides visibly (agentation's quote): "change THIS phrase".
 		const picked = selectedEnvelope?.selectedText;
 		quote.textContent = picked ? `“${picked}”` : "";
@@ -1241,7 +1290,17 @@
 
 	const pathFor = (points) => points.map((p, i) => `${i ? "L" : "M"}${p.x} ${p.y}`).join(" ");
 
-	drawLayer.addEventListener("pointermove", (event) => {
+	/** The stroke's bounding box: the drawn REGION rides the envelope so the builder knows the area, not just the path. */
+	function strokeRegion(points) {
+		let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+		for (const point of points) {
+			minX = Math.min(minX, point.x); minY = Math.min(minY, point.y);
+			maxX = Math.max(maxX, point.x); maxY = Math.max(maxY, point.y);
+		}
+		return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+	}
+
+	function drawHover(event) {
 		// The draw-mode affordance: the same chip, telling the user what a drag
 		// will do, following the crosshair.
 		if (mode !== "draw" || drawing) return;
@@ -1249,30 +1308,30 @@
 		chipName.textContent = "Draw to annotate an area";
 		hoverChip.hidden = false;
 		positionChip(event.clientX, event.clientY);
-	});
+	}
 
-	drawLayer.addEventListener("pointerdown", (event) => {
-		if (mode !== "draw") return;
-		event.preventDefault();
+	function beginDraw(event) {
+		if (mode !== "draw" || drawing) return;
+		event.preventDefault?.();
 		drawing = true;
 		hoverChip.hidden = true;
 		draftPoints = [{ x: Math.round(event.clientX), y: Math.round(event.clientY) }];
 		draftPath = document.createElementNS("http://www.w3.org/2000/svg", "path");
 		drawLayer.append(draftPath);
-		drawLayer.setPointerCapture?.(event.pointerId);
-	});
-	drawLayer.addEventListener("pointermove", (event) => {
+		if (typeof event.pointerId === "number") drawLayer.setPointerCapture?.(event.pointerId);
+	}
+	function moveDraw(event) {
 		if (!drawing) return;
 		const point = { x: Math.round(event.clientX), y: Math.round(event.clientY) };
 		const previous = draftPoints[draftPoints.length - 1];
 		if (Math.hypot(point.x - previous.x, point.y - previous.y) < MIN_DRAW_DISTANCE) return;
 		draftPoints.push(point);
 		draftPath.setAttribute("d", pathFor(draftPoints));
-	});
+	}
 	function finishDraw(event) {
 		if (!drawing) return;
 		drawing = false;
-		drawLayer.releasePointerCapture?.(event.pointerId);
+		if (typeof event?.pointerId === "number") drawLayer.releasePointerCapture?.(event.pointerId);
 		if (draftPoints.length < 2) { draftPath?.remove(); draftPath = null; return; }
 		// Hit-test the app UNDER the overlay: the draw layer stops capturing
 		// first, so elementFromPoint returns the app's element.
@@ -1285,8 +1344,20 @@
 		clearMode();
 		openComposer("draw", `Drawing over: ${pendingDraw.envelope.label}`, draftPoints[draftPoints.length - 1]);
 	}
+	drawLayer.addEventListener("pointermove", drawHover);
+	drawLayer.addEventListener("pointerdown", beginDraw);
+	drawLayer.addEventListener("pointermove", moveDraw);
 	drawLayer.addEventListener("pointerup", finishDraw);
 	drawLayer.addEventListener("pointercancel", finishDraw);
+	// Environments without PointerEvent (or synthetic mouse-only input in
+	// them) still draw: mouse listeners back the pointer ones up, gated so
+	// nothing ever double-fires where both exist.
+	if (typeof PointerEvent === "undefined") {
+		drawLayer.addEventListener("mousemove", drawHover);
+		drawLayer.addEventListener("mousedown", beginDraw);
+		drawLayer.addEventListener("mousemove", moveDraw);
+		drawLayer.addEventListener("mouseup", finishDraw);
+	}
 
 	// ---- Submission ----------------------------------------------------------
 
@@ -1294,8 +1365,13 @@
 		event.preventDefault();
 		const kind = composer.dataset.kind;
 		const text = input.value.trim();
-		if (kind !== "draw" && !text.length) {
-			msg.textContent = kind === "comment" ? "Write a brief comment." : "Describe the change you want.";
+		// EVERY kind needs words — a wordless draw used to sail through here
+		// and park at dispatch with nothing to build from. Refuse kindly now.
+		if (!text.length) {
+			msg.textContent = kind === "comment" ? "Write a brief comment."
+				: kind === "draw" ? "Say what this drawing should change — the stroke shows where, the words say what."
+				: kind === "harness-feedback" ? "Write a brief note about the harness UI."
+				: "Describe the change you want.";
 			return;
 		}
 		if (!socket || socket.readyState !== WebSocket.OPEN) {
@@ -1309,16 +1385,21 @@
 			submit.disabled = true; msg.classList.remove("ok"); msg.textContent = "Sending…";
 			return;
 		}
+		// The Fast switch rides the envelope both at message level (the agreed
+		// mode field) and inside the verbatim-stored annotation, so the
+		// projection can show the lightning without a second read.
+		const buildMode = fastMode ? "fast" : "standard";
 		let annotation;
 		if (kind === "draw") {
 			if (!pendingDraw) { msg.textContent = "Draw something first."; return; }
-			annotation = { kind: "draw", ...pendingDraw.envelope, drawingPoints: pendingDraw.points };
+			annotation = { kind: "draw", ...pendingDraw.envelope, drawingPoints: pendingDraw.points, drawnRegion: strokeRegion(pendingDraw.points) };
 		} else if (kind === "comment") {
 			annotation = { kind: "comment", ...selectedEnvelope, text };
 		} else {
 			annotation = { kind: "target", ...selectedEnvelope };
 		}
-		send({ type: `request:${kind}`, text, annotation, clientSubmissionId: crypto.randomUUID() });
+		annotation.mode = buildMode;
+		send({ type: `request:${kind}`, text, annotation, mode: buildMode, clientSubmissionId: crypto.randomUUID() });
 		optimistic += 1; updateStatus();
 		submit.disabled = true; msg.classList.remove("ok"); msg.textContent = "Submitting…";
 	});
@@ -1330,6 +1411,16 @@
 		}
 	});
 	cancel.addEventListener("click", () => { pendingDraw?.path?.remove(); closeComposer(); });
+
+	// The Fast switch: off by default, sticky per user in the overlay's store.
+	let fastMode = dockState.fast === true;
+	fastToggle.setAttribute("aria-checked", String(fastMode));
+	fastToggle.addEventListener("click", () => {
+		fastMode = !fastMode;
+		dockState.fast = fastMode;
+		fastToggle.setAttribute("aria-checked", String(fastMode));
+		saveDockState();
+	});
 
 	// Escape peels exactly ONE layer per press, innermost first (agentation's
 	// ordering): composer → in-progress stroke → armed mode → open panel.
@@ -1428,6 +1519,15 @@
 			const d = document.createElement("span");
 			d.className = "phase-dot";
 			if (chip.phase) d.dataset.phase = chip.phase;
+			row.append(d);
+			if (chip.mode === "fast") {
+				// The lightning marks a fast (quicker, rougher) build.
+				const bolt = document.createElement("span");
+				bolt.className = "bolt";
+				bolt.innerHTML = ICONS.bolt;
+				bolt.title = "Fast build";
+				row.append(bolt);
+			}
 			const req = document.createElement("span");
 			req.className = "req";
 			req.textContent = typeof chip.text === "string" && chip.text.length ? `“${chip.text}”` : chip.label;
@@ -1436,7 +1536,7 @@
 			meta.className = "meta";
 			const stand = chip.phase === "queued" ? chip.label : chip.phase ?? "";
 			meta.textContent = [chip.by, stand].filter(Boolean).join(" · ");
-			row.append(d, req, meta);
+			row.append(req, meta);
 			queueEl.append(row);
 		}
 		queueEmpty.hidden = chipsState.length > 0;
@@ -1505,9 +1605,21 @@
 				markersEl.append(node);
 			}
 			node.dataset.phase = info.chip.phase ?? "";
-			node.textContent = String(info.number);
+			node.replaceChildren();
+			const number = document.createElement("span");
+			number.textContent = String(info.number);
+			node.append(number);
+			if (info.chip.mode === "fast") {
+				node.dataset.fast = "true";
+				const bolt = document.createElement("span");
+				bolt.className = "bolt";
+				bolt.innerHTML = ICONS.bolt;
+				node.append(bolt);
+			} else {
+				delete node.dataset.fast;
+			}
 			const described = typeof info.chip.text === "string" && info.chip.text.length ? `: “${info.chip.text}”` : "";
-			node.setAttribute("aria-label", `Pending change ${info.number} (${info.chip.phase ?? "active"})${described}`);
+			node.setAttribute("aria-label", `Pending change ${info.number} (${info.chip.phase ?? "active"}${info.chip.mode === "fast" ? ", fast" : ""})${described}`);
 			if (described) node.title = info.chip.text;
 			const rect = info.element.getBoundingClientRect();
 			node.style.left = `${Math.max(2, rect.right - 12)}px`;
