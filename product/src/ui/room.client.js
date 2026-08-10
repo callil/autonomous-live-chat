@@ -6,6 +6,7 @@
 	const messages = $("#messages");
 	const dot = $("#dot"), connection = $("#connection"), concurrentUsers = $("#concurrent-users");
 	const composer = $("#composer"), chatInput = $("#chat-input"), sendButton = $("#send");
+	const roomIntro = $("#room-intro"), roomIntroDismiss = $("#room-intro-dismiss");
 	const join = $("#join"), joinForm = $("#join-form"), joinName = $("#join-name"), joinError = $("#join-error");
 
 	let socket = null, reconnectTimer = null, identity = null, everConnected = false;
@@ -149,6 +150,7 @@
 		if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); composer.requestSubmit(); }
 	});
 	sendButton.disabled = false;
+	roomIntroDismiss.addEventListener("click", () => { roomIntro.hidden = true; });
 
 	joinForm.addEventListener("submit", async (event) => {
 		event.preventDefault();

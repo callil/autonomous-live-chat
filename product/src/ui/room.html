@@ -77,10 +77,6 @@
   </header>
   <main class="columns">
     <section class="conversation" aria-live="polite">
-      <div class="room-intro">
-        <h1>Ask for a change</h1>
-        <p>Chat with the room, or use Target, Comment, and Draw to request a change — the agent builds it, CI verifies it, and the feed tells the truth about every step.</p>
-      </div>
       <div class="messages" id="messages"></div>
     </section>
   </main>
@@ -89,6 +85,13 @@
     <button class="send" id="send" type="submit" aria-label="Send message">Send</button>
   </form>
 </div>
+<aside class="room-intro" id="room-intro" role="status">
+  <div>
+    <h1>Ask for a change</h1>
+    <p>Chat with the room, or use Target, Comment, and Draw to request a change — the agent builds it, CI verifies it, and the feed tells the truth about every step.</p>
+  </div>
+  <button class="toast-dismiss" id="room-intro-dismiss" type="button" aria-label="Dismiss introduction">×</button>
+</aside>
 <div class="join-scrim" id="join" hidden>
   <form class="join-card" id="join-form">
     <h2>Join the room</h2>
