@@ -8,6 +8,7 @@
 	const composer = $("#composer"), chatInput = $("#chat-input"), imageUpload = $("#image-upload"), sendButton = $("#send");
 	const roomIntro = $("#room-intro"), roomIntroDismiss = $("#room-intro-dismiss");
 	const join = $("#join"), joinForm = $("#join-form"), joinName = $("#join-name"), joinError = $("#join-error");
+	const accountButton = $("#account-button"), accountCancel = $("#account-cancel"), joinTitle = $("#join-title"), accountSave = $("#account-save");
 
 	let socket = null, reconnectTimer = null, identity = null, everConnected = false;
 	const renderedChat = new Set();
@@ -96,6 +97,11 @@
 	} catch { /* Ignore damaged or unavailable browser storage. */ }
 
 	function send(payload) { if (socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(payload)); }
+	function showAccount() {
+		joinTitle.textContent = "Update your account"; accountSave.textContent = "Save"; accountCancel.hidden = false;
+		joinName.value = identity?.name ?? identity?.displayName ?? ""; joinError.textContent = ""; join.hidden = false; joinName.focus();
+	}
+	function setIdentity(value) { identity = value; rememberPerson(value); accountButton.hidden = false; }
 
 	function connect() {
 		clearTimeout(reconnectTimer);
@@ -121,7 +127,7 @@
 				(event.chat || []).forEach(addChat);
 				(event.people || event.members || event.users || []).forEach(rememberPerson);
 				updateConcurrent(event);
-				if (event.you) { identity = event.you; rememberPerson(event.you); }
+				if (event.you) setIdentity(event.you);
 			}
 			announceDeploys(event.items || (event.feed && event.feed.items));
 			if (event.type === "chat:message") addChat(event);
@@ -166,22 +172,25 @@
 	});
 	sendButton.disabled = false;
 	roomIntroDismiss.addEventListener("click", () => { roomIntro.hidden = true; });
+	accountButton.addEventListener("click", showAccount);
+	accountCancel.addEventListener("click", () => { join.hidden = true; });
 
 	joinForm.addEventListener("submit", async (event) => {
 		event.preventDefault();
 		const name = joinName.value.trim();
 		const joinButton = joinForm.querySelector("button[type=submit]");
-		joinButton.disabled = true; joinError.textContent = "Joining…";
+		joinButton.disabled = true; joinError.textContent = identity ? "Saving…" : "Joining…";
 		try {
 			const response = await fetch("/api/session", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name }) });
-			if (!response.ok) { joinError.textContent = (await response.text()) || `Join failed (${response.status}).`; return; }
-			identity = await response.json(); rememberPerson(identity); joinError.textContent = ""; join.hidden = true; connect();
+			if (!response.ok) { joinError.textContent = (await response.text()) || `Save failed (${response.status}).`; return; }
+			setIdentity(await response.json()); joinError.textContent = ""; join.hidden = true;
+			if (!socket) connect();
 		} catch { joinError.textContent = "Could not reach the room. Try again."; }
 		finally { joinButton.disabled = false; }
 	});
 
 	fetch("/api/session").then(async (response) => {
-		if (response.ok) { identity = await response.json(); rememberPerson(identity); connect(); } else join.hidden = false;
+		if (response.ok) { setIdentity(await response.json()); connect(); } else join.hidden = false;
 	}).catch(() => { join.hidden = false; });
 
 	window.__ahpBooted = true;

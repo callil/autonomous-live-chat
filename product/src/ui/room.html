@@ -73,6 +73,7 @@
       </span>
       <span class="connection"><i class="dot" id="dot"></i><span id="connection">Connecting</span></span>
       <span class="room-meta" id="concurrent-users" aria-live="polite">0 users</span>
+      <button class="account-button" id="account-button" type="button" hidden>Account</button>
     </span>
   </header>
   <main class="columns">
@@ -81,7 +82,8 @@
     </section>
   </main>
   <form class="composer" id="composer">
-    <input id="image-upload" type="file" accept="image/*" aria-label="Upload image">
+    <label class="image-upload-button" for="image-upload" title="Upload image" aria-label="Upload image">＋</label>
+    <input id="image-upload" class="visually-hidden" type="file" accept="image/*" aria-label="Upload image">
     <textarea id="chat-input" rows="1" placeholder="Message the room" aria-label="Message"></textarea>
     <button class="send" id="send" type="submit" aria-label="Send message">Send</button>
   </form>
@@ -95,10 +97,13 @@
 </aside>
 <div class="join-scrim" id="join" hidden>
   <form class="join-card" id="join-form">
-    <h2>Join the room</h2>
+    <h2 id="join-title">Join the room</h2>
     <label for="join-name">Display name</label>
     <input id="join-name" maxlength="64" autocomplete="nickname" placeholder="Ada">
-    <button type="submit" class="primary">Join</button>
+    <div class="account-actions">
+      <button type="button" class="secondary" id="account-cancel" hidden>Cancel</button>
+      <button type="submit" class="primary" id="account-save">Join</button>
+    </div>
     <p class="request-error" id="join-error" role="alert"></p>
   </form>
 </div>
