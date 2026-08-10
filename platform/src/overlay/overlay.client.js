@@ -769,10 +769,16 @@
 	function sizeFrame() {
 		const body = document.body;
 		if (!framed || !body) return;
+		// A viewport that has not laid out yet must not produce a frame at all
+		// — a transient absurd scale would then ANIMATE from that state, and a
+		// throttled background tab can park a transition mid-flight for
+		// minutes, leaving the page tiny. Skip until the viewport is real, and
+		// clamp hard: the frame is only ever about a 1% inset.
+		if (!(innerWidth >= 100) || !(innerHeight >= 100)) return;
 		// Exact 8px inset on every side: per-axis scale about the center. The
 		// axis factors differ by under a percent — imperceptible, exact inset.
-		const sx = Math.max(0.5, (innerWidth - FRAME_INSET * 2) / Math.max(1, innerWidth));
-		const sy = Math.max(0.5, (innerHeight - FRAME_INSET * 2) / Math.max(1, innerHeight));
+		const sx = Math.min(1, Math.max(0.9, (innerWidth - FRAME_INSET * 2) / innerWidth));
+		const sy = Math.min(1, Math.max(0.9, (innerHeight - FRAME_INSET * 2) / innerHeight));
 		body.style.setProperty("transform", `scale(${sx.toFixed(5)}, ${sy.toFixed(5)})`);
 		body.style.setProperty("clip-path", `inset(0 round ${FRAME_RADIUS}px)`);
 	}
@@ -808,12 +814,18 @@
 		html.style.setProperty("background-position", "0% 50%");
 		body.style.setProperty("transform-origin", "50% 50%");
 		body.style.setProperty("will-change", "transform");
+		// The FIRST frame applies instantly — enabling the transition only on
+		// the next animation frame means nothing ever animates from the
+		// unframed (or a half-initialized) state on load; the ~200ms ease
+		// covers later changes (resize, exit) as designed.
+		sizeFrame();
 		if (!prefersReducedMotion()) {
-			body.style.setProperty("transition", "transform 0.2s ease, clip-path 0.2s ease");
+			requestAnimationFrame(() => {
+				if (framed) document.body?.style.setProperty("transition", "transform 0.2s ease, clip-path 0.2s ease");
+			});
 			gradientStartedAt = Date.now();
 			gradientFrame = requestAnimationFrame(gradientTick);
 		}
-		sizeFrame();
 	}
 
 	function exitFrame() {
