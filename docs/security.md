@@ -1,27 +1,22 @@
 # Safety and autonomy
 
-App Harness gives the coding operator full repository access inside an isolated job. Safety is not a color-only transformer, file allowlist, or fake fixed patch generator.
+App Harness gives the coding agent real repository access inside an isolated, disposable job. Safety is structural, not a color-only transformer, file allowlist theater, or fake fixed patch generator.
 
-The operator may change frontend, backend, data models, migrations, tests, dependencies, workflows, and Cloudflare infrastructure when the requested product outcome requires it. Its default focus is `apps/demo`; the repository structure helps it navigate responsibility without blocking coherent work.
+The agent may rewrite the product surface (`product/`) freely. It can never touch the frozen platform: the platform firewall fails any agent (`room/*`) diff that touches `platform/`, CI configuration, dependency manifests, lockfiles, or wrangler configs. New dependencies are human-gated by construction.
 
 ## Operating guidelines
 
-The agent must preserve user data and secrets and refuse work that is illegal, harmful, abusive, intentionally availability-destroying, destructive without an explicit recoverable plan, credential-seeking, or dependent on infrastructure it cannot truthfully provision. Database evolution should prefer additive schemas, compatibility windows, reversible migrations, backups where supported, and explicit validation of old data.
+The agent must preserve user data and secrets and refuse work that is illegal, harmful, abusive, intentionally availability-destroying, destructive without an explicit recoverable plan, credential-seeking, or dependent on infrastructure it cannot truthfully provision.
 
 ## Enforced boundaries
 
-- disposable Sandbox per coding job;
-- repository-scoped, short-lived GitHub installation identity;
-- private key remains outside the child process;
-- credentials scoped to the Git process rather than the whole shell session;
-- immutable base/head provenance;
-- unprivileged candidate CI;
-- serialized stack promotion and deployment;
-- protected-default-branch GitHub Actions provenance bound to the candidate branch and immutable head;
-- public issue, PR, and durable activity records.
+- disposable sandbox container per coding run, destroyed on completion;
+- repository-scoped, short-lived GitHub installation token per dispatch; the App private key lives only in the platform Worker's secrets;
+- the runner's in-container write policy denies the frozen platform paths;
+- immutable head provenance: CI verdicts are read for the exact head SHA and the squash merge is refused if the branch moved after verification;
+- binding-level isolation: the product Worker has no Durable Object bindings and no ledger access;
+- the status surface (queue, feed, provenance links) is served by the frozen platform, so the agent cannot falsify reporting about its own builds;
+- serialized deploys with exact-SHA `/version` observation, a post-deploy liveness watchdog, and an owner revert lever;
+- public PR and durable activity records for every change.
 
-These boundaries constrain authority and prove outcomes. They do not restrict legitimate source edits.
-
-## Classification
-
-The outer operator quickly classifies change type, scope, risk, affected surface, reversibility, execution eligibility, and CI profile. Classification chooses investigation and validation depth; it does not decide truth by itself. Even a tiny direct-looking change goes through a Git artifact and stack record so it remains attributable, revertible, and ordered against concurrent work.
+These boundaries constrain authority and prove outcomes. They do not restrict legitimate source edits inside the product surface.

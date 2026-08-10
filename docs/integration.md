@@ -1,34 +1,21 @@
-# React integration
+# Integration
 
-`@app-harness/react` is the reusable authoring layer. It knows how to target opted-in elements and collect a safe request envelope; the host decides how to submit it.
+The entire integration surface is one script tag, served by the frozen platform:
 
-```tsx
-import { AppHarness, targetAttributes } from "@app-harness/react";
-import "@app-harness/react/styles.css";
-
-export function Root() {
-  return (
-    <AppHarness onRequest={(submission) => fetch("/api/harness/requests", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(submission),
-    })}>
-      <main {...targetAttributes("workspace", "Workspace")}>
-        {/* host application */}
-      </main>
-    </AppHarness>
-  );
-}
+```html
+<script src="/overlay.js" defer
+        data-room="main"
+        data-anchor-mode="data-loc"
+        data-repo-url="https://github.com/callil/autonomous-live-chat"></script>
 ```
 
-The package is currently an internal workspace package, not a published npm release.
+The overlay mounts the authoring tools (Target, Comment, Draw), the build queue, and the activity feed into a closed shadow root the host page cannot style, script, or break. It reads the installed tenant's public descriptor from `GET /overlay/tenant` and speaks the platform's room WebSocket directly.
 
 ## Contract
 
-Targets must opt in with a stable `data-app-harness-id`; dynamic selectors are rejected. Labels are concise static descriptions. Text is omitted unless a host explicitly marks it safe. Paths must be same-origin and rectangles are bounded numeric viewport context.
+- Anchors ride the `data-loc` attributes the product build stamps at module init (file:line references into the product source), so a request points at real code, not a brittle selector.
+- Target envelopes contain stable anchors, tag/role, a concise label, same-origin path, and viewport rectangle. They do not contain form values, message bodies, query strings, credentials, or arbitrary DOM serialization.
+- The overlay is pointer-transparent except for its own visible controls, and it publishes its occupied insets so the host can keep its own controls clear.
+- Submission requires a signed session — the same identity the room itself uses.
 
-The `onRequest` callback is deliberately transport-agnostic. A host may use a Durable Object, an HTTP API, another realtime system, or a test stub without pulling Cloudflare or GitHub code into the UI package.
-
-All styles use `--ah-*` custom properties. The layer stays collapsed by default, uses a high overlay z-index, and avoids changing the host layout.
-
-The launch control, open panel, and its meaningful controls also have stable target IDs. The authoring layer can therefore receive feedback about itself while target mode is active.
+The legacy `@app-harness/react` workspace package was removed with the rest of the pre-rebuild system; the overlay above is the one supported integration path.

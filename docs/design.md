@@ -56,7 +56,7 @@ Geist is the preferred interface face. Geist Mono is reserved for timestamps, co
 
 ## Token contract
 
-The demo reads from CSS custom properties in `apps/demo/public/app.css`; the reusable overlay uses the separate `--ah-*` contract in `packages/react/styles.css`. Repeated values must become a token before use.
+The product reads from CSS custom properties in `product/src/ui/room.css`; the platform overlay carries its own self-contained styles inside its shadow root (`platform/src/overlay/overlay.client.js`). Repeated values must become a token before use.
 
 Token families:
 

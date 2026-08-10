@@ -1,5 +1,0 @@
-{
-  "version": 1,
-  "purpose": "Temporary, explicit inventory of demo-worker responsibilities that must move behind the operator worker. Each entry is a current violation of the target boundary. Delete an entry in the same change that removes the matching implementation. The file must reach an empty entries array before the simplified-control-plane goal can be completed.",
-  "entries": []
-}
