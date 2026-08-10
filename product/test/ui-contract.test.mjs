@@ -31,7 +31,10 @@ test("the real room page stamps cleanly and every app landmark survives", () => 
 	for (const anchor of ['id="messages"', 'id="composer"', 'id="chat-input"', 'id="join-form"']) {
 		assert.ok(stamped.includes(anchor), `${anchor} must exist in the room shell`);
 	}
-	assert.match(stamped, /<header class="topbar" data-loc="product\/src\/ui\/room\.html:\d+">/u);
+	// Stamping must reach the header, but this must NOT pin its class list:
+	// the header is app code, and an agent restyling it (adding a class, say)
+	// is exactly the kind of change the product surface exists to allow.
+	assert.match(stamped, /<header\b[^>]*\bdata-loc="product\/src\/ui\/room\.html:\d+"/u);
 });
 
 /**
