@@ -76,7 +76,7 @@ function safeCallback(value) {
 
 function safeRequest(input) {
 	if (!input || typeof input !== "object") return null;
-	const { repository, runId, attemptId, intentId, branch, evidence, feedUrl, model, tier, checkoutDirectory } = input;
+	const { repository, runId, attemptId, intentId, branch, evidence, feedUrl, model, mode, checkoutDirectory } = input;
 	if (typeof repository !== "string" || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(repository)) return null;
 	if (typeof runId !== "string" || !IDENTIFIER.test(runId) || typeof attemptId !== "string" || !IDENTIFIER.test(attemptId)) return null;
 	if (typeof intentId !== "string" || !IDENTIFIER.test(intentId)) return null;
@@ -90,19 +90,22 @@ function safeRequest(input) {
 	if (!evidence || typeof evidence !== "object" || typeof evidence.requestText !== "string" || !evidence.requestText.trim().length || typeof evidence.requestedBy !== "string" || !AUTHOR.test(evidence.requestedBy) || !Array.isArray(evidence.annotations)) return null;
 	const callback = safeCallback(input.callback);
 	if (!callback) return null;
-	// An unrecognised tier takes the normal budget; the job never guesses cheap.
-	return { repository, runId, attemptId, intentId, branch, evidence, feedUrl, model, tier: tier === "small" ? "small" : "normal", checkoutDirectory, callback };
+	// Fast is a USER choice; an unrecognised or absent mode takes the standard
+	// (full-quality) budget. The job never guesses cheap.
+	return { repository, runId, attemptId, intentId, branch, evidence, feedUrl, model, mode: mode === "fast" ? "fast" : "standard", checkoutDirectory, callback };
 }
 
 /**
- * Per-tier agent budgets, mirroring platform/contracts/tier.js. Smalls get low
- * reasoning effort, a tighter tool ceiling, and no repository tree in the
- * prompt — the annotation's data-loc anchor already names the file. Nothing
- * here relaxes the local gate, CI, or the write firewall.
+ * Per-mode agent budgets, mirroring platform/contracts/mode.js. Standard is
+ * the system's best and the default. Fast is the requester's EXPLICIT
+ * per-request speed trade: lower reasoning effort, a tighter tool ceiling,
+ * no repository tree in the prompt (the annotation's data-loc anchor already
+ * names the file), and a self-review that checks but does not iterate.
+ * Nothing here relaxes the local gate, CI, or the write firewall.
  */
-const TIER_BUDGETS = {
-	small: { effort: "low", maxToolCalls: 6, includeTree: false },
-	normal: { effort: "medium", maxToolCalls: 12, includeTree: true },
+const MODE_BUDGETS = {
+	standard: { effort: "medium", maxToolCalls: 12, includeTree: true, selfReview: "iterate" },
+	fast: { effort: "low", maxToolCalls: 8, includeTree: false, selfReview: "check" },
 };
 
 /** Per-phase wall clock, reported on the terminal callback as a run-timing fact. */
@@ -259,6 +262,9 @@ function buildAgentInstructions(request) {
 		"You operate through exactly three tools: read_file, write_file, and list_dir. You have no shell, no network, no package manager, and no Git.",
 		"Inspect the relevant parts of the checked-out repository and every applicable AGENTS.md before changing anything.",
 		"The product surface is product/ — the live room UI Worker (product/src, its ui/ sources, and product/test). Annotation data-loc refs like product/src/ui/room.html:41 point at exact source lines there. You may ONLY change product code: writes to platform/, infra/, .github/, apps/ (the legacy demo), dependency manifests, lockfiles, or wrangler configs are blocked here and would fail the platform firewall anyway.",
+		"Match the app's existing visual language: before styling anything, study the annotation's captured DOM and computed styles and the surrounding source, then reuse the stylesheet's existing CSS custom properties, classes, and spacing patterns. Do not bolt on inline style attributes or bare unstyled native controls when the app has a design system to extend.",
+		"Complete the request's evident intent, not just its literal minimum: a UI change should come back polished enough that a designer would accept it — sensible states, spacing, and consistency with neighbouring elements — while never expanding beyond what was actually asked.",
+		"write_file replaces the whole file, so reproduce every part you are not changing exactly as it is. Never strip comments, collapse multi-line code or CSS, or reformat sections you were not asked to touch: collateral churn gets the change rejected in review.",
 		"Make the smallest coherent repository change that actually satisfies the request, including tests when appropriate.",
 		"Preserve user data and unrelated work. Never read, print, copy, commit, or expose credentials. Refuse illegal, harmful, offensive, intentionally availability-destroying, or externally unsupported work.",
 		"Do not claim to have run tests, builds, or commands: you cannot. The execution harness commits your staged writes, runs the local test gate, pushes, and opens the pull request; CI is the merge authority.",
@@ -318,7 +324,10 @@ function summarizeRequest(text) {
  * that should be unreachable in practice.
  */
 function changeTitle(request) {
-	return summarizeRequest(request.evidence.requestText) ?? `Live-room change ${request.intentId}`;
+	const title = summarizeRequest(request.evidence.requestText) ?? `Live-room change ${request.intentId}`;
+	// Honesty rule: a fast pass names itself in the title (and therefore the
+	// squashed commit subject), so nobody mistakes it for the system's best.
+	return request.mode === "fast" ? `${title} (fast pass)` : title;
 }
 
 function commitMessage(request) {
@@ -352,6 +361,9 @@ function pullRequestBody(request, agentSummary) {
 		"",
 		agentSummary ? `Agent summary: ${String(agentSummary).slice(0, 400)}` : "Agent summary unavailable.",
 		"",
+		...(request.mode === "fast"
+			? ["**Fast pass.** Built at the requester's explicit fast setting: lower reasoning effort and a tighter budget, traded for speed. A follow-up request at standard mode gets the system's best.", ""]
+			: []),
 		`Intent: \`${request.intentId}\``,
 		`Feed: ${request.feedUrl}`,
 		"",
@@ -383,7 +395,7 @@ async function main() {
 	if (!branched.success) return failure("branch-create-failed", stderrTail(branched));
 
 	postHeartbeat("agent-started");
-	const budgets = TIER_BUDGETS[request.tier] ?? TIER_BUDGETS.normal;
+	const budgets = MODE_BUDGETS[request.mode] ?? MODE_BUDGETS.standard;
 	const agentInput = JSON.stringify({
 		prompt: buildAgentPrompt(request.evidence),
 		instructions: buildAgentInstructions(request),
@@ -392,6 +404,7 @@ async function main() {
 		effort: budgets.effort,
 		maxToolCalls: budgets.maxToolCalls,
 		includeTree: budgets.includeTree,
+		selfReview: budgets.selfReview,
 	});
 	const agentExecution = await timed("agentMs", () => run("node", ["/opt/app-harness/agent-entrypoint.mjs"], { cwd: request.checkoutDirectory, input: agentInput, timeoutMs: AGENT_TIMEOUT_MS }));
 	const agent = parseAgentSummary(agentExecution.stdout);
@@ -445,7 +458,7 @@ async function main() {
 	}
 	postHeartbeat("pr-opened");
 
-	return { state: "verifying", branch: request.branch, prNumber, headSha, tier: request.tier, timings: { ...timings, totalMs: Date.now() - processStartedAt } };
+	return { state: "verifying", branch: request.branch, prNumber, headSha, mode: request.mode, effort: (MODE_BUDGETS[request.mode] ?? MODE_BUDGETS.standard).effort, timings: { ...timings, totalMs: Date.now() - processStartedAt } };
 }
 
 // A wedged child process must never exceed the run budget silently: emit a

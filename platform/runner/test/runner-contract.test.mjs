@@ -72,28 +72,53 @@ test("the agent is the bounded three-tool loop on the sol model, with frozen sur
 	assert.match(agent, /reasoning\.encrypted_content/u, "reasoning items replay across tool calls");
 });
 
-test("effort tiering can only tighten the agent's budget, never widen it", () => {
+test("mode budgets can only tighten the agent's ceiling, never widen it", () => {
 	// The ceiling is the env-configurable constant; the per-dispatch budget is
 	// clamped against it, so a hostile or buggy dispatch cannot buy more tools.
 	assert.match(agent, /MAX_TOOL_CALLS_CEILING/u, "a ceiling exists independent of the dispatch");
 	assert.match(agent, /Math\.min\(request\.maxToolCalls, MAX_TOOL_CALLS_CEILING\)/u, "the dispatch budget is clamped to the ceiling");
 	assert.match(agent, /request\.effort === "low" \? "low" : "medium"/u, "only low is selectable; anything else is medium");
-	// The model stays constant across tiers: sizing changes budgets, not brains.
-	// The agent is handed resolved budgets (effort/maxToolCalls/includeTree) and
-	// never a tier name, so no code path can branch the model on size.
-	assert.doesNotMatch(agent, /request\.tier/u, "the agent receives resolved budgets, never a tier to branch on");
+	// The model stays constant across modes: mode changes budgets, not brains.
+	// The agent is handed resolved budgets (effort/maxToolCalls/includeTree/
+	// selfReview) and never a mode name, so no code path can branch on mode.
+	assert.doesNotMatch(agent, /request\.mode\b|request\.tier\b/u, "the agent receives resolved budgets, never a mode to branch on");
 	assert.match(agent, /model: request\.model/u, "the model comes from the dispatch alone");
 });
 
-test("the tier never relaxes a gate: local tests and the write firewall are tier-independent", () => {
+test("mode never relaxes a gate: local tests and the write firewall are mode-independent", () => {
 	assert.match(job, /product\/test\/ui-contract\.test\.mjs/u, "the local gate always runs");
-	assert.doesNotMatch(job, /tier[^\n]*ui-contract|ui-contract[^\n]*tier/u, "the local gate is never tier-conditional");
+	assert.doesNotMatch(job, /mode[^\n]*ui-contract|ui-contract[^\n]*mode/u, "the local gate is never mode-conditional");
 	assert.match(agent, /WRITE_DENIED_PATHS/u, "the write firewall is unconditional");
 });
 
-test("an unrecognised tier takes the normal budget in both the worker and the job", () => {
-	assert.match(worker, /tier === "small" \? "small" : "normal"/u, "the worker never guesses cheap");
-	assert.match(job, /tier === "small" \? "small" : "normal"/u, "the job never guesses cheap");
+test("fast is a user choice the pipeline relays; nothing ever guesses cheap", () => {
+	// The mode field flows dispatch -> worker request file -> job -> budgets.
+	assert.match(worker, /mode === "fast" \? "fast" : "standard"/u, "the worker admits only a literal fast");
+	assert.match(worker, /mode: dispatch\.mode/u, "the worker relays the validated mode into the job request");
+	assert.match(job, /mode === "fast" \? "fast" : "standard"/u, "the job admits only a literal fast");
+	assert.match(job, /MODE_BUDGETS\[request\.mode\] \?\? MODE_BUDGETS\.standard/u, "unknown modes take the standard budget");
+	// No automatic sizing anywhere in the runner: the classifier is gone.
+	for (const [name, source] of [["worker", worker], ["job", job], ["agent", agent]]) {
+		assert.doesNotMatch(source, /classifyRunTier|TIER_BUDGETS/u, `${name} must not auto-size runs`);
+	}
+});
+
+test("a fast pass labels itself honestly in the PR title and body", () => {
+	assert.match(job, /request\.mode === "fast" \? `\$\{title\} \(fast pass\)` : title/u, "the title names the fast pass");
+	assert.match(job, /Fast pass\./u, "the PR body explains the trade");
+});
+
+test("the terminal report records mode and effort for the run-timing fact", () => {
+	assert.match(job, /mode: request\.mode, effort:/u, "mode and effort ride the terminal report");
+});
+
+test("the self-check gate runs before anything is committed, and fast only checks", () => {
+	assert.match(agent, /SELF-CHECK PASS/u, "the agent audits its own staged diff against the request");
+	assert.match(agent, /request\.selfReview === "check" \? "check" : "iterate"/u, "check is opt-in; iterate is the default");
+	assert.match(agent, /allowTools: iterate/u, "only the iterating review may spend tools");
+	assert.match(job, /selfReview: budgets\.selfReview/u, "the job resolves selfReview from the mode budget");
+	// The iteration draws on the SAME ceilings as the main loop.
+	assert.match(agent, /toolCalls < MAX_TOOL_CALLS/u, "the self-review spends remaining budget, never new budget");
 });
 
 test("the worker mints no tokens and stores no state: the dispatch carries the credential", () => {

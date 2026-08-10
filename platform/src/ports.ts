@@ -19,11 +19,13 @@ export type RunnerDispatch = {
 	/** Short-lived GitHub App installation token minted by the platform for this dispatch. */
 	gitToken: string;
 	/**
-	 * The deterministic size class for this run. It tunes only the agent's own
-	 * budgets (reasoning effort, tool ceiling, whether the repository tree
-	 * rides the prompt) — never the local gate, never CI, never the firewall.
+	 * The REQUESTER'S explicit per-request speed choice, relayed verbatim from
+	 * the request envelope — the system never downgrades a run on its own. It
+	 * tunes only the agent's own budgets (reasoning effort, tool ceiling,
+	 * whether the repository tree rides the prompt, whether the self-review
+	 * may iterate) — never the local gate, never CI, never the firewall.
 	 */
-	tier: "small" | "normal";
+	mode: "standard" | "fast";
 };
 
 export type RunnerDispatchResult =

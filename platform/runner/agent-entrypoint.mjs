@@ -95,7 +95,12 @@ const EFFORT = request.effort === "low" ? "low" : "medium";
 const MAX_TOOL_CALLS = Number.isSafeInteger(request.maxToolCalls)
 	? Math.max(1, Math.min(request.maxToolCalls, MAX_TOOL_CALLS_CEILING))
 	: MAX_TOOL_CALLS_CEILING;
-const MAX_MODEL_CALLS = MAX_TOOL_CALLS + 4;
+const MAX_MODEL_CALLS = MAX_TOOL_CALLS + 6;
+// The final self-review: "iterate" may spend remaining tool budget fixing
+// gaps it finds; "check" (the fast mode) is a text-only verification. Both
+// draw on the SAME tool/wall-clock ceilings — the self-review can never buy
+// budget the main loop did not already have.
+const SELF_REVIEW = request.selfReview === "check" ? "check" : "iterate";
 // Smalls skip the repository tree: the annotation's data-loc anchor already
 // names the file, so the tree is prompt weight that buys nothing.
 const INCLUDE_TREE = request.includeTree !== false;
@@ -166,7 +171,7 @@ const TOOL_SCHEMA = [
 		type: "function",
 		name: "write_file",
 		strict: true,
-		description: "Stage the complete new contents of one file inside the repository checkout, creating it if needed. Supply the entire file, not a diff. Read the current file first unless you are creating it. Staged writes are applied together when you finish.",
+		description: "Stage the complete new contents of one file inside the repository checkout, creating it if needed. Supply the entire file, not a diff. Read the current file first unless you are creating it. Reproduce every part you are not changing exactly as it is — never strip comments or reformat untouched code. Staged writes are applied together when you finish.",
 		parameters: {
 			type: "object",
 			properties: {
@@ -287,17 +292,17 @@ const system = [
 		? "Explore with list_dir and read_file before editing. write_file stages a whole replacement file, so read a file before rewriting it."
 		: "Go straight to the file the annotation's data-loc ref names: read it, then write it. write_file stages a whole replacement file, so read a file before rewriting it. Do not survey the repository — list_dir is available if the anchor turns out to be wrong, not as a first step.",
 	"Never read, print, copy, or reproduce credentials, tokens, or private keys. Paths containing them are blocked and you must not attempt to reach them.",
-	`You have a hard budget of ${MAX_TOOL_CALLS} tool calls. Make the smallest coherent change that satisfies the request, then answer in plain text (no tool call) with one or two sentences describing what changed.`,
+	`You have a hard budget of ${MAX_TOOL_CALLS} tool calls. Make the smallest coherent change that FULLY satisfies the request — its evident intent, in the app's existing design language, with no collateral churn — then answer in plain text (no tool call) with one or two sentences describing what changed.`,
 ].join("\n");
 
-// The tree is only walked when it will actually ride the prompt: for a small
-// run it is neither computed nor sent.
+// The tree is only walked when it will actually ride the prompt: for a fast
+// pass it is neither computed nor sent.
 const tree = INCLUDE_TREE ? await boundedTree() : null;
 const transcript = [
 	{
 		role: "user",
 		content: tree === null
-			? `${request.prompt}\n\nThis is a small, tightly-scoped change. The annotation's data-loc ref above names the exact source file and line: read that file first and edit it directly. Do not survey the repository.`
+			? `${request.prompt}\n\nThis is a fast pass the requester explicitly asked for: a tightly-scoped change on a lean budget. The annotation's data-loc ref above names the exact source file and line: read that file first and edit it directly. Do not survey the repository.`
 			: `${request.prompt}\n\nRepository tree (bounded to ${MAX_TREE_ENTRIES} entries, depth ${MAX_TREE_DEPTH}):\n${tree}`,
 	},
 ];
@@ -305,12 +310,18 @@ let toolCalls = 0;
 let modelCalls = 0;
 let classification = null;
 let finalSummary = "";
-let finished = false;
+let selfCheck = "skipped";
 
-try {
-	while (!finished) {
-		if (modelCalls >= MAX_MODEL_CALLS) { classification = "agent-model-budget-exhausted"; break; }
-		if (Date.now() >= deadline - 5_000) { classification = "agent-budget-exhausted"; break; }
+/**
+ * One bounded drive of the model loop: model turns executing tool calls until
+ * the model answers in plain text (returned), or a budget ends the phase
+ * (returns null and sets the classification). `allowTools: false` makes it a
+ * single text-only turn — used by the fast mode's self-CHECK.
+ */
+async function drive(options = {}) {
+	while (true) {
+		if (modelCalls >= MAX_MODEL_CALLS) { classification = "agent-model-budget-exhausted"; return null; }
+		if (Date.now() >= deadline - 5_000) { classification = "agent-budget-exhausted"; return null; }
 		modelCalls += 1;
 
 		const result = await callModelWithRetry({
@@ -318,7 +329,7 @@ try {
 			instructions: system,
 			input: transcript,
 			tools: TOOL_SCHEMA,
-			tool_choice: "auto",
+			tool_choice: options.allowTools === false ? "none" : "auto",
 			parallel_tool_calls: false,
 			store: false,
 			// Per the API docs: with store:false, reasoning items ride the
@@ -340,14 +351,12 @@ try {
 		const calledTools = output.filter((item) => item?.type === "function_call");
 
 		if (!calledTools.length) {
-			finalSummary = output
+			return output
 				.filter((item) => item?.type === "message" && Array.isArray(item.content))
 				.flatMap((item) => item.content.filter((part) => part?.type === "output_text").map((part) => String(part.text ?? "")))
 				.join(" ")
 				.trim()
 				.slice(0, 400);
-			finished = true;
-			break;
 		}
 
 		for (const call of calledTools) {
@@ -370,8 +379,57 @@ try {
 			transcript.push({ type: "function_call_output", call_id: call.call_id, output: clip(payload) });
 		}
 	}
+}
+
+let answer = null;
+try {
+	answer = await drive();
+	if (answer !== null) finalSummary = answer;
 } catch (error) {
 	classification = typeof error?.classification === "string" ? error.classification : "agent-run-failed";
+}
+
+// THE SELF-CHECK GATE. The first-pass failure signatures on the record are
+// (1) literal-minimum results that ignore the request's evident intent,
+// (2) one-off inline styles that ignore the app's design language, and
+// (3) collateral churn from whole-file rewrites (stripped comments,
+// collapsed formatting). Before anything is committed, the agent re-reads
+// the request and audits its own staged diff against exactly those three.
+// Standard mode may spend REMAINING budget fixing what it finds (one
+// bounded iteration); fast mode verifies in text only. A budget ending
+// the self-check never discards the staged work — the epilogue below
+// applies staged writes on budget exhaustion by design. Isolated failure
+// domain: an error INSIDE the self-check never discards finished work.
+if (answer !== null && !classification && stagedWrites.size > 0) {
+	try {
+		const stagedBefore = new Map(stagedWrites);
+		const iterate = SELF_REVIEW === "iterate" && toolCalls < MAX_TOOL_CALLS && Date.now() < deadline - 20_000;
+		transcript.push({
+			role: "user",
+			content: [
+				"Self-check before your work is committed. Re-read the verbatim request at the top and audit every staged file against it:",
+				"1. Is the request satisfied in full — the literal ask AND its evident intent (a designer would accept the result)?",
+				"2. Do styling changes reuse the app's existing CSS custom properties, classes, and patterns rather than one-off inline styles?",
+				"3. Does every staged file preserve all code, comments, and formatting you were not asked to change?",
+				iterate
+					? "If anything falls short, fix it now with write_file, then answer in plain text. If everything holds, answer exactly: SELF-CHECK PASS — followed by your one-or-two-sentence summary of what changed."
+					: "Answer in plain text only (no tool calls). If everything holds, answer exactly: SELF-CHECK PASS — followed by your one-or-two-sentence summary of what changed. If something falls short, answer: SELF-CHECK GAP — and name it in one sentence.",
+			].join("\n"),
+		});
+		const review = await drive({ allowTools: iterate });
+		if (review === null) {
+			selfCheck = "budget-exhausted";
+			// A budget spent on self-review must not fail work that was already
+			// complete; the epilogue treats it exactly like any budget end.
+		} else {
+			finalSummary = review || finalSummary;
+			const revised = stagedWrites.size !== stagedBefore.size || [...stagedWrites].some(([rel, content]) => stagedBefore.get(rel) !== content);
+			if (review.includes("SELF-CHECK PASS")) selfCheck = revised ? "revised" : "pass";
+			else selfCheck = revised ? "revised" : "flagged";
+		}
+	} catch {
+		selfCheck = "error";
+	}
 }
 
 // Apply staged writes even when a budget ended the loop early: a real partial

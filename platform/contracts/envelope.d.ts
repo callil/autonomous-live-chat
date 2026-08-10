@@ -1,9 +1,12 @@
 import type { AnnotationPayload } from "./ledger.js";
+import type { RunMode } from "./mode.js";
 
 export type RequestEnvelope = {
 	kind: "target" | "comment" | "draw";
 	text: string;
 	annotation: AnnotationPayload;
+	/** The requester's explicit per-request speed choice; defaults to "standard". */
+	mode: RunMode;
 	clientSubmissionId?: string;
 };
 
