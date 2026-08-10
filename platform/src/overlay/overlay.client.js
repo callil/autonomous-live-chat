@@ -360,24 +360,44 @@
 	}
 	.status:hover { background: var(--chrome-hover); }
 	.status[aria-expanded="true"] { background: color-mix(in srgb, var(--accent) 25%, transparent); color: var(--accent); }
+	/* The dock is terse: the number carries the load, the dot carries the
+	   phase (its color follows the leading item through the pipeline). The
+	   tooltip and the panel keep the words. */
 	.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ink-faint); flex: none; transition: background-color 0.3s ease; }
 	.dot.busy { background: var(--yellow); animation: pulse 1.6s ease-in-out infinite; }
 	.dot.live { background: var(--green); }
-	.phase { color: var(--ink-dim); font-weight: 400; }
-	.phase[hidden] { display: none !important; }
+	.dot[data-phase="accepted"] { background: #8E8E93; }
+	.dot[data-phase="queued"] { background: var(--accent); }
+	.dot[data-phase="building"] { background: var(--yellow); }
+	.dot[data-phase="verifying"] { background: #FF8D28; }
+	.dot[data-phase="deploying"] { background: var(--green); }
+	.dot[data-phase="reviewing"] { background: var(--red); }
 
-	/* The reopen handle when the dock is dismissed: comfortably clickable
-	   (pill-height), still minimal. */
+	/* The closed state: a flat tab attached flush to the nearest page edge
+	   (a browser-devtools-style lip), draggable along its edge, jumping back
+	   out to the full toolbar on click. Never a floating shape in space. */
 	.handle {
-		position: fixed; right: 20px; bottom: 20px; pointer-events: auto;
-		appearance: none; border: 0; width: 44px; height: 44px; border-radius: 50%;
-		display: flex; align-items: center; justify-content: center; cursor: pointer;
+		position: fixed; pointer-events: auto;
+		appearance: none; border: 0; padding: 0; cursor: grab;
+		display: flex; align-items: center; justify-content: center;
 		background: var(--chrome); color: var(--ink-dim);
-		box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2), 0 4px 16px rgba(0, 0, 0, 0.1), 0 0 0 1px var(--ring);
-		transition: color 0.15s ease, transform 0.15s ease;
+		box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25), 0 0 0 1px var(--ring);
+		transition: color 0.15s ease;
 	}
-	.handle:hover { color: var(--accent); transform: scale(1.08); }
+	.handle:active { cursor: grabbing; }
+	.handle:hover { color: var(--accent); }
 	.handle[hidden] { display: none !important; }
+	.handle[data-edge="top"] { width: 56px; height: 18px; border-radius: 0 0 10px 10px; }
+	.handle[data-edge="bottom"] { width: 56px; height: 18px; border-radius: 10px 10px 0 0; }
+	.handle[data-edge="left"] { width: 18px; height: 56px; border-radius: 0 10px 10px 0; }
+	.handle[data-edge="right"] { width: 18px; height: 56px; border-radius: 10px 0 0 10px; }
+	.handle-line { width: 22px; height: 4px; border-radius: 2px; background: currentColor; opacity: 0.7; }
+	.handle[data-edge="left"] .handle-line, .handle[data-edge="right"] .handle-line { width: 4px; height: 22px; }
+
+	/* The jump-out: agentation's springy popupEnter feel on the whole pill. */
+	@keyframes dockPop { from { opacity: 0; transform: scale(0.6); } to { opacity: 1; transform: scale(1); } }
+	.pill.pop { animation: dockPop 0.3s cubic-bezier(0.34, 1.56, 0.64, 1); }
+	@media (prefers-reduced-motion: reduce) { .pill.pop { animation: none; } }
 
 	.panel {
 		width: min(24rem, calc(100vw - 40px)); max-height: min(30rem, calc(100vh - 104px));
@@ -563,9 +583,9 @@
 			<span class="divider" aria-hidden="true"></span>
 			<span class="wrap">
 				<button class="status" id="status-toggle" type="button" aria-expanded="false" aria-label="Show build queue and activity">
-					<span class="dot" id="dot"></span><span id="status-text">0 active</span><span class="phase" id="status-phase" hidden></span>
+					<span class="dot" id="dot"></span><span id="status-text">0</span>
 				</button>
-				<span class="tip" aria-hidden="true">Activity</span>
+				<span class="tip" id="status-tip" aria-hidden="true">Build activity</span>
 			</span>
 			<span class="wrap">
 				<button class="icon-btn" id="dock-close" type="button" aria-label="Hide the toolbar">${ICONS.close}</button>
@@ -573,7 +593,7 @@
 			</span>
 		</div>
 	</div>
-	<button class="handle" id="handle" type="button" hidden aria-label="Show the App Harness toolbar">${ICONS.sparkle}</button>
+	<button class="handle" id="handle" type="button" hidden aria-label="Show the App Harness toolbar" data-edge="bottom"><span class="handle-line" aria-hidden="true"></span></button>
 	<form class="composer" id="composer" hidden>
 		<span class="context" id="context"></span>
 		<div class="quote" id="quote" hidden></div>
@@ -592,7 +612,7 @@
 	const dockEl = $("dock"), pill = $("pill"), grip = $("grip"), dockClose = $("dock-close"), handle = $("handle");
 	const panel = $("panel"), panelClose = $("panel-close"), panelSub = $("panel-sub"), queueEl = $("queue"), queueEmpty = $("queue-empty");
 	const feedEl = $("feed"), feedEmpty = $("feed-empty"), harnessFeed = $("harness-feed"), harnessFeedLabel = $("harness-feed-label");
-	const statusToggle = $("status-toggle"), statusText = $("status-text"), statusPhase = $("status-phase"), dot = $("dot");
+	const statusToggle = $("status-toggle"), statusText = $("status-text"), statusTip = $("status-tip"), dot = $("dot");
 	const composer = $("composer"), context = $("context"), quote = $("quote"), input = $("input"), msg = $("msg");
 	const submit = $("submit"), cancel = $("cancel");
 	const markersEl = $("markers"), markersToggle = $("t-markers");
@@ -609,15 +629,22 @@
 
 	// ---- Dock position, drag, close (persisted in the overlay's own key) -----
 
-	let dockState = { right: 20, bottom: 20, closed: false, markers: true };
+	// `placed` flips once the user positions the dock themselves; until then
+	// the FIRST-RUN default applies: top center, open. `edge`/`along` describe
+	// the closed state's flush edge tab.
+	let dockState = { right: 20, bottom: 20, closed: false, markers: true, placed: false, edge: "bottom", along: 0 };
 	try {
 		const raw = localStorage.getItem(STORAGE_KEY);
 		if (raw) {
 			const parsed = JSON.parse(raw);
-			if (Number.isFinite(parsed.right)) dockState.right = parsed.right;
-			if (Number.isFinite(parsed.bottom)) dockState.bottom = parsed.bottom;
+			// Stored coordinates mean the user placed the dock; their position
+			// and open state always win over the first-run default.
+			if (Number.isFinite(parsed.right)) { dockState.right = parsed.right; dockState.placed = true; }
+			if (Number.isFinite(parsed.bottom)) { dockState.bottom = parsed.bottom; dockState.placed = true; }
 			dockState.closed = parsed.closed === true;
 			dockState.markers = parsed.markers !== false;
+			if (parsed.edge === "top" || parsed.edge === "bottom" || parsed.edge === "left" || parsed.edge === "right") dockState.edge = parsed.edge;
+			if (Number.isFinite(parsed.along)) dockState.along = parsed.along;
 		}
 	} catch { /* Private mode or a full store: the defaults are fine. */ }
 
@@ -625,12 +652,35 @@
 		try { localStorage.setItem(STORAGE_KEY, JSON.stringify(dockState)); } catch { /* best-effort */ }
 	}
 
+	const HANDLE_LONG = 56, HANDLE_THICK = 18;
+
+	/** Place the closed-state tab flush against its edge at its along-offset. */
+	function applyHandlePlacement() {
+		const edge = dockState.edge;
+		handle.dataset.edge = edge;
+		handle.style.left = ""; handle.style.right = ""; handle.style.top = ""; handle.style.bottom = "";
+		const horizontal = edge === "top" || edge === "bottom";
+		const max = (horizontal ? innerWidth : innerHeight) - HANDLE_LONG - 8;
+		const along = Math.max(8, Math.min(Number.isFinite(dockState.along) ? dockState.along : max / 2, max));
+		dockState.along = along;
+		if (edge === "top") { handle.style.top = "0px"; handle.style.left = `${along}px`; }
+		if (edge === "bottom") { handle.style.bottom = "0px"; handle.style.left = `${along}px`; }
+		if (edge === "left") { handle.style.left = "0px"; handle.style.top = `${along}px`; }
+		if (edge === "right") { handle.style.right = "0px"; handle.style.top = `${along}px`; }
+	}
+
 	function applyDockState() {
+		const pillRect = pill.getBoundingClientRect();
+		const pillWidth = pillRect.width || 300, pillHeight = pillRect.height || 44;
+		// FIRST RUN: the toolbar presents itself top center, open — until the
+		// user drags it somewhere, which persists and wins forever after.
+		if (!dockState.placed) {
+			dockState.right = Math.max(4, Math.round((innerWidth - pillWidth) / 2));
+			dockState.bottom = Math.max(4, innerHeight - 20 - pillHeight);
+		}
 		const right = Math.max(4, Math.min(dockState.right, innerWidth - 48));
 		const bottom = Math.max(4, Math.min(dockState.bottom, innerHeight - 48));
 		dockState.right = right; dockState.bottom = bottom;
-		const pillRect = pill.getBoundingClientRect();
-		const pillWidth = pillRect.width || 300, pillHeight = pillRect.height || 44;
 		const dockTop = innerHeight - bottom - pillHeight;
 		const dockLeft = innerWidth - right - pillWidth;
 		// POSITION-AWARE FLYOUT: a flex box grows away from its anchored edge,
@@ -646,8 +696,7 @@
 		else { dockEl.style.bottom = `${bottom}px`; dockEl.style.top = "auto"; }
 		if (start) { dockEl.style.left = `${Math.max(4, dockLeft)}px`; dockEl.style.right = "auto"; }
 		else { dockEl.style.right = `${right}px`; dockEl.style.left = "auto"; }
-		handle.style.right = `${right}px`;
-		handle.style.bottom = `${bottom}px`;
+		if (dockState.closed) applyHandlePlacement();
 		dockEl.hidden = dockState.closed;
 		handle.hidden = !dockState.closed;
 		// Never clipped: cap the panel by the space it actually has to open into.
@@ -683,6 +732,8 @@
 	function endDockDrag() {
 		if (!dragFrom) return;
 		dragFrom = null;
+		// The user has placed the dock: the first-run default stands down.
+		dockState.placed = true;
 		// Magnetic settle: snap an edge that is within reach, animated briefly.
 		const pillRect = pill.getBoundingClientRect();
 		const width = pillRect.width || 300, height = pillRect.height || 44;
@@ -718,6 +769,7 @@
 		const move = moves[event.key];
 		if (!move) return;
 		event.preventDefault();
+		dockState.placed = true;
 		dockState.right += move[0];
 		dockState.bottom += move[1];
 		applyDockState();
@@ -725,6 +777,15 @@
 	});
 
 	dockClose.addEventListener("click", () => {
+		// Attach the closed tab flush to the NEAREST page edge from where the
+		// pill sits right now, at the matching offset along that edge.
+		const pillRect = pill.getBoundingClientRect();
+		const pillWidth = pillRect.width || 300, pillHeight = pillRect.height || 44;
+		const centerX = innerWidth - dockState.right - pillWidth / 2;
+		const centerY = innerHeight - dockState.bottom - pillHeight / 2;
+		const distances = { left: centerX, right: innerWidth - centerX, top: centerY, bottom: innerHeight - centerY };
+		dockState.edge = Object.keys(distances).sort((a, b) => distances[a] - distances[b])[0];
+		dockState.along = (dockState.edge === "top" || dockState.edge === "bottom" ? centerX : centerY) - HANDLE_LONG / 2;
 		dockState.closed = true;
 		hidePanel();
 		clearMode();
@@ -732,10 +793,55 @@
 		saveDockState();
 		handle.focus?.();
 	});
+
+	// The closed tab drags ALONG its edge (and across to another edge,
+	// snapping flush); a plain click jumps the toolbar back out at that spot.
+	let handleDrag = null, handleDragMoved = false;
+	handle.addEventListener("pointerdown", (event) => {
+		handleDrag = { x: event.clientX, y: event.clientY };
+		handleDragMoved = false;
+		handle.setPointerCapture?.(event.pointerId);
+		event.preventDefault?.();
+	});
+	handle.addEventListener("pointermove", (event) => {
+		if (!handleDrag) return;
+		if (typeof event.buttons === "number" && event.buttons === 0) { handleDrag = null; saveDockState(); return; }
+		if (!handleDragMoved && Math.hypot(event.clientX - handleDrag.x, event.clientY - handleDrag.y) <= 4) return;
+		handleDragMoved = true;
+		const distances = { left: event.clientX, right: innerWidth - event.clientX, top: event.clientY, bottom: innerHeight - event.clientY };
+		dockState.edge = Object.keys(distances).sort((a, b) => distances[a] - distances[b])[0];
+		dockState.along = (dockState.edge === "top" || dockState.edge === "bottom" ? event.clientX : event.clientY) - HANDLE_LONG / 2;
+		applyHandlePlacement();
+	});
+	function endHandleDrag() {
+		if (!handleDrag) return;
+		handleDrag = null;
+		saveDockState();
+	}
+	handle.addEventListener("pointerup", endHandleDrag);
+	handle.addEventListener("pointercancel", endHandleDrag);
 	handle.addEventListener("click", () => {
+		// A drag that just ended is not a click.
+		if (handleDragMoved) { handleDragMoved = false; return; }
+		// JUMP OUT: expand back to the full toolbar at the tab's location,
+		// with agentation's springy pop.
+		const pillRect = pill.getBoundingClientRect();
+		const pillWidth = pillRect.width || 300, pillHeight = pillRect.height || 44;
+		const alongCenter = dockState.along + HANDLE_LONG / 2;
+		const MARGIN = 20;
+		if (dockState.edge === "top" || dockState.edge === "bottom") {
+			dockState.right = Math.max(4, Math.min(innerWidth - alongCenter - pillWidth / 2, innerWidth - pillWidth - 4));
+			dockState.bottom = dockState.edge === "top" ? innerHeight - MARGIN - pillHeight : MARGIN;
+		} else {
+			dockState.bottom = Math.max(4, Math.min(innerHeight - alongCenter - pillHeight / 2, innerHeight - pillHeight - 4));
+			dockState.right = dockState.edge === "left" ? innerWidth - MARGIN - pillWidth : MARGIN;
+		}
+		dockState.placed = true;
 		dockState.closed = false;
 		applyDockState();
 		saveDockState();
+		pill.classList.add("pop");
+		setTimeout(() => pill.classList.remove("pop"), 320);
 		tools.target.focus?.();
 	});
 
@@ -1280,16 +1386,31 @@
 		return chipsState.length + waiting + optimistic;
 	}
 
+	/** "2 building · 1 verifying" — the words live in the tooltip and aria, not the dock. */
+	function pipelinePhrase(count) {
+		if (count === 0) return "Build activity";
+		const order = ["building", "verifying", "deploying", "queued", "accepted", "reviewing"];
+		const groups = new Map();
+		for (const chip of chipsState) groups.set(chip.phase, (groups.get(chip.phase) ?? 0) + 1);
+		const parts = order.filter((phase) => groups.has(phase)).map((phase) => `${groups.get(phase)} ${phase}`);
+		const extra = count - chipsState.length;
+		if (extra > 0) parts.push(`${extra} sending`);
+		return parts.join(" · ") || `${count} active`;
+	}
+
 	function updateStatus() {
 		const count = activeCount();
-		statusText.textContent = `${count} active`;
-		// Surface the pipeline phase right on the dock: the user watches their
-		// change progress instead of wondering whether it landed.
+		// TERSE by design: the number carries the load, the dot's color carries
+		// the leading phase. Words live in the tooltip and the panel.
+		statusText.textContent = String(count);
 		const phased = chipsState.find((chip) => chip.phase === "building" || chip.phase === "verifying" || chip.phase === "deploying") ?? chipsState[0];
-		statusPhase.textContent = phased ? `· ${phased.phase}` : "";
-		statusPhase.hidden = !phased;
 		dot.className = `dot${count > 0 ? " busy" : connected ? " live" : ""}`;
-		panelSub.textContent = connected ? (count > 0 ? `${count} in flight` : "Idle · connected") : "Reconnecting…";
+		if (count > 0 && phased && phased.phase) dot.dataset.phase = phased.phase;
+		else delete dot.dataset.phase;
+		const phrase = pipelinePhrase(count);
+		statusTip.textContent = phrase;
+		statusToggle.setAttribute("aria-label", count > 0 ? `Build queue and activity: ${phrase}` : "Show build queue and activity");
+		panelSub.textContent = connected ? (count > 0 ? phrase : "Idle · connected") : "Reconnecting…";
 	}
 
 	function renderQueue(chips) {
