@@ -11,7 +11,7 @@
 	// Each topic is its own durable conversation and request stream. The main
 	// space is deliberately broad, while topical prompts carry narrower context.
 	const rooms = {
-		main: { label: "All rooms", title: "self driving chat", prompt: "Prompt a platform-wide change", intro: "Prompts here can shape the whole platform." },
+		main: { label: "All rooms", title: "self driving chat", prompt: "Ask for a change or ask Arbitrator about the app", intro: "Prompts here can shape the whole platform. You can also ask Arbitrator how a feature works or how a build is progressing." },
 		design: { label: "Design", title: "design room", prompt: "Prompt a design change", intro: "Prompts here focus on visual design and experience." },
 		features: { label: "Features", title: "feature room", prompt: "Prompt a feature for this room", intro: "Prompts here focus on features that make sense for this room." },
 		bugs: { label: "Bugs", title: "bug room", prompt: "Describe a bug to fix", intro: "Prompts here focus on fixes while preserving unrelated behavior." },
@@ -51,6 +51,7 @@
 
 	let socket = null, reconnectTimer = null, identity = null, everConnected = false;
 	const renderedChat = new Set(), cachedChat = [], chatCacheKey = `ahp:room:${roomId}:chat`, people = new Map(), pageLoadedAt = Date.now();
+	const arbitratorFacts = [];
 	function rememberPerson(person) {
 		const name = typeof person === "string" ? person : person?.name ?? person?.displayName ?? person?.author;
 		if (typeof name === "string" && name.trim()) people.set(name.trim().toLocaleLowerCase(), name.trim());
@@ -84,9 +85,47 @@
 		} else text.textContent = message.text;
 		body.append(meta, text); row.append(avatar, body); messages.append(row); row.scrollIntoView({ block: "end", behavior: renderedChat.size > 1 ? "smooth" : "auto" });
 	}
+	function rememberFacts(event) {
+		for (const item of event.items || event.feed?.items || []) {
+			if (item && typeof item === "object") arbitratorFacts.push(item);
+		}
+		if (arbitratorFacts.length > 100) arbitratorFacts.splice(0, arbitratorFacts.length - 100);
+	}
+	function progressAnswer() {
+		const latest = arbitratorFacts.at(-1);
+		if (!latest) return "I don't have a build update in the room feed yet. When a change is requested, I delegate it to a builder, wait for CI, and report when the deployed revision is live.";
+		const kind = String(latest.kind || "");
+		const states = {
+			"run-queued": "The change is queued for a builder.",
+			"run-started": "A builder is working on the change now.",
+			"run-heartbeat": `The builder is working now${latest.refs?.step ? `: ${latest.refs.step}` : "."}`,
+			"run-verifying": "The builder returned the change and CI is verifying it.",
+			"deploy-observed": "The latest change passed verification and is live.",
+			"run-failed": "The latest build needs attention after the builder reported a failure.",
+			"intent-parked": "The latest change is parked rather than being deployed.",
+		};
+		return states[kind] || `The latest progress update is “${latest.title || latest.label || kind.replaceAll("-", " ") || "recorded in the activity feed"}.”`;
+	}
+	function arbitratorAnswer(value) {
+		if (roomId !== "main" || typeof value !== "string") return null;
+		const text = value.trim().toLocaleLowerCase();
+		const asks = text.includes("?") || /^(how|what|where|when|is|are|can|does|do)\b/u.test(text);
+		if (!asks) return null;
+		if (/reaction|emoji|like|love|laugh/u.test(text)) return "To react, double-click a message (or right-click it) to open the reaction picker, then choose 👍, ❤️, or 😂. Choose the selected reaction again to remove it.";
+		if (/upload|image|photo|picture/u.test(text)) return "Use the ＋ button beside the message box to upload an image. Select the image in chat to open its full preview.";
+		if (/room|topic|design|feature|bug/u.test(text) && /where|switch|choose|find|use/u.test(text)) return "Use the room menu in the header to switch between All rooms, Design, Features, and Bugs. Use All rooms for changes that should apply everywhere.";
+		if (/progress|status|building|builder|build|delegat|ci|deploy|live|working/u.test(text)) return progressAnswer();
+		if (/how.*(app|work)|feature|use|where/u.test(text)) return "Ask me about a feature by name and I'll explain where it is and how to invoke it. I can also summarize the latest builder, CI, and deployment progress from the room feed.";
+		return null;
+	}
+	function receiveChat(message, cache = true) {
+		addChat(message, cache);
+		const answer = message.author === "Arbitrator" ? null : arbitratorAnswer(message.text);
+		if (answer) addChat({ seq: `arbitrator:${chatKey(message)}`, author: "Arbitrator", at: Number(message.at) + 1 || Date.now(), text: answer }, false);
+	}
 	try {
 		const saved = JSON.parse(localStorage.getItem(chatCacheKey) || "[]");
-		if (Array.isArray(saved)) saved.forEach((message) => { cachedChat.push(message); addChat(message, false); });
+		if (Array.isArray(saved)) saved.forEach((message) => { cachedChat.push(message); receiveChat(message, false); });
 	} catch { /* Ignore unavailable or damaged local storage. */ }
 
 	function send(payload) { if (socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(payload)); }
@@ -104,9 +143,10 @@
 		socket.addEventListener("error", () => socket.close());
 		socket.addEventListener("message", ({ data }) => {
 			let event; try { event = JSON.parse(data); } catch { return; }
-			if (event.type === "room:snapshot") { (event.chat || []).forEach(addChat); (event.people || event.members || event.users || []).forEach(rememberPerson); updateConcurrent(event); if (event.you) setIdentity(event.you); }
+			rememberFacts(event);
+			if (event.type === "room:snapshot") { (event.chat || []).forEach(receiveChat); (event.people || event.members || event.users || []).forEach(rememberPerson); updateConcurrent(event); if (event.you) setIdentity(event.you); }
 			for (const item of event.items || event.feed?.items || []) if (item?.kind === "deploy-observed" && typeof item.refs?.sha === "string" && item.at >= pageLoadedAt) document.dispatchEvent(new CustomEvent("ahp:deploy-observed", { detail: { sha: item.refs.sha } }));
-			if (event.type === "chat:message") addChat(event);
+			if (event.type === "chat:message") receiveChat(event);
 			if (event.type === "room:presence" || event.type === "presence:update") { (event.people || event.members || event.users || []).forEach(rememberPerson); updateConcurrent(event); }
 		});
 	}
