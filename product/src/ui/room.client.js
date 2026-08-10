@@ -5,27 +5,15 @@
 	const $ = (selector) => document.querySelector(selector);
 	const messages = $("#messages");
 	const dot = $("#dot"), connection = $("#connection"), concurrentUsers = $("#concurrent-users");
-	const composer = $("#composer"), chatInput = $("#chat-input"), sendButton = $("#send");
+	const composer = $("#composer"), chatInput = $("#chat-input"), imageUpload = $("#image-upload"), sendButton = $("#send");
 	const roomIntro = $("#room-intro"), roomIntroDismiss = $("#room-intro-dismiss");
 	const join = $("#join"), joinForm = $("#join-form"), joinName = $("#join-name"), joinError = $("#join-error");
 
 	let socket = null, reconnectTimer = null, identity = null, everConnected = false;
 	const renderedChat = new Set();
 	const people = new Map();
-	// Deploy facts older than this page are history, not news: the push-based
-	// update banner must only fire for deploys observed AFTER this page loaded.
 	const pageLoadedAt = Date.now();
 
-	/**
-	 * PUSH-based update awareness: the platform records the deploy-observed
-	 * fact at the exact moment /version serves the new revision, and that fact
-	 * rides the room WebSocket. Surfacing it the instant it arrives beats any
-	 * poll — the inline head script (which owns the banner) listens for this
-	 * event. Facts arriving in snapshots/updates can include recent history,
-	 * so only facts newer than the page load count; the banner must NEVER
-	 * appear before deploy-observed, because during edge propagation a refresh
-	 * would hand the user the OLD code.
-	 */
 	function announceDeploys(items) {
 		for (const item of items || []) {
 			if (item && item.kind === "deploy-observed" && item.refs && typeof item.refs.sha === "string" && item.at >= pageLoadedAt) {
@@ -75,7 +63,14 @@
 		const author = document.createElement("span");
 		author.className = "author"; author.textContent = message.author; author.style.color = color;
 		const text = document.createElement("span");
-		text.className = "message-text"; text.textContent = message.text;
+		text.className = "message-text";
+		if (/^data:image\/[a-z0-9.+-]+;base64,[a-z0-9+/=\s]+$/iu.test(message.text || "")) {
+			const image = document.createElement("img");
+			image.src = message.text; image.alt = "Uploaded image"; image.style.maxWidth = "min(100%, 32rem)"; image.style.maxHeight = "24rem";
+			text.append(image);
+		} else {
+			text.textContent = message.text;
+		}
 		const time = document.createElement("time");
 		if (message.at) {
 			time.dateTime = new Date(message.at).toISOString();
@@ -93,8 +88,6 @@
 		socket = new WebSocket(`${proto}//${location.host}/api/rooms/main`);
 		socket.addEventListener("open", () => {
 			setConnection("Live", true);
-			// A reconnect may have missed a deploy-observed frame entirely, so
-			// the poll runs once as a FALLBACK — push stays the primary path.
 			if (everConnected) document.dispatchEvent(new CustomEvent("ahp:version-recheck"));
 			everConnected = true;
 		});
@@ -115,9 +108,6 @@
 				updateConcurrent(event);
 				if (event.you) { identity = event.you; rememberPerson(event.you); }
 			}
-			// Build-fact rendering belongs to the overlay; the app only watches
-			// for the one fact that is its own business — a deploy of ITSELF —
-			// on whatever frame happens to carry items.
 			announceDeploys(event.items || (event.feed && event.feed.items));
 			if (event.type === "chat:message") addChat(event);
 			if (event.type === "room:presence" || event.type === "presence:update") {
@@ -132,6 +122,16 @@
 		const text = chatInput.value.trim();
 		if (!text) return;
 		send({ type: "chat:send", text }); chatInput.value = "";
+	});
+	imageUpload.addEventListener("change", () => {
+		const file = imageUpload.files?.[0];
+		if (!file || !file.type.startsWith("image/")) return;
+		const reader = new FileReader();
+		reader.addEventListener("load", () => {
+			if (typeof reader.result === "string") send({ type: "chat:send", text: reader.result });
+			imageUpload.value = "";
+		});
+		reader.readAsDataURL(file);
 	});
 	chatInput.addEventListener("keydown", (event) => {
 		if (event.key === "Tab") {
