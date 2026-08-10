@@ -274,6 +274,14 @@
 	}
 	.hover-box.enter { animation: hoverHighlightIn 0.12s ease-out forwards; }
 	.hover-box[hidden] { display: none !important; }
+	/* SELF-ANNOTATION: hovering the harness's own chrome while armed switches
+	   the preview into a distinct feedback style — indigo, clearly not the
+	   app — and ⌥-click opens the composer in harness-feedback mode. */
+	.hover-box.harness {
+		border-color: color-mix(in srgb, #6155F5 60%, transparent);
+		background: color-mix(in srgb, #6155F5 6%, transparent);
+	}
+	.hover-chip.harness { background: #6155F5; }
 	.hover-chip {
 		position: fixed; pointer-events: none !important;
 		max-width: 320px; padding: 5px 9px; border-radius: 6px;
@@ -530,6 +538,8 @@
 				<div class="section-label">Activity</div>
 				<ol class="feed" id="feed"></ol>
 				<div class="feed-empty" id="feed-empty">No activity yet.</div>
+				<div class="section-label" id="harness-feed-label" hidden>Harness feedback</div>
+				<ol class="feed" id="harness-feed"></ol>
 			</div>
 		</div>
 		<div class="pill" id="pill" role="toolbar" aria-label="App Harness tools">
@@ -581,7 +591,7 @@
 	const hoverBox = $("hover-box"), hoverChip = $("hover-chip"), chipPath = $("chip-path"), chipName = $("chip-name");
 	const dockEl = $("dock"), pill = $("pill"), grip = $("grip"), dockClose = $("dock-close"), handle = $("handle");
 	const panel = $("panel"), panelClose = $("panel-close"), panelSub = $("panel-sub"), queueEl = $("queue"), queueEmpty = $("queue-empty");
-	const feedEl = $("feed"), feedEmpty = $("feed-empty");
+	const feedEl = $("feed"), feedEmpty = $("feed-empty"), harnessFeed = $("harness-feed"), harnessFeedLabel = $("harness-feed-label");
 	const statusToggle = $("status-toggle"), statusText = $("status-text"), statusPhase = $("status-phase"), dot = $("dot");
 	const composer = $("composer"), context = $("context"), quote = $("quote"), input = $("input"), msg = $("msg");
 	const submit = $("submit"), cancel = $("cancel");
@@ -909,7 +919,7 @@
 		return false;
 	}
 
-	let hoverEl = null;
+	let hoverEl = null, hoverIsHarness = false;
 
 	function restartAnimation(element) {
 		element.classList.remove("enter");
@@ -932,23 +942,32 @@
 		hoverBox.style.height = `${rect.height}px`;
 	}
 
-	function setHover(element, x, y) {
+	function setHover(element, x, y, harness = false) {
 		if (!element) {
 			hoverEl = null;
+			hoverIsHarness = false;
 			hoverBox.hidden = true;
 			hoverChip.hidden = true;
 			return;
 		}
 		const changed = element !== hoverEl;
 		hoverEl = element;
+		hoverIsHarness = harness;
+		hoverBox.classList.toggle("harness", harness);
+		hoverChip.classList.toggle("harness", harness);
 		hoverBox.hidden = false;
 		hoverChip.hidden = false;
 		syncHoverBox();
 		positionChip(x, y);
 		if (changed) {
-			const dataLoc = element.getAttribute?.("data-loc") || element.closest?.("[data-loc]")?.getAttribute("data-loc") || null;
-			chipPath.textContent = readablePath(element);
-			chipName.textContent = dataLoc ? `${describeTarget(element)} · ${dataLoc}` : describeTarget(element);
+			if (harness) {
+				chipPath.textContent = readablePath(element, 3);
+				chipName.textContent = "App Harness UI · ⌥-click to give feedback";
+			} else {
+				const dataLoc = element.getAttribute?.("data-loc") || element.closest?.("[data-loc]")?.getAttribute("data-loc") || null;
+				chipPath.textContent = readablePath(element);
+				chipName.textContent = dataLoc ? `${describeTarget(element)} · ${dataLoc}` : describeTarget(element);
+			}
 			restartAnimation(hoverBox);
 			restartAnimation(hoverChip);
 		}
@@ -958,11 +977,50 @@
 		if (mode !== "target" && mode !== "comment") return;
 		if (!composer.hidden) return;
 		const raw = (typeof event.composedPath === "function" ? event.composedPath()[0] : null) || event.target;
-		if (raw && overlayOwns(raw)) { setHover(null); return; }
+		// The root-level listener below previews the harness's own chrome; the
+		// document sees only the closed host, so it must not clobber that.
+		if (raw && overlayOwns(raw)) { if (!hoverIsHarness) setHover(null); return; }
 		const element = deepElementFromPoint(event.clientX, event.clientY);
 		if (!element || overlayOwns(element)) { setHover(null); return; }
 		setHover(element, event.clientX, event.clientY);
 	});
+
+	// SELF-ANNOTATION (harness feedback). While a tool is armed, the harness's
+	// own chrome becomes annotatable too — in a visibly different style — and
+	// ⌥-click opens the composer in harness-feedback mode. These submissions
+	// NEVER dispatch a build: the platform is firewalled from the room's
+	// agents, so the fact is recorded for the harness team instead.
+	root.addEventListener("mousemove", (event) => {
+		if (mode !== "target" && mode !== "comment") return;
+		if (!composer.hidden) return;
+		const target = event.target;
+		if (!target || !target.tagName || target === hoverBox || target === hoverChip) return;
+		setHover(target, event.clientX ?? 0, event.clientY ?? 0, true);
+	});
+
+	function harnessEnvelope(element) {
+		return {
+			kind: "harness-feedback",
+			label: element.getAttribute?.("aria-label") || describeTarget(element),
+			selectorPath: readablePath(element, 4),
+			control: element.getAttribute?.("id") || null,
+		};
+	}
+
+	root.addEventListener("click", (event) => {
+		if (!event.altKey) return;
+		if (mode !== "target" && mode !== "comment") return;
+		const element = event.target;
+		if (!element || !element.tagName) return;
+		event.preventDefault?.();
+		event.stopPropagation?.();
+		event.stopImmediatePropagation?.();
+		clearSelection();
+		selectedEnvelope = harnessEnvelope(element);
+		composerInvoker = tools[mode] ?? null;
+		clearMode();
+		openComposer("harness-feedback", `Harness UI: ${selectedEnvelope.label}`, { x: event.clientX ?? 0, y: event.clientY ?? 0 });
+	}, true);
 	// The highlight and the intent markers track their elements through
 	// scroll and resize, like agentation's live-tracked boxes.
 	addEventListener("scroll", () => { if (hoverEl) syncHoverBox(); renderMarkers(); }, true);
@@ -1013,7 +1071,7 @@
 		quote.textContent = picked ? `“${picked}”` : "";
 		quote.hidden = !picked;
 		input.value = "";
-		input.placeholder = kind === "comment" ? "Leave feedback…" : "Request a change…";
+		input.placeholder = kind === "comment" ? "Leave feedback…" : kind === "harness-feedback" ? "What should the harness do better?" : "Request a change…";
 		msg.textContent = ""; msg.classList.remove("ok");
 		submit.disabled = false; composer.hidden = false;
 		positionComposer(anchor);
@@ -1124,6 +1182,13 @@
 		}
 		if (!socket || socket.readyState !== WebSocket.OPEN) {
 			msg.textContent = "Not connected yet.";
+			return;
+		}
+		if (kind === "harness-feedback") {
+			// Never a build: recorded for the harness team, outside the room's
+			// own pipeline, so it does not touch the optimistic active count.
+			send({ type: "harness:feedback", text, annotation: selectedEnvelope, clientSubmissionId: crypto.randomUUID() });
+			submit.disabled = true; msg.classList.remove("ok"); msg.textContent = "Sending…";
 			return;
 		}
 		let annotation;
@@ -1358,11 +1423,14 @@
 			li.append(text);
 			const links = item.refs ? provenance(item.refs) : null;
 			if (links) li.append(links);
-			// Newest first.
-			const before = [...feedEl.children].find((child) => Number(child.dataset.seq) < Number(item.seq));
-			feedEl.insertBefore(li, before ?? null);
+			// Harness feedback lives in its own small section; everything else
+			// is build activity. Newest first in both.
+			const lane = item.kind === "harness-feedback" ? harnessFeed : feedEl;
+			const before = [...lane.children].find((child) => Number(child.dataset.seq) < Number(item.seq));
+			lane.insertBefore(li, before ?? null);
 		}
 		feedEmpty.hidden = feedEl.children.length > 0;
+		harnessFeedLabel.hidden = harnessFeed.children.length === 0;
 	}
 
 	// ---- Transport -----------------------------------------------------------
@@ -1395,6 +1463,12 @@
 				submit.disabled = false;
 				setTimeout(() => closeComposer(), 1600);
 				renderPending();
+			}
+			if (event.type === "harness:ack") {
+				msg.classList.add("ok");
+				msg.textContent = "Recorded — the harness improves outside this room's pipeline.";
+				submit.disabled = false;
+				setTimeout(() => closeComposer(), 1600);
 			}
 			if (event.type === "room:notice") {
 				if (!composer.hidden) {

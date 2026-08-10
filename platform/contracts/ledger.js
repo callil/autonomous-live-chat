@@ -65,6 +65,13 @@ export const LEDGER_EVENT_KINDS = [
 	// The Doctor's public status note for cases with no intent to park
 	// (for example a liveness failure across a migration deploy).
 	"doctor-note",
+	// Feedback about the HARNESS ITSELF (its toolbar, panel, composer). The
+	// platform is firewalled from the room's coding agents by design, so this
+	// fact is terminal at creation: recorded verbatim with its anchored
+	// overlay element, surfaced honestly, and NEVER dispatched as a build.
+	// The harness team reads these from the ledger and improves the overlay
+	// on its own rails.
+	"harness-feedback",
 ];
 
 const KIND_SET = new Set(LEDGER_EVENT_KINDS);

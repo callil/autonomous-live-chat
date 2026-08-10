@@ -52,6 +52,7 @@ type ClientMessage =
 	| { type: "chat:send"; text?: unknown }
 	| { type: "request:target" | "request:comment" | "request:draw"; text?: unknown; annotation?: unknown; clientSubmissionId?: unknown }
 	| { type: "request:cancel"; intentId?: unknown }
+	| { type: "harness:feedback"; text?: unknown; annotation?: unknown; clientSubmissionId?: unknown }
 	| { type: "feed:history"; beforeSeq?: unknown };
 
 type RoomControl = { frozen: boolean };
@@ -263,6 +264,7 @@ export class RoomDO extends DurableObject<RuntimeEnv> {
 			if (message.type === "chat:send") return await this.handleChat(socket, message, identity);
 			if (message.type === "request:target" || message.type === "request:comment" || message.type === "request:draw") return await this.handleRequest(socket, message, identity);
 			if (message.type === "request:cancel") return await this.handleCancel(socket, message, identity);
+			if (message.type === "harness:feedback") return await this.handleHarnessFeedback(socket, message, identity);
 			if (message.type === "feed:history") return await this.handleHistory(socket, message);
 		} catch (error) {
 			this.notice(socket, error instanceof Error ? error.message : "That message could not be processed.");
@@ -897,6 +899,41 @@ export class RoomDO extends DurableObject<RuntimeEnv> {
 		await this.broadcastFeed();
 		// Pull the reconciler to just past the cancel window so dispatch is prompt.
 		await this.scheduleReconcile(deadline + POKE_DELAY_MS);
+	}
+
+	/**
+	 * Feedback about the HARNESS ITSELF. The platform is firewalled from the
+	 * room's coding agents by design, so this NEVER opens an intent and NEVER
+	 * dispatches a build: the fact is terminal at creation — recorded verbatim
+	 * with its anchored overlay element, acked honestly, and read by the
+	 * harness team from the ledger.
+	 */
+	private async handleHarnessFeedback(socket: WebSocket, message: Extract<ClientMessage, { type: "harness:feedback" }>, identity: { id: string; name: string }): Promise<void> {
+		const text = typeof message.text === "string" ? message.text.trim().slice(0, 2000) : "";
+		if (!text.length) {
+			this.notice(socket, "Write a brief note about the harness UI.");
+			return;
+		}
+		const now = Date.now();
+		if (!admitRateLimited(this.requestWindows, identity.id, now, REQUEST_RATE)) {
+			this.notice(socket, "You are sending feedback too quickly; wait a moment.");
+			return;
+		}
+		const raw = message.annotation && typeof message.annotation === "object" && !Array.isArray(message.annotation) ? message.annotation as Record<string, unknown> : {};
+		// Bounded verbatim anchor: the overlay's own chrome, never the app's DOM.
+		const annotation = {
+			kind: "harness-feedback",
+			label: typeof raw.label === "string" && raw.label.length ? raw.label.slice(0, 200) : "harness chrome",
+			selectorPath: typeof raw.selectorPath === "string" ? raw.selectorPath.slice(0, 400) : null,
+			control: typeof raw.control === "string" ? raw.control.slice(0, 120) : null,
+		};
+		await this.ctx.storage.transaction(async () => {
+			await this.appendEvent("harness-feedback", { by: identity.name, byId: identity.id, text, annotation }, now);
+		});
+		try {
+			socket.send(JSON.stringify({ type: "harness:ack", clientSubmissionId: typeof message.clientSubmissionId === "string" && message.clientSubmissionId.length <= 128 ? message.clientSubmissionId : undefined }));
+		} catch { /* the broadcast below still carries the fact */ }
+		await this.broadcastFeed();
 	}
 
 	private async handleCancel(socket: WebSocket, message: Extract<ClientMessage, { type: "request:cancel" }>, identity: { id: string; name: string }): Promise<void> {

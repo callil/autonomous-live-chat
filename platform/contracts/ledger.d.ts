@@ -28,7 +28,8 @@ export type LedgerEventKind =
 	| "room-unfrozen"
 	| "revert-requested"
 	| "budget-exhausted"
-	| "doctor-note";
+	| "doctor-note"
+	| "harness-feedback";
 
 export type AnnotationPayload = {
 	kind: "target" | "comment" | "draw";

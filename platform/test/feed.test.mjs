@@ -36,6 +36,7 @@ test("every ledger event kind has a deterministic template", () => {
 		"revert-requested": { sha: "d".repeat(40), by: "owner" },
 		"budget-exhausted": { day: "2026-08-09" },
 		"doctor-note": { note: "The deploy crossed a migration; a human needs to look." },
+		"harness-feedback": { by: "callil", text: "the dock hides my send button", annotation: { kind: "harness-feedback", label: "Target tool" } },
 	};
 	const silentKinds = new Set(["utterance", "run-heartbeat", "run-timing"]);
 	for (const kind of LEDGER_EVENT_KINDS) {
