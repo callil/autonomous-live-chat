@@ -34,6 +34,8 @@ import { createSandbox, runScript } from "./support/dom.mjs";
 const DEFAULT_ORIGIN = "https://app-harness-product.coda-a.workers.dev";
 const TIMEOUT_MS = 15_000;
 const BUDGET_MS = 60_000;
+// How long a just-finished deploy is allowed to still be reaching every edge.
+const PROPAGATION_WAIT_MS = 30_000;
 
 function argument(name, fallback = null) {
 	const index = process.argv.indexOf(`--${name}`);
@@ -76,12 +78,17 @@ await check("the room page is served", async () => {
 	assert.match(html, /<html/iu, "the origin did not return an HTML document");
 });
 
-await check("/version reports a real deployed revision", async () => {
+/** Read the revision the origin is currently serving. */
+async function readLiveSha() {
 	const response = await get("/version");
 	assert.equal(response.status, 200, `GET /version returned ${response.status}`);
 	const body = await response.json();
 	assert.match(String(body.sha), /^[0-9a-f]{40}$/u, `/version served a malformed sha: ${JSON.stringify(body)}`);
-	liveSha = body.sha;
+	return body.sha;
+}
+
+await check("/version reports a real deployed revision", async () => {
+	liveSha = await readLiveSha();
 });
 
 await check("the deployed revision matches the merge under test", async () => {
@@ -91,14 +98,38 @@ await check("the deployed revision matches the merge under test", async () => {
 		results.push({ name: "  (no --sha given; revision match not asserted)", ok: true, ms: 0, note: true });
 		return;
 	}
-	assert.equal(liveSha, expectedSha, `live revision ${liveSha} is not the expected ${expectedSha}`);
+
+	// A Workers deploy does not flip every edge colo at the same instant: during
+	// propagation successive requests can legitimately be answered by the old
+	// and the new revision. A single sample therefore proves nothing, and
+	// asserting on one produced exactly that false alarm — the deploy was fine
+	// and the smoke job went red. Poll until the expected revision is the answer
+	// we get, and only call it stale if it never becomes so.
+	const deadline = Date.now() + PROPAGATION_WAIT_MS;
+	let observed = liveSha;
+	while (observed !== expectedSha && Date.now() < deadline) {
+		await new Promise((resolve) => setTimeout(resolve, 3000));
+		observed = await readLiveSha();
+	}
+	assert.equal(observed, expectedSha, `live revision ${observed} is not the expected ${expectedSha} after ${PROPAGATION_WAIT_MS}ms`);
+
+	// Re-read the page and assets from the settled revision so every check below
+	// describes one consistent deployment rather than a mix of two.
+	if (observed !== liveSha) {
+		liveSha = observed;
+		html = await (await get("/")).text();
+	}
 });
 
-await check("the page is stamped with the revision it was served from", async () => {
+await check("the page is stamped with a real deployed revision", async () => {
+	// The invariant is that the deploy SUBSTITUTED a revision at all — without
+	// it the room can never notice it is stale. Which of two revisions the page
+	// carries mid-propagation is not a defect, so this deliberately does not
+	// pin it to the /version sample taken a moment earlier.
 	const stamp = /<meta name="ahp-version" content="([^"]*)">/u.exec(html);
 	assert.ok(stamp, "the page carries no version stamp, so the room can never notice it is stale");
 	assert.notEqual(stamp[1], "__DEPLOY_SHA__", "the deploy did not substitute the revision placeholder");
-	assert.equal(stamp[1], liveSha, "the served page and /version disagree about what is deployed");
+	assert.match(stamp[1], /^[0-9a-f]{40}$/u, `the page is stamped with something that is not a revision: ${stamp[1]}`);
 });
 
 await check("the room client asset is served and executes without throwing", async () => {
