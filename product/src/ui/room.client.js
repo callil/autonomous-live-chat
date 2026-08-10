@@ -4,7 +4,7 @@
 
 	const $ = (selector) => document.querySelector(selector);
 	const messages = $("#messages");
-	const dot = $("#dot"), connection = $("#connection");
+	const dot = $("#dot"), connection = $("#connection"), concurrentUsers = $("#concurrent-users");
 	const composer = $("#composer"), chatInput = $("#chat-input"), sendButton = $("#send");
 	const join = $("#join"), joinForm = $("#join-form"), joinName = $("#join-name"), joinError = $("#join-error");
 
@@ -15,6 +15,12 @@
 	function rememberPerson(person) {
 		const name = typeof person === "string" ? person : person?.name ?? person?.displayName ?? person?.author;
 		if (typeof name === "string" && name.trim()) people.set(name.trim().toLocaleLowerCase(), name.trim());
+	}
+
+	function updateConcurrent(event) {
+		const present = event.people || event.members || event.users;
+		const count = Array.isArray(present) ? present.length : event.concurrent;
+		if (Number.isInteger(count) && count >= 0) concurrentUsers.textContent = `${count} ${count === 1 ? "user" : "users"}`;
 	}
 
 	function setConnection(text, live) {
@@ -78,10 +84,14 @@
 			if (event.type === "room:snapshot") {
 				(event.chat || []).forEach(addChat);
 				(event.people || event.members || event.users || []).forEach(rememberPerson);
+				updateConcurrent(event);
 				if (event.you) { identity = event.you; rememberPerson(event.you); }
 			}
 			if (event.type === "chat:message") addChat(event);
-			if (event.type === "room:presence" || event.type === "presence:update") (event.people || event.members || event.users || []).forEach(rememberPerson);
+			if (event.type === "room:presence" || event.type === "presence:update") {
+				(event.people || event.members || event.users || []).forEach(rememberPerson);
+				updateConcurrent(event);
+			}
 		});
 	}
 
