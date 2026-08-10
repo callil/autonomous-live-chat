@@ -213,7 +213,8 @@
 		activity: '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" aria-hidden="true"><path d="M11.5 12H5.5M18.5 6.75H5.5M9.25 17.25H5.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="m16 12.75.52 1.22c.29.68.83 1.22 1.51 1.51l1.22.52-1.22.52c-.68.29-1.22.83-1.51 1.51L16 19.25l-.52-1.22c-.29-.68-.83-1.22-1.51-1.51L12.75 16l1.22-.52c.68-.29 1.22-.83 1.51-1.51L16 12.75Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>',
 		close: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" aria-hidden="true"><path d="m6.5 6.5 11 11m0-11-11 11" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>',
 		grip: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" aria-hidden="true"><circle cx="9" cy="6" r="1.3" fill="currentColor"/><circle cx="15" cy="6" r="1.3" fill="currentColor"/><circle cx="9" cy="12" r="1.3" fill="currentColor"/><circle cx="15" cy="12" r="1.3" fill="currentColor"/><circle cx="9" cy="18" r="1.3" fill="currentColor"/><circle cx="15" cy="18" r="1.3" fill="currentColor"/></svg>',
-		sparkle: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" aria-hidden="true"><path d="M12 5.5l1.1 2.9c.4 1 1.2 1.8 2.2 2.2l2.9 1.1-2.9 1.1c-1 .4-1.8 1.2-2.2 2.2L12 18.5l-1.1-2.9c-.4-1-1.2-1.8-2.2-2.2L5.8 12.3l2.9-1.1c1-.4 1.8-1.2 2.2-2.2L12 5.5Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>',
+		sparkle: '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" aria-hidden="true"><path d="M12 5.5l1.1 2.9c.4 1 1.2 1.8 2.2 2.2l2.9 1.1-2.9 1.1c-1 .4-1.8 1.2-2.2 2.2L12 18.5l-1.1-2.9c-.4-1-1.2-1.8-2.2-2.2L5.8 12.3l2.9-1.1c1-.4 1.8-1.2 2.2-2.2L12 5.5Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>',
+		eye: '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" aria-hidden="true"><path d="M4.5 12S7.5 6.75 12 6.75 19.5 12 19.5 12 16.5 17.25 12 17.25 4.5 12 4.5 12Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><circle cx="12" cy="12" r="2.4" stroke="currentColor" stroke-width="1.5"/></svg>',
 	};
 
 	root.innerHTML = `
@@ -357,13 +358,14 @@
 	.phase { color: var(--ink-dim); font-weight: 400; }
 	.phase[hidden] { display: none !important; }
 
-	/* The tiny reopen handle when the dock is dismissed. */
+	/* The reopen handle when the dock is dismissed: comfortably clickable
+	   (pill-height), still minimal. */
 	.handle {
 		position: fixed; right: 20px; bottom: 20px; pointer-events: auto;
-		appearance: none; border: 0; width: 30px; height: 30px; border-radius: 50%;
+		appearance: none; border: 0; width: 44px; height: 44px; border-radius: 50%;
 		display: flex; align-items: center; justify-content: center; cursor: pointer;
 		background: var(--chrome); color: var(--ink-dim);
-		box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2), 0 0 0 1px var(--ring);
+		box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2), 0 4px 16px rgba(0, 0, 0, 0.1), 0 0 0 1px var(--ring);
 		transition: color 0.15s ease, transform 0.15s ease;
 	}
 	.handle:hover { color: var(--accent); transform: scale(1.08); }
@@ -451,9 +453,61 @@
 	}
 	.hint[hidden] { display: none !important; }
 	.hint .kbd { opacity: 0.5; margin-left: 4px; }
+
+	/* INTENT MARKERS (agentation's annotation markers mapped onto our domain):
+	   numbered pins on the elements pending intents target, colored by phase.
+	   The layer is pointer-transparent; only the pins themselves are hittable. */
+	.markers { position: fixed; inset: 0; pointer-events: none; }
+	@keyframes markerIn { from { opacity: 0; transform: scale(0); } to { opacity: 1; transform: scale(1); } }
+	@keyframes markerOut { from { opacity: 1; transform: scale(1); } to { opacity: 0; transform: scale(0); } }
+	.marker {
+		position: fixed; pointer-events: auto; appearance: none; border: 0;
+		min-width: 24px; height: 24px; padding: 0 6px; border-radius: 12px;
+		display: flex; align-items: center; justify-content: center; cursor: pointer;
+		background: var(--accent); color: #fff; font: inherit; font-size: 11px; font-weight: 600;
+		box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25), 0 0 0 2px rgba(255, 255, 255, 0.35);
+		transition: transform 0.15s ease;
+	}
+	.marker:hover { transform: scale(1.12); }
+	.marker.enter { animation: markerIn 0.3s cubic-bezier(0.34, 1.2, 0.64, 1); }
+	.marker.exit { animation: markerOut 0.18s ease-in forwards; pointer-events: none; }
+	.marker[data-phase="accepted"] { background: #8E8E93; }
+	.marker[data-phase="queued"] { background: var(--accent); }
+	.marker[data-phase="building"] { background: var(--yellow); color: #1a1a1a; }
+	.marker[data-phase="verifying"] { background: #FF8D28; }
+	.marker[data-phase="deploying"] { background: var(--green); }
+	.marker[data-phase="reviewing"] { background: var(--red); }
+	@media (prefers-reduced-motion: reduce) { .marker.enter, .marker.exit { animation: none; } }
+
+	/* Descriptive queue rows: phase dot, quoted request, requester, position. */
+	.queue-item .req { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+	.queue-item .meta { flex: none; color: var(--ink-dim); font-size: 11px; white-space: nowrap; }
+	.queue-item.flash { box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 60%, transparent); }
+	.queue-item { transition: box-shadow 0.3s ease; }
+	.phase-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--ink-faint); }
+	.phase-dot[data-phase="accepted"] { background: #8E8E93; }
+	.phase-dot[data-phase="queued"] { background: var(--accent); }
+	.phase-dot[data-phase="building"] { background: var(--yellow); }
+	.phase-dot[data-phase="verifying"] { background: #FF8D28; }
+	.phase-dot[data-phase="deploying"] { background: var(--green); }
+	.phase-dot[data-phase="reviewing"] { background: var(--red); }
+
+	/* The selected-text quote inside the composer (agentation's .quote). */
+	.quote {
+		font-size: 12px; font-style: italic; color: var(--ink-dim);
+		padding: 6px 8px; background: var(--well); border-radius: 6px; line-height: 1.45;
+		overflow: hidden; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
+	}
+	.quote[hidden] { display: none !important; }
+
+	/* Position-aware flyout: the dock knows which corner it lives in and the
+	   panel opens toward the available space, never off-screen. */
+	.dock.down { flex-direction: column-reverse; }
+	.dock.start { align-items: flex-start; }
 </style>
 <div class="layer">
 	<svg class="draw" id="draw" aria-hidden="true"></svg>
+	<div class="markers" id="markers"></div>
 	<div class="hover-box" id="hover-box" hidden></div>
 	<div class="hover-chip" id="hover-chip" hidden>
 		<div class="chip-path" id="chip-path"></div>
@@ -492,6 +546,10 @@
 				<button class="tool" id="t-draw" type="button" aria-pressed="false" aria-label="Draw on the page">${ICONS.draw}</button>
 				<span class="tip" aria-hidden="true">Draw</span>
 			</span>
+			<span class="wrap">
+				<button class="tool" id="t-markers" type="button" aria-pressed="true" aria-label="Show pending-change markers on the page">${ICONS.eye}</button>
+				<span class="tip" aria-hidden="true">Markers</span>
+			</span>
 			<span class="divider" aria-hidden="true"></span>
 			<span class="wrap">
 				<button class="status" id="status-toggle" type="button" aria-expanded="false" aria-label="Show build queue and activity">
@@ -508,6 +566,7 @@
 	<button class="handle" id="handle" type="button" hidden aria-label="Show the App Harness toolbar">${ICONS.sparkle}</button>
 	<form class="composer" id="composer" hidden>
 		<span class="context" id="context"></span>
+		<div class="quote" id="quote" hidden></div>
 		<textarea id="input" rows="2" aria-label="Describe the change"></textarea>
 		<div class="actions">
 			<button type="button" class="btn cancel" id="cancel">Cancel</button>
@@ -524,8 +583,9 @@
 	const panel = $("panel"), panelClose = $("panel-close"), panelSub = $("panel-sub"), queueEl = $("queue"), queueEmpty = $("queue-empty");
 	const feedEl = $("feed"), feedEmpty = $("feed-empty");
 	const statusToggle = $("status-toggle"), statusText = $("status-text"), statusPhase = $("status-phase"), dot = $("dot");
-	const composer = $("composer"), context = $("context"), input = $("input"), msg = $("msg");
+	const composer = $("composer"), context = $("context"), quote = $("quote"), input = $("input"), msg = $("msg");
 	const submit = $("submit"), cancel = $("cancel");
+	const markersEl = $("markers"), markersToggle = $("t-markers");
 	const tools = { target: $("t-target"), comment: $("t-comment"), draw: $("t-draw") };
 
 	function mount() {
@@ -539,7 +599,7 @@
 
 	// ---- Dock position, drag, close (persisted in the overlay's own key) -----
 
-	let dockState = { right: 20, bottom: 20, closed: false };
+	let dockState = { right: 20, bottom: 20, closed: false, markers: true };
 	try {
 		const raw = localStorage.getItem(STORAGE_KEY);
 		if (raw) {
@@ -547,6 +607,7 @@
 			if (Number.isFinite(parsed.right)) dockState.right = parsed.right;
 			if (Number.isFinite(parsed.bottom)) dockState.bottom = parsed.bottom;
 			dockState.closed = parsed.closed === true;
+			dockState.markers = parsed.markers !== false;
 		}
 	} catch { /* Private mode or a full store: the defaults are fine. */ }
 
@@ -558,26 +619,53 @@
 		const right = Math.max(4, Math.min(dockState.right, innerWidth - 48));
 		const bottom = Math.max(4, Math.min(dockState.bottom, innerHeight - 48));
 		dockState.right = right; dockState.bottom = bottom;
-		dockEl.style.right = `${right}px`;
-		dockEl.style.bottom = `${bottom}px`;
+		const pillRect = pill.getBoundingClientRect();
+		const pillWidth = pillRect.width || 300, pillHeight = pillRect.height || 44;
+		const dockTop = innerHeight - bottom - pillHeight;
+		const dockLeft = innerWidth - right - pillWidth;
+		// POSITION-AWARE FLYOUT: a flex box grows away from its anchored edge,
+		// so the dock anchors to whichever edges leave the panel the most room
+		// and the panel opens toward available space — never off-screen. A pill
+		// in the top half anchors by its top edge (panel opens downward); one
+		// in the left half anchors by its left edge (panel grows rightward).
+		const down = dockTop + pillHeight / 2 < innerHeight / 2;
+		const start = dockLeft + pillWidth / 2 < innerWidth / 2;
+		dockEl.classList.toggle("down", down);
+		dockEl.classList.toggle("start", start);
+		if (down) { dockEl.style.top = `${Math.max(4, dockTop)}px`; dockEl.style.bottom = "auto"; }
+		else { dockEl.style.bottom = `${bottom}px`; dockEl.style.top = "auto"; }
+		if (start) { dockEl.style.left = `${Math.max(4, dockLeft)}px`; dockEl.style.right = "auto"; }
+		else { dockEl.style.right = `${right}px`; dockEl.style.left = "auto"; }
 		handle.style.right = `${right}px`;
 		handle.style.bottom = `${bottom}px`;
 		dockEl.hidden = dockState.closed;
 		handle.hidden = !dockState.closed;
+		// Never clipped: cap the panel by the space it actually has to open into.
+		const room = down ? innerHeight - dockTop - pillHeight - 34 : dockTop - 14;
+		panel.style.maxHeight = `${Math.max(160, Math.min(480, room))}px`;
 		// Only the controls that are actually actuatable in the current state
 		// participate in the tab order (agentation's dynamic tabIndex pattern).
 		handle.tabIndex = dockState.closed ? 0 : -1;
 		panelClose.tabIndex = panel.hidden ? -1 : 0;
+		syncFrame();
+		renderMarkers();
 	}
 
+	// WHOLE-toolbar drag with edge snapping: any pointerdown on the pill's
+	// background (not its buttons) or the grip drags the dock; on release it
+	// settles magnetically to a nearby edge or corner.
+	const SNAP_DISTANCE = 24, SNAP_MARGIN = 20;
 	let dragFrom = null;
-	function beginDockDrag(event) {
+	function beginDockDrag(event, surface) {
 		dragFrom = { x: event.clientX, y: event.clientY, right: dockState.right, bottom: dockState.bottom };
-		grip.setPointerCapture?.(event.pointerId);
+		surface?.setPointerCapture?.(event.pointerId);
 		event.preventDefault?.();
 	}
 	function moveDockDrag(event) {
 		if (!dragFrom) return;
+		// A drag whose pointerup was lost (released off-window, capture missing)
+		// must not follow an unpressed pointer around.
+		if (typeof event.buttons === "number" && event.buttons === 0) { endDockDrag(); return; }
 		dockState.right = dragFrom.right - (event.clientX - dragFrom.x);
 		dockState.bottom = dragFrom.bottom - (event.clientY - dragFrom.y);
 		applyDockState();
@@ -585,17 +673,33 @@
 	function endDockDrag() {
 		if (!dragFrom) return;
 		dragFrom = null;
+		// Magnetic settle: snap an edge that is within reach, animated briefly.
+		const pillRect = pill.getBoundingClientRect();
+		const width = pillRect.width || 300, height = pillRect.height || 44;
+		let { right, bottom } = dockState;
+		if (right < SNAP_DISTANCE + SNAP_MARGIN) right = SNAP_MARGIN;
+		else if (innerWidth - right - width < SNAP_DISTANCE + SNAP_MARGIN) right = innerWidth - width - SNAP_MARGIN;
+		if (bottom < SNAP_DISTANCE + SNAP_MARGIN) bottom = SNAP_MARGIN;
+		else if (innerHeight - bottom - height < SNAP_DISTANCE + SNAP_MARGIN) bottom = innerHeight - height - SNAP_MARGIN;
+		if (right !== dockState.right || bottom !== dockState.bottom) {
+			dockEl.style.transition = "left 0.15s ease, top 0.15s ease, right 0.15s ease, bottom 0.15s ease";
+			handle.style.transition = "right 0.15s ease, bottom 0.15s ease";
+			setTimeout(() => { dockEl.style.transition = ""; handle.style.transition = ""; }, 180);
+			dockState.right = right; dockState.bottom = bottom;
+			applyDockState();
+		}
 		saveDockState();
 	}
-	grip.addEventListener("pointerdown", beginDockDrag);
+	grip.addEventListener("pointerdown", (event) => beginDockDrag(event, grip));
 	// Agentation drags by the toolbar background; the pill's own empty area
 	// works here too, while buttons keep their clicks.
-	pill.addEventListener("pointerdown", (event) => { if (event.target === pill) beginDockDrag(event); });
+	pill.addEventListener("pointerdown", (event) => { if (event.target === pill) beginDockDrag(event, pill); });
 	grip.addEventListener("pointermove", moveDockDrag);
 	pill.addEventListener("pointermove", moveDockDrag);
 	grip.addEventListener("pointerup", endDockDrag);
 	pill.addEventListener("pointerup", endDockDrag);
 	grip.addEventListener("pointercancel", endDockDrag);
+	pill.addEventListener("pointercancel", endDockDrag);
 	// Keyboard operability for the drag (a deliberate addition beyond
 	// agentation): the focused grip nudges the dock with the arrow keys.
 	grip.addEventListener("keydown", (event) => {
@@ -721,8 +825,10 @@
 	}
 
 	function syncFrame() {
-		const open = mode !== null || !panel.hidden || !composer.hidden;
-		if (open) enterFrame(); else exitFrame();
+		// The harness being OPEN is what frames the page (owner's ruling): the
+		// toolbar showing means the app is visibly "held by the harness";
+		// dismissing the dock to its handle releases the frame.
+		if (!dockState.closed) enterFrame(); else exitFrame();
 	}
 
 	addEventListener("resize", () => { applyDockState(); sizeFrame(); });
@@ -857,10 +963,10 @@
 		if (!element || overlayOwns(element)) { setHover(null); return; }
 		setHover(element, event.clientX, event.clientY);
 	});
-	// The highlight tracks its element through scroll and resize, like
-	// agentation's live-tracked boxes.
-	addEventListener("scroll", () => { if (hoverEl) syncHoverBox(); }, true);
-	addEventListener("resize", () => { if (hoverEl) syncHoverBox(); });
+	// The highlight and the intent markers track their elements through
+	// scroll and resize, like agentation's live-tracked boxes.
+	addEventListener("scroll", () => { if (hoverEl) syncHoverBox(); renderMarkers(); }, true);
+	addEventListener("resize", () => { if (hoverEl) syncHoverBox(); renderMarkers(); });
 
 	function clearSelection() {
 		if (selected) selected.removeAttribute(HILITE);
@@ -902,6 +1008,10 @@
 	function openComposer(kind, label, anchor) {
 		composer.dataset.kind = kind;
 		context.textContent = label;
+		// Selected text rides visibly (agentation's quote): "change THIS phrase".
+		const picked = selectedEnvelope?.selectedText;
+		quote.textContent = picked ? `“${picked}”` : "";
+		quote.hidden = !picked;
 		input.value = "";
 		input.placeholder = kind === "comment" ? "Leave feedback…" : "Request a change…";
 		msg.textContent = ""; msg.classList.remove("ok");
@@ -940,6 +1050,13 @@
 		selected = element;
 		element.setAttribute(HILITE, "");
 		selectedEnvelope = captureEnvelope(element);
+		// Text selection makes the request exact (agentation's selectedText):
+		// the envelope carries the selected string alongside the element anchor.
+		try {
+			const selection = typeof getSelection === "function" ? getSelection() : null;
+			const picked = selection && !selection.isCollapsed ? String(selection).trim() : "";
+			if (picked.length) selectedEnvelope.selectedText = picked.slice(0, 500);
+		} catch { /* Selection access is best-effort. */ }
 		const kind = mode;
 		composerInvoker = tools[kind] ?? null;
 		clearMode();
@@ -1105,24 +1222,108 @@
 			// The platform's chip is now the whole pipeline truth; a chip that
 			// arrives means any local pending entry for it is superseded.
 			if (chip.intentId) pending.delete(chip.intentId);
+			// One scannable line per item: phase dot, the quoted request, then
+			// who asked and where it stands. The full request rides as a title.
 			const row = document.createElement("div");
 			row.className = "queue-item";
+			if (chip.intentId) row.dataset.intent = chip.intentId;
 			const d = document.createElement("span");
-			d.className = "dot busy";
-			const label = document.createElement("span");
-			label.textContent = chip.label;
-			row.append(d, label);
-			if (chip.phase && chip.phase !== "queued") {
-				const phase = document.createElement("span");
-				phase.className = "phase-label";
-				phase.textContent = chip.phase;
-				row.append(phase);
-			}
+			d.className = "phase-dot";
+			if (chip.phase) d.dataset.phase = chip.phase;
+			const req = document.createElement("span");
+			req.className = "req";
+			req.textContent = typeof chip.text === "string" && chip.text.length ? `“${chip.text}”` : chip.label;
+			if (typeof chip.text === "string" && chip.text.length) row.title = chip.text;
+			const meta = document.createElement("span");
+			meta.className = "meta";
+			const stand = chip.phase === "queued" ? chip.label : chip.phase ?? "";
+			meta.textContent = [chip.by, stand].filter(Boolean).join(" · ");
+			row.append(d, req, meta);
 			queueEl.append(row);
 		}
 		queueEmpty.hidden = chipsState.length > 0;
+		renderMarkers();
 		updateStatus();
 	}
+
+	// ---- Intent markers (agentation's annotation markers, mapped onto our
+	// domain: one numbered pin per pending intent, on the element it targets,
+	// colored by phase, retiring with the intent's terminal fact) ------------
+
+	let markersOn = dockState.markers !== false;
+	const markerNodes = new Map();
+
+	function resolveAnchor(anchor) {
+		if (!anchor || typeof anchor !== "object") return null;
+		const dataLoc = typeof anchor.dataLoc === "string" ? anchor.dataLoc : "";
+		if (dataLoc && !dataLoc.startsWith("dom:")) {
+			try {
+				const element = document.querySelector(`[data-loc="${dataLoc.replaceAll('"', '\\"')}"]`);
+				if (element && !overlayOwns(element)) return element;
+			} catch { /* fall through to the structural selector */ }
+		}
+		const selector = (typeof anchor.selector === "string" && anchor.selector) || (dataLoc.startsWith("dom:") ? dataLoc.slice(4) : "");
+		if (selector) {
+			try {
+				const element = document.querySelector(selector);
+				if (element && !overlayOwns(element)) return element;
+			} catch { /* an unresolvable anchor simply has no pin */ }
+		}
+		return null;
+	}
+
+	function flashQueueRow(intentId) {
+		for (const row of queueEl.children) {
+			row.classList.toggle("flash", row.dataset.intent === intentId);
+			if (row.dataset.intent === intentId) setTimeout(() => row.classList.remove("flash"), 1600);
+		}
+	}
+
+	function renderMarkers() {
+		const wanted = new Map();
+		if (markersOn && !dockState.closed) {
+			chipsState.forEach((chip, index) => {
+				if (!chip.intentId) return;
+				const element = resolveAnchor(chip.anchor);
+				if (!element) return;
+				wanted.set(chip.intentId, { chip, element, number: chip.position ?? index + 1 });
+			});
+		}
+		for (const [intentId, node] of markerNodes) {
+			if (wanted.has(intentId)) continue;
+			markerNodes.delete(intentId);
+			node.classList.remove("enter");
+			node.classList.add("exit");
+			setTimeout(() => node.remove(), 200);
+		}
+		for (const [intentId, info] of wanted) {
+			let node = markerNodes.get(intentId);
+			if (!node) {
+				node = document.createElement("button");
+				node.type = "button";
+				node.className = "marker enter";
+				node.addEventListener("click", () => { showPanel(); flashQueueRow(intentId); });
+				markerNodes.set(intentId, node);
+				markersEl.append(node);
+			}
+			node.dataset.phase = info.chip.phase ?? "";
+			node.textContent = String(info.number);
+			const described = typeof info.chip.text === "string" && info.chip.text.length ? `: “${info.chip.text}”` : "";
+			node.setAttribute("aria-label", `Pending change ${info.number} (${info.chip.phase ?? "active"})${described}`);
+			if (described) node.title = info.chip.text;
+			const rect = info.element.getBoundingClientRect();
+			node.style.left = `${Math.max(2, rect.right - 12)}px`;
+			node.style.top = `${Math.max(2, rect.top - 12)}px`;
+		}
+	}
+
+	markersToggle.addEventListener("click", () => {
+		markersOn = !markersOn;
+		dockState.markers = markersOn;
+		markersToggle.setAttribute("aria-pressed", String(markersOn));
+		saveDockState();
+		renderMarkers();
+	});
 
 	function provenance(refs) {
 		const wrap = document.createElement("span");
@@ -1221,6 +1422,7 @@
 			.then((response) => { if (response.ok) connect(); else setTimeout(start, 4000); })
 			.catch(() => setTimeout(start, 4000));
 	}
+	markersToggle.setAttribute("aria-pressed", String(dockState.markers !== false));
 	applyDockState();
 	start();
 	updateStatus();

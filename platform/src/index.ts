@@ -949,7 +949,7 @@ export class RoomDO extends DurableObject<RuntimeEnv> {
 		const start = Math.max(1, lastSeq - SNAPSHOT_EVENT_COUNT + 1);
 		const events = await this.loadEvents(start, lastSeq);
 		const control = await this.loadControl();
-		const feed = renderFeed({ events, queue: await this.loadQueue(), intents: await this.loadIntents(), now, frozen: control.frozen });
+		const feed = renderFeed({ events, queue: await this.loadQueue(), intents: await this.loadIntentsForFeed(), now, frozen: control.frozen });
 		const chat = events.filter((event) => event.kind === "utterance").map((event) => ({ author: event.payload.author, text: event.payload.text, seq: event.seq, at: event.at }));
 		return { type: "room:snapshot", chat, feed, hasMore: start > 1, beforeSeq: start };
 	}
@@ -967,7 +967,7 @@ export class RoomDO extends DurableObject<RuntimeEnv> {
 			// Chips project INTENTS, not just queued runs: an accepted request
 			// stays visibly active through building/verifying/deploying until
 			// its terminal fact (live/parked/withdrawn) lands.
-			queue: renderQueueChips(queue, now, await this.loadIntents()),
+			queue: renderQueueChips(queue, now, await this.loadIntentsForFeed()),
 			frozen: control.frozen,
 			items: events.map(renderFeedItem).filter((item) => item !== null),
 		});
@@ -1017,6 +1017,40 @@ export class RoomDO extends DurableObject<RuntimeEnv> {
 	private async loadIntents(): Promise<Intent[]> {
 		const page = await this.ctx.storage.list<Intent>({ prefix: INTENT_PREFIX });
 		return [...page.values()];
+	}
+
+	/**
+	 * Intents decorated for the pipeline projection: each ACTIVE intent
+	 * carries its anchor (what the requester pointed at), the verbatim request
+	 * text, and the requester's name, read back from the durable facts its
+	 * refs point at. Chips built from these let every client show WHAT is
+	 * building and pin pending work to the exact element it targets. Bounded
+	 * work: only non-terminal intents (a handful at most) are decorated.
+	 */
+	private async loadIntentsForFeed(): Promise<(Intent & { anchor?: Record<string, unknown>; requestText?: string; requestedBy?: string })[]> {
+		const intents = await this.loadIntents();
+		const out: (Intent & { anchor?: Record<string, unknown>; requestText?: string; requestedBy?: string })[] = [];
+		for (const intent of intents) {
+			if (intent.state !== "open" && intent.state !== "dispatched") { out.push(intent); continue; }
+			let decorated: Intent & { anchor?: Record<string, unknown>; requestText?: string; requestedBy?: string } = intent;
+			const annotationSeq = intent.refs?.annotationSeqs?.[0];
+			if (Number.isSafeInteger(annotationSeq)) {
+				const event = await this.ctx.storage.get<LedgerEvent>(eventStorageKey(annotationSeq as number));
+				const annotation = event?.payload?.annotation as Record<string, unknown> | undefined;
+				if (annotation && typeof annotation === "object") {
+					decorated = { ...decorated, anchor: { kind: annotation.kind, dataLoc: annotation.dataLoc, selector: annotation.selector ?? null, selectorPath: annotation.selectorPath ?? null } };
+				}
+			}
+			const acceptedSeq = intent.refs?.utteranceSeqs?.[0];
+			if (Number.isSafeInteger(acceptedSeq)) {
+				const event = await this.ctx.storage.get<LedgerEvent>(eventStorageKey(acceptedSeq as number));
+				if (event?.kind === "request-accepted" && typeof event.payload?.text === "string") {
+					decorated = { ...decorated, requestText: event.payload.text as string, requestedBy: typeof event.payload.by === "string" ? event.payload.by as string : undefined };
+				}
+			}
+			out.push(decorated);
+		}
+		return out;
 	}
 
 	private async loadControl(): Promise<RoomControl> {
