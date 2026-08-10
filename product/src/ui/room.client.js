@@ -8,9 +8,30 @@
 	const composer = $("#composer"), chatInput = $("#chat-input"), sendButton = $("#send");
 	const join = $("#join"), joinForm = $("#join-form"), joinName = $("#join-name"), joinError = $("#join-error");
 
-	let socket = null, reconnectTimer = null, identity = null;
+	let socket = null, reconnectTimer = null, identity = null, everConnected = false;
 	const renderedChat = new Set();
 	const people = new Map();
+	// Deploy facts older than this page are history, not news: the push-based
+	// update banner must only fire for deploys observed AFTER this page loaded.
+	const pageLoadedAt = Date.now();
+
+	/**
+	 * PUSH-based update awareness: the platform records the deploy-observed
+	 * fact at the exact moment /version serves the new revision, and that fact
+	 * rides the room WebSocket. Surfacing it the instant it arrives beats any
+	 * poll — the inline head script (which owns the banner) listens for this
+	 * event. Facts arriving in snapshots/updates can include recent history,
+	 * so only facts newer than the page load count; the banner must NEVER
+	 * appear before deploy-observed, because during edge propagation a refresh
+	 * would hand the user the OLD code.
+	 */
+	function announceDeploys(items) {
+		for (const item of items || []) {
+			if (item && item.kind === "deploy-observed" && item.refs && typeof item.refs.sha === "string" && item.at >= pageLoadedAt) {
+				document.dispatchEvent(new CustomEvent("ahp:deploy-observed", { detail: { sha: item.refs.sha } }));
+			}
+		}
+	}
 
 	function rememberPerson(person) {
 		const name = typeof person === "string" ? person : person?.name ?? person?.displayName ?? person?.author;
@@ -69,7 +90,13 @@
 		clearTimeout(reconnectTimer);
 		const proto = location.protocol === "https:" ? "wss:" : "ws:";
 		socket = new WebSocket(`${proto}//${location.host}/api/rooms/main`);
-		socket.addEventListener("open", () => setConnection("Live", true));
+		socket.addEventListener("open", () => {
+			setConnection("Live", true);
+			// A reconnect may have missed a deploy-observed frame entirely, so
+			// the poll runs once as a FALLBACK — push stays the primary path.
+			if (everConnected) document.dispatchEvent(new CustomEvent("ahp:version-recheck"));
+			everConnected = true;
+		});
 		socket.addEventListener("close", () => {
 			setConnection("Reconnecting", false);
 			fetch("/api/session", { cache: "no-store" }).then((response) => {
@@ -87,6 +114,10 @@
 				updateConcurrent(event);
 				if (event.you) { identity = event.you; rememberPerson(event.you); }
 			}
+			// Build-fact rendering belongs to the overlay; the app only watches
+			// for the one fact that is its own business — a deploy of ITSELF —
+			// on whatever frame happens to carry items.
+			announceDeploys(event.items || (event.feed && event.feed.items));
 			if (event.type === "chat:message") addChat(event);
 			if (event.type === "room:presence" || event.type === "presence:update") {
 				(event.people || event.members || event.users || []).forEach(rememberPerson);

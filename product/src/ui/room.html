@@ -21,26 +21,41 @@
   setTimeout(bail, 8000);
 
   /* Compare the revision that rendered this document with the currently
-     deployed revision. The user chooses when to reload, so drafts are safe. */
+     deployed revision. The user chooses when to reload, so drafts are safe.
+
+     PUSH first, poll as fallback: the room client dispatches
+     'ahp:deploy-observed' the instant the platform's deploy-observed fact
+     arrives over the WebSocket (recorded exactly when /version serves the new
+     revision), so the banner appears immediately — never during the edge
+     propagation window, when a refresh would hand back the OLD code. The
+     /version poll remains only for the gaps push cannot cover: initial load
+     of an already-stale page, returning to a backgrounded tab, and WebSocket
+     reconnects ('ahp:version-recheck'). */
   window.addEventListener('DOMContentLoaded', function () {
     var versionMeta = document.querySelector('meta[name=ahp-version]');
     var loadedSha = versionMeta && versionMeta.content;
     var notice = document.getElementById('app-update');
     var button = document.getElementById('app-update-button');
     if (!/^[0-9a-f]{40}$/.test(loadedSha || '') || !notice || !button) return;
+    function announce(sha) {
+      if (/^[0-9a-f]{40}$/.test(sha || '') && sha !== loadedSha) notice.hidden = false;
+    }
     async function checkVersion() {
       try {
         var response = await fetch('/version', { cache: 'no-store' });
         if (!response.ok) return;
         var current = await response.json();
-        if (/^[0-9a-f]{40}$/.test(current.sha || '') && current.sha !== loadedSha) notice.hidden = false;
+        announce(current.sha);
       } catch (_) { /* Connection state already reports outages. */ }
     }
     button.addEventListener('click', function () { location.reload(); });
+    document.addEventListener('ahp:deploy-observed', function (event) {
+      announce(event && event.detail && event.detail.sha);
+    });
+    document.addEventListener('ahp:version-recheck', checkVersion);
     document.addEventListener('visibilitychange', function () { if (!document.hidden) checkVersion(); });
     window.addEventListener('focus', checkVersion);
     checkVersion();
-    setInterval(checkVersion, 60000);
   });
 })();
 </script>
