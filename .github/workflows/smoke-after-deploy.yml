@@ -1,0 +1,103 @@
+name: Smoke after deploy
+run-name: Smoke · ${{ github.event.workflow_run.head_sha || inputs.sha || github.sha }}
+
+# THE LAYER THAT CATCHES A BROKEN DEPLOY.
+#
+# Pre-merge CI runs against the working tree. It cannot see a deploy that did
+# not land, a worker binding that is not wired, a stale asset, or a platform
+# and product that disagree about what revision is live. That gap is how a
+# green pipeline coexisted with a broken room, twice.
+#
+# So this runs POST-DEPLOY, never pre-merge: it is a detector, not a gate. It
+# must never be able to block a merge, and it must be loud when it trips.
+on:
+  workflow_run:
+    workflows: ["Deploy product", "Deploy platform"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "Revision the deployment is expected to be serving. Empty skips the revision match."
+        required: false
+        default: ""
+      url:
+        description: "Origin to smoke. Empty uses the default product origin."
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: app-harness-smoke
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    # A deploy that failed is already red; smoking it would only add noise.
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          # Smoke the checks as they exist at the revision that was deployed.
+          ref: ${{ github.event.workflow_run.head_sha || inputs.sha || github.sha }}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # The smoke checks are dependency-free by design: they use Node's own
+      # fetch and the repo's DOM harness, so there is nothing to install and
+      # nothing that can rot between a deploy and its verification.
+      - name: Wait for the deployment to become the live revision
+        env:
+          EXPECTED_SHA: ${{ github.event.workflow_run.head_sha || inputs.sha }}
+          SMOKE_URL: ${{ inputs.url || 'https://app-harness-product.coda-a.workers.dev' }}
+        run: |
+          set -uo pipefail
+          # A Workers deploy propagates in seconds, but not instantly. Poll
+          # briefly for the expected revision so the smoke below tests the
+          # deploy that just ran rather than the one it replaced.
+          if [ -z "${EXPECTED_SHA}" ]; then echo "No expected revision; skipping the wait."; exit 0; fi
+          for attempt in $(seq 1 20); do
+            live="$(curl -fsS --max-time 10 "${SMOKE_URL}/version" | sed -n 's/.*"sha":"\([0-9a-f]*\)".*/\1/p' || true)"
+            echo "attempt ${attempt}: live=${live:-unknown} expected=${EXPECTED_SHA}"
+            if [ "${live}" = "${EXPECTED_SHA}" ]; then echo "The expected revision is live."; exit 0; fi
+            sleep 6
+          done
+          echo "::warning::${SMOKE_URL} never reported ${EXPECTED_SHA}; smoking whatever is live."
+
+      - name: Smoke the live deployment
+        id: smoke
+        env:
+          SMOKE_URL: ${{ inputs.url || 'https://app-harness-product.coda-a.workers.dev' }}
+          SMOKE_SHA: ${{ github.event.workflow_run.head_sha || inputs.sha }}
+        run: npm run smoke
+
+      # Loud on purpose. A broken deploy that only shows up as a grey X on a
+      # workflow nobody opens is the same outage as no test at all.
+      - name: Announce a broken deployment
+        if: ${{ failure() }}
+        env:
+          SMOKE_URL: ${{ inputs.url || 'https://app-harness-product.coda-a.workers.dev' }}
+          REVISION: ${{ github.event.workflow_run.head_sha || inputs.sha || github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          {
+            echo "## The live deployment is broken"
+            echo
+            echo "\`${SMOKE_URL}\` failed its post-deploy smoke checks at revision \`${REVISION}\`."
+            echo
+            echo "This is not a flaky pre-merge test — the checks ran against the real origin,"
+            echo "so the room is broken for users right now. Read the failing check above:"
+            echo "it names which of page / version / client / overlay / session is down."
+            echo
+            echo "Run it locally against the same origin with:"
+            echo
+            echo '```'
+            echo "npm run smoke -- --url ${SMOKE_URL}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::error title=Live deployment is broken::${SMOKE_URL} failed post-deploy smoke at ${REVISION}. See ${RUN_URL}"
