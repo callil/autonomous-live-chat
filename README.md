@@ -1,28 +1,24 @@
 # App Harness
 
-App Harness is a small, real demonstration of software that can receive situated feedback, turn it into repository work, validate that work as an ordered stack, and update itself in public.
+App Harness is a small, real demonstration of software that can receive situated feedback, turn it into repository work, verify that work with CI, and update itself in public.
 
-The host product is intentionally simple: a live multi-user chat backed by a Cloudflare Worker and one Durable Object per room. A summonable overlay lets someone point at the interface and describe a change. The durable coordinator publishes the request to GitHub and hands eligible implementation work to a bounded operator Worker and an isolated coding runner.
+The host product is intentionally simple: a live multi-user chat room served by its own Cloudflare Worker. The frozen platform serves an authoring overlay into that page; anyone in the room can point at the interface and describe a change. The platform's room Durable Object records the request in an append-only ledger, dispatches a disposable sandboxed coding run, squash-merges the verified PR at its exact head SHA, and posts "Live" only once it observes the deployed product actually serving the merged revision.
 
-- Live demo: [autonomous-live-chat.coda-a.workers.dev](https://autonomous-live-chat.coda-a.workers.dev)
-- Operator status: [app-harness-operator.coda-a.workers.dev/status](https://app-harness-operator.coda-a.workers.dev/status)
+- Live room: [app-harness-product.coda-a.workers.dev](https://app-harness-product.coda-a.workers.dev)
 - Documentation: [docs/README.md](./docs/README.md)
 
 ## Repository map
 
 ```text
-apps/demo/                 live chat frontend + Worker/Durable Object backend
-packages/contracts/        shared platform and authoring-envelope policy
-packages/react/            reusable React authoring overlay
-infra/orchestration/       durable job, stack, and provider contracts
-infra/workers/             operator Worker + isolated coding runner + GitHub credential bridge
-infra/scripts/             trusted CI and promotion checks
-infra/tests/               infrastructure contract tests
-.github/workflows/         validation, stack promotion, and deployments
+platform/                  the FROZEN platform Worker: room ledger, queue, reconciler,
+                           deploy rails, session auth, authoring overlay, fallback UI
+platform/runner/           the platform's sandbox runner Worker (one container per run)
+product/                   the self-modifiable product: the room UI the agent may rewrite
+.github/workflows/         CI, the platform firewall, and the deploy legs
 docs/                      product, architecture, operations, and safety
 ```
 
-These are clear ownership boundaries, not an agent sandbox. The autonomous agent defaults to changing `apps/demo`, including both frontend and backend, but it can change the React package or infrastructure whenever a complete product change requires it.
+The split is the safety model: agent branches (`room/*`) may only change `product/`. The platform firewall fails any agent diff touching `platform/`, CI configuration, dependency manifests, or wrangler configs. The overlay, the build queue, and the activity feed are served by the frozen platform, so an agent change to the app can never break or falsify the status surface that reports on its own builds.
 
 ## Run locally
 
@@ -30,26 +26,16 @@ Requires Node.js 22.
 
 ```sh
 npm install
-npm run dev
+npm run check       # generated Cloudflare types, TypeScript, all test layers
+npm run smoke       # post-deploy checks against the real deployed origin
 ```
 
-Open the local URL in two browser windows to verify room synchronization.
+## Deployed services
 
-Useful checks:
+| Worker | Source | Deploy leg |
+| --- | --- | --- |
+| `app-harness-platform` | `platform/` | `deploy-platform.yml` (push to main touching `platform/**`) |
+| `app-harness-platform-runner` | `platform/runner/` | `deploy-platform.yml` (deployed before the platform Worker) |
+| `app-harness-product` | `product/` | `deploy-product.yml` (push trigger or reconciler dispatch, exact-SHA stamped into `/version`) |
 
-```sh
-npm run check       # generated Cloudflare types, TypeScript, contracts, tests
-npm run deploy      # deploy only the demo app
-```
-
-Infrastructure services have separate, explicit deployment workflows. Ordinary app deployment does not rebuild the coding runner or credential bridge.
-
-## What persists where
-
-The room does not impose product-level character or history-count caps. Messages and collaboration records are stored as individual Durable Object records rather than silently dropping older entries from a fixed-size array. Reconnects receive a bounded page plus live deltas, with earlier pages available on demand. Byte admission and batch sizes come from the documented platform contract in [platform policy](./docs/platform-policy.md), not scattered UI magic numbers. Repository intent and progress remain in the Durable Object work ledger, per-item operator turn records, GitHub issues and pull requests, commits, and checked-in documentation.
-
-The end-to-end path, trust boundaries, stack behavior, and current limitations are described in [the architecture guide](./docs/architecture.md).
-
-## Stack CLI usage
-
-All pull requests in this repository — platform and app-authored alike — are created with `gh stack` commands (`init`/`add`/`submit`), never bare `gh pr create`, so every PR belongs to a server-side stack and merges through `gh stack merge`.
+The end-to-end path, trust boundaries, and current limitations are described in [the architecture guide](./docs/architecture.md).

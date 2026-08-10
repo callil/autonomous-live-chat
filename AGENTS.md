@@ -2,11 +2,10 @@
 
 ## Repository boundaries
 
-- `apps/demo` is the live product demonstration: its frontend, Worker backend, Durable Object, and room data. This is the autonomous coding agent's default focus.
-- `packages/react` is the reusable, transport-agnostic React authoring overlay. Keep it independent from the demo and from Cloudflare-specific infrastructure.
-- `infra` contains orchestration, stacked-PR policy, CI helpers, isolated runners, and credential bridges.
-- These are ownership boundaries, not a file allowlist. The agent may change the whole repository when a coherent app change requires supporting package or infrastructure work.
-- Prefer the smallest complete cross-boundary change. Do not move product behavior into infrastructure merely because an agent executes it.
+- `product/` is the self-modifiable product: the live room UI served by its own Worker. This is the autonomous coding agent's ONLY writable surface — the platform firewall fails any agent (`room/*`) diff touching anything else.
+- `platform/` is the FROZEN platform Worker: room ledger, queue, reconciler, session auth, deploy rails, the authoring overlay, and the fallback UI. `platform/runner/` is its sandbox runner. Humans change these on ordinary branches; agents never do.
+- CI configuration, dependency manifests, lockfiles, and wrangler configs are frozen surfaces too. New dependencies are human-gated by construction.
+- Prefer the smallest complete change. Do not move product behavior into the platform merely because an agent executes it.
 
 STOP. Your knowledge of Cloudflare Workers APIs and limits may be outdated. Always retrieve current documentation before any Workers, KV, R2, D1, Durable Objects, Queues, Vectorize, AI, or Agents SDK task.
 
