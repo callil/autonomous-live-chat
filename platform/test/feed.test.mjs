@@ -122,6 +122,33 @@ test("accepted intents count as active before their run exists, and reviewing in
 	assert.equal(merged[0].phase, "queued");
 });
 
+test("chips carry the intent's identity: anchor, verbatim request, requester", () => {
+	// A room member should read WHAT is building at a glance, and clients can
+	// pin pending work to the exact element it targets.
+	const decorated = {
+		id: "intent-x", state: "open", openedAt: 1,
+		anchor: { kind: "target", dataLoc: "src/ui/page.html:42:3", selector: "button.checkout", selectorPath: ".checkout" },
+		requestText: "Make it pop",
+		requestedBy: "Ada",
+	};
+	const [chip] = renderQueueChips([], 10_000, [decorated]);
+	assert.equal(chip.anchor.dataLoc, "src/ui/page.html:42:3", "the anchor rides the chip");
+	assert.equal(chip.text, "Make it pop", "the verbatim request rides the chip");
+	assert.equal(chip.by, "Ada", "the requester rides the chip");
+
+	// The same identity rides when the intent's run is in the queue.
+	const queue = enqueueRun([], { runId: "run-x", intentId: "intent-x", enqueuedAt: 0 });
+	const [queuedChip] = renderQueueChips(queue, 10_000, [{ ...decorated, state: "dispatched" }]);
+	assert.equal(queuedChip.phase, "queued");
+	assert.equal(queuedChip.text, "Make it pop");
+	assert.equal(queuedChip.anchor.selector, "button.checkout");
+
+	// Long request text is clipped for the chip, never a wall of text.
+	const wordy = { ...decorated, id: "intent-y", requestText: "x".repeat(400) };
+	const [clipped] = renderQueueChips([], 10_000, [wordy]);
+	assert.ok(clipped.text.length <= 121, "chip text is bounded");
+});
+
 test("ETAs read as estimates", () => {
 	assert.equal(formatEta(30_000), "under a minute");
 	assert.equal(formatEta(5 * 60_000), "~5 min");

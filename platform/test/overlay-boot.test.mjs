@@ -121,7 +121,7 @@ test("the overlay's own controls exist and are reachable by a pointer; container
 	// Containers must never capture clicks they do not draw; leaf controls must.
 	// The hover-preview lane in particular must be FULLY pointer-transparent —
 	// it exists to show what is under the cursor and must never become it.
-	for (const selector of [".layer", ".dock", ".draw", ".hint", ".hover-box", ".hover-chip", ".tip"]) {
+	for (const selector of [".layer", ".dock", ".draw", ".hint", ".hover-box", ".hover-chip", ".tip", ".markers"]) {
 		const element = root.querySelector(selector);
 		if (!element) continue;
 		assert.equal(element.pointerEvents, "none", `${selector} must not swallow the app's clicks`);
@@ -133,12 +133,16 @@ test("the overlay's own controls exist and are reachable by a pointer; container
 	}
 });
 
-test("TRUE OVERLAY: mounting and opening the panel never touches the app's layout", () => {
+test("TRUE OVERLAY: chrome never touches the app's layout, and framed mode is paint-only", () => {
 	const harness = bootOverlay();
 	const { root, rootStyle, sandbox } = harness;
 	const app = appElement(harness, { rect: { left: 40, top: 600, width: 800, height: 60 } });
 	const before = JSON.stringify(app.getBoundingClientRect());
-	const bodyStyleBefore = JSON.stringify([...sandbox.document.body.style.properties.entries()]);
+
+	// The harness boots OPEN, so the page is framed from the start — via
+	// transform, never layout.
+	assert.match(sandbox.document.body.style.getPropertyValue("transform"), /scale/u, "the open harness frames the page by transform");
+	assert.ok(sandbox.document.documentElement.style.getPropertyValue("background").length > 0, "the revealed backdrop is painted behind the page");
 
 	// Open the panel — the overlay's largest piece of chrome.
 	root.getElementById("status-toggle").dispatchEvent({ type: "click" });
@@ -150,35 +154,30 @@ test("TRUE OVERLAY: mounting and opening the panel never touches the app's layou
 	for (const name of rootStyle.properties.keys()) {
 		assert.doesNotMatch(name, /inset|padding|margin|width|height/u, `the overlay must not publish layout hints (${name})`);
 	}
-	// Framed mode may write PAINT-ONLY properties to the body (transform et
-	// al) — never layout-affecting ones.
+	// Framed mode may write PAINT-ONLY properties to the body — never
+	// layout-affecting ones.
 	for (const name of sandbox.document.body.style.properties.keys()) {
 		assert.doesNotMatch(name, /padding|margin|width|height|inset|top|left|right|bottom|font|display|position/u, `framed mode must stay paint-only (${name})`);
 	}
-
-	// Close the panel: every inline property the overlay wrote is restored
-	// verbatim, so the page is byte-identical to before.
-	root.getElementById("status-toggle").dispatchEvent({ type: "click" });
-	harness.flushTimers(500);
-	assert.equal(JSON.stringify([...sandbox.document.body.style.properties.entries()]), bodyStyleBefore, "the app's inline styles are restored exactly on exit");
 });
 
-test("framed mode scales by transform while open and restores <html> exactly on exit", () => {
+test("closing the harness releases the frame and restores the page verbatim", () => {
 	const harness = bootOverlay();
 	const { root, sandbox } = harness;
 	const html = sandbox.document.documentElement;
-	const htmlStyleBefore = JSON.stringify([...html.style.properties.entries()]);
+	const body = sandbox.document.body;
+	assert.match(body.style.getPropertyValue("transform"), /scale/u, "open harness = framed page");
 
-	// Arm a tool: the harness is "open", the page is framed.
-	root.getElementById("t-target").dispatchEvent({ type: "click" });
-	assert.match(sandbox.document.body.style.getPropertyValue("transform"), /scale/u, "the page insets via transform, never layout");
-	assert.ok(html.style.getPropertyValue("background").length > 0, "the revealed backdrop is painted behind the page");
-
-	// Disarm: everything restores.
-	sandbox.document.dispatchEvent({ type: "keydown", key: "Escape" });
+	// Dismiss the dock: the harness is closed, the frame releases, and every
+	// inline property the overlay wrote is restored exactly.
+	root.getElementById("dock-close").dispatchEvent({ type: "click" });
 	harness.flushTimers(500);
-	assert.equal(JSON.stringify([...html.style.properties.entries()].filter(([name]) => name !== "cursor")), htmlStyleBefore, "the backdrop is removed verbatim on exit");
-	assert.equal(sandbox.document.body.style.getPropertyValue("transform"), "", "the transform is removed on exit");
+	assert.equal(body.style.properties.size, 0, "the app's inline body styles are restored exactly on exit");
+	assert.equal(JSON.stringify([...html.style.properties.entries()].filter(([name]) => name !== "cursor")), "[]", "the backdrop is removed verbatim on exit");
+
+	// Reopening frames again.
+	root.getElementById("handle").dispatchEvent({ type: "click" });
+	assert.match(body.style.getPropertyValue("transform"), /scale/u, "reopening re-frames the page");
 });
 
 test("armed hovering previews the element under the cursor with its selector path", async () => {
@@ -339,6 +338,97 @@ test("the dock is closeable and reopens from a minimal handle, persisted", () =>
 	handle.dispatchEvent({ type: "click" });
 	assert.equal(dock.hidden, false, "the handle brings the dock back");
 	assert.equal(JSON.parse(sandbox.localStorage.getItem("app-harness.dock.v1")).closed, false);
+});
+
+test("pending intents pin numbered markers to the elements they target", async () => {
+	const harness = bootOverlay();
+	const { root, sandbox } = harness;
+	const socket = await connectOverlay(harness);
+	const app = appElement(harness, { dataLoc: "src/ui/page.html:42:3" });
+	assert.ok(app, "the app element exists to be pinned");
+
+	socket.deliver({
+		type: "feed:update",
+		items: [],
+		queue: [{ intentId: "i1", phase: "building", label: "building", text: "Make it pop", by: "Ada", anchor: { kind: "target", dataLoc: "src/ui/page.html:42:3", selector: "button.checkout" } }],
+	});
+	const markers = root.getElementById("markers");
+	assert.equal(markers.children.length, 1, "one pending intent, one marker pin");
+	const marker = markers.children[0];
+	assert.equal(marker.textContent, "1", "markers are numbered");
+	assert.equal(marker.dataset.phase, "building", "the pin carries its phase");
+	assert.match(marker.getAttribute("aria-label") ?? "", /Make it pop/u, "the pin names the request");
+
+	// The marker retires with the intent's terminal fact.
+	socket.deliver({ type: "feed:update", items: [], queue: [] });
+	harness.flushTimers(300);
+	assert.equal(markers.children.filter((child) => !child.classNames().includes("exit")).length, 0, "a finished intent's marker exits");
+});
+
+test("queue rows read as sentences: quoted request, requester, and phase", async () => {
+	const harness = bootOverlay();
+	const { root } = harness;
+	const socket = await connectOverlay(harness);
+	socket.deliver({
+		type: "feed:update",
+		items: [],
+		queue: [{ intentId: "i1", phase: "verifying", label: "verifying", text: "Make this tagline italic.", by: "Maya" }],
+	});
+	const row = root.getElementById("queue").children[0];
+	assert.ok(row, "the pipeline entry renders a row");
+	const rowText = row.descendants().map((node) => node.textContent).join(" ");
+	assert.match(rowText, /Make this tagline italic\./u, "the verbatim request is readable at a glance");
+	assert.match(rowText, /Maya/u, "the requester is named");
+	assert.match(rowText, /verifying/u, "the phase is visible");
+});
+
+test("selected text rides the envelope and is quoted in the composer", async () => {
+	const harness = createSandbox({ scriptDataset: { room: "main", anchorMode: "data-loc" } });
+	harness.sandbox.getSelection = () => ({ isCollapsed: false, toString: () => "picked words" });
+	runScript(overlay, harness.sandbox);
+	const host = harness.documentElement.children.find((child) => child.getAttribute?.("data-app-harness") === "overlay");
+	const root = host.closedShadowRoot;
+	const socket = await connectOverlay(harness);
+	const app = appElement(harness);
+
+	root.getElementById("t-target").dispatchEvent({ type: "click" });
+	harness.sandbox.document.dispatchEvent({ type: "click", clientX: 150, clientY: 120, target: app });
+
+	const quote = root.getElementById("quote");
+	assert.equal(quote.hidden, false, "the selection is shown in the composer");
+	assert.match(quote.textContent, /picked words/u);
+
+	root.getElementById("input").value = "reword this";
+	root.getElementById("composer").dispatchEvent({ type: "submit" });
+	const frame = socket.sent.map((raw) => JSON.parse(raw)).find((message) => message.type === "request:target");
+	assert.equal(frame.annotation.selectedText, "picked words", "the exact phrase rides the envelope");
+});
+
+test("a drag whose pointer was released elsewhere does not keep following the cursor", () => {
+	const harness = bootOverlay();
+	const { root } = harness;
+	const pill = root.getElementById("pill");
+	pill.dispatchEvent({ type: "pointerdown", target: pill, clientX: 600, clientY: 700, pointerId: 1 });
+	// The pointer comes back over the pill with NO buttons pressed: the lost
+	// drag must end rather than yank the dock around.
+	const before = root.getElementById("dock").style.right;
+	pill.dispatchEvent({ type: "pointermove", target: pill, clientX: 300, clientY: 200, buttons: 0, pointerId: 1 });
+	assert.equal(root.getElementById("dock").style.right, before, "an unpressed pointer never drags the dock");
+});
+
+test("the panel opens toward available space when the dock sits in the top-left", () => {
+	const harness = createSandbox({ scriptDataset: { room: "main" } });
+	harness.sandbox.localStorage.setItem("app-harness.dock.v1", JSON.stringify({ right: 950, bottom: 640 }));
+	runScript(overlay, harness.sandbox);
+	const host = harness.documentElement.children.find((child) => child.getAttribute?.("data-app-harness") === "overlay");
+	const root = host.closedShadowRoot;
+	const dock = root.getElementById("dock");
+	// 1280x720 viewport, dock pinned near the top-left corner: the flyout must
+	// anchor top/left so the panel opens down and to the right — never
+	// clipped off-screen.
+	assert.ok(dock.classNames().includes("down"), "a top-half dock opens its panel downward");
+	assert.ok(dock.classNames().includes("start"), "a left-half dock grows its panel rightward");
+	assert.notEqual(dock.style.top, "auto", "the dock anchors by the edge it opens away from");
 });
 
 test("a second overlay tag on the same page is a no-op, not a second surface", () => {

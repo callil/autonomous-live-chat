@@ -110,15 +110,30 @@ export function renderQueueChips(queue, now, intents = []) {
 	const chips = [];
 	const intentsWithRuns = new Set();
 	const positions = new Map(queueStatus(queue, now).map((entry) => [entry.runId, entry]));
+	// Identity rides each chip when the caller decorated its intents: the
+	// anchor (what the requester pointed at, so clients can pin pending work
+	// to the exact element), the verbatim request text, and the requester —
+	// a room member should read WHAT is building at a glance.
+	const identities = new Map(intents.map((intent) => [intent.id, intent]));
+	const anchored = (chip) => {
+		const intent = identities.get(chip.intentId);
+		if (!intent) return chip;
+		return {
+			...chip,
+			...(intent.anchor ? { anchor: intent.anchor } : {}),
+			...(typeof intent.requestText === "string" && intent.requestText.length ? { text: clip(intent.requestText, 120) } : {}),
+			...(typeof intent.requestedBy === "string" && intent.requestedBy.length ? { by: intent.requestedBy } : {}),
+		};
+	};
 	for (const run of queue) {
 		if (!(run.state in RUN_PHASES)) continue;
 		intentsWithRuns.add(run.intentId);
 		const phase = RUN_PHASES[run.state];
 		if (run.state === "queued") {
 			const status = positions.get(run.runId);
-			chips.push({ ...status, phase, label: `#${status.position} in line · ${formatEta(status.etaMs)}` });
+			chips.push(anchored({ ...status, phase, label: `#${status.position} in line · ${formatEta(status.etaMs)}` }));
 		} else {
-			chips.push({ runId: run.runId, intentId: run.intentId, phase, label: phase });
+			chips.push(anchored({ runId: run.runId, intentId: run.intentId, phase, label: phase }));
 		}
 	}
 	// Intents that are active but have no live run: accepted requests still
@@ -128,8 +143,8 @@ export function renderQueueChips(queue, now, intents = []) {
 		.filter((intent) => !TERMINAL_INTENT_STATES.has(intent.state) && !intentsWithRuns.has(intent.id))
 		.sort((a, b) => a.openedAt - b.openedAt);
 	for (const intent of waiting) {
-		if (intent.state === "open") chips.push({ intentId: intent.id, phase: "accepted", label: "accepted" });
-		else chips.push({ intentId: intent.id, phase: "reviewing", label: "build failed — deciding next step" });
+		if (intent.state === "open") chips.push(anchored({ intentId: intent.id, phase: "accepted", label: "accepted" }));
+		else chips.push(anchored({ intentId: intent.id, phase: "reviewing", label: "build failed — deciding next step" }));
 	}
 	return chips;
 }
