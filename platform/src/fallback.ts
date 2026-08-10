@@ -55,7 +55,18 @@ export const FALLBACK_HTML = `<!doctype html>
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
     socket = new WebSocket(proto + "//" + location.host + "/api/rooms/main");
     socket.addEventListener("open", () => { status.textContent = "live"; });
-    socket.addEventListener("close", (e) => { status.textContent = "reconnecting…"; if (e.code === 4401) { join.hidden = false; return; } setTimeout(connect, 1500); });
+    socket.addEventListener("close", () => {
+      status.textContent = "reconnecting…";
+      // The worker rejects an expired or missing session at the HTTP layer
+      // (401), which surfaces here as a plain close. Re-check the session
+      // before reconnecting so an expired cookie re-shows the join dialog
+      // instead of looping a silent reconnect forever.
+      fetch("/api/session").then((r) => {
+        if (r.ok) { setTimeout(connect, 1500); return; }
+        status.textContent = "signed out";
+        join.hidden = false;
+      }).catch(() => setTimeout(connect, 1500));
+    });
     socket.addEventListener("message", ({ data }) => {
       try {
         const event = JSON.parse(data);

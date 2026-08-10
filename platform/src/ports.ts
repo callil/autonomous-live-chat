@@ -38,11 +38,14 @@ export type RunnerDispatchResult =
  */
 export interface RunnerPort {
 	startRun(dispatch: RunnerDispatch): Promise<RunnerDispatchResult>;
+	/** Release the run's container. Best-effort: failure costs nothing but the SDK's idle sleep. */
+	finishRun(runId: string): Promise<void>;
 }
 
 /** The shape of the runner Worker's RPC entrypoint, seen through the service binding. */
 export type RunnerBinding = {
 	startRun(dispatch: RunnerDispatch): Promise<{ accepted?: unknown; reason?: unknown }>;
+	finishRun(runId: string): Promise<unknown>;
 };
 
 /** The real RunnerPort: dispatch over the private service binding, refusals stay honest. */
@@ -60,6 +63,14 @@ export class BindingRunnerPort implements RunnerPort {
 			return { accepted: false, reason: typeof result?.reason === "string" ? result.reason.slice(0, 200) : "runner-refused" };
 		} catch (error) {
 			return { accepted: false, reason: `runner-unreachable: ${(error instanceof Error ? error.message : "rpc-failed").slice(0, 160)}` };
+		}
+	}
+
+	async finishRun(runId: string): Promise<void> {
+		try {
+			await this.binding.finishRun(runId);
+		} catch {
+			// Best-effort release; the SDK's idle sleep remains the backstop.
 		}
 	}
 }
@@ -135,6 +146,8 @@ export class StubRunnerPort implements RunnerPort {
 	async startRun(): Promise<RunnerDispatchResult> {
 		return { accepted: false, reason: "runner-port-not-configured" };
 	}
+
+	async finishRun(): Promise<void> {}
 }
 
 /** The deterministic floor: every deviation parks for a human with an honest note. */

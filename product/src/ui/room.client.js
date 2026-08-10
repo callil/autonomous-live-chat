@@ -78,7 +78,20 @@
 		const proto = location.protocol === "https:" ? "wss:" : "ws:";
 		socket = new WebSocket(`${proto}//${location.host}/api/rooms/main`);
 		socket.addEventListener("open", () => setConnection("Live", true));
-		socket.addEventListener("close", () => { setConnection("Reconnecting", false); reconnectTimer = setTimeout(connect, 1500); });
+		socket.addEventListener("close", () => {
+			setConnection("Reconnecting", false);
+			// The worker rejects an expired session at the HTTP layer (401),
+			// which the browser reports only as a generic close. Re-check the
+			// session before reconnecting: an expired cookie re-shows the join
+			// scrim instead of looping a silent reconnect forever.
+			fetch("/api/session", { cache: "no-store" })
+				.then((response) => {
+					if (response.ok) { reconnectTimer = setTimeout(connect, 1500); return; }
+					setConnection("Signed out", false);
+					join.hidden = false;
+				})
+				.catch(() => { reconnectTimer = setTimeout(connect, 1500); });
+		});
 		socket.addEventListener("error", () => socket.close());
 		socket.addEventListener("message", ({ data }) => {
 			let event;

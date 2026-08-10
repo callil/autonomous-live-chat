@@ -193,7 +193,11 @@ export class PlatformRunner extends WorkerEntrypoint<RunnerEnv> {
 		}
 
 		const write = await session.writeFile(requestPath, serialized);
-		if (!write.success) return { accepted: false, reason: "runner-input-write-failed" };
+		if (!write.success) {
+			// Reclaim the slot: this fresh container will never run a job.
+			await destroySandboxSafely(sandbox, sessionId).catch(() => undefined);
+			return { accepted: false, reason: "runner-input-write-failed" };
+		}
 		// A prior attempt in this sandbox may have left its boot marker behind;
 		// an empty overwrite means only THIS attempt's write can satisfy boot.
 		await session.writeFile(`${requestPath}.boot`, "").catch(() => null);
@@ -218,6 +222,9 @@ export class PlatformRunner extends WorkerEntrypoint<RunnerEnv> {
 		} catch (error) {
 			const existing = await session.getProcess(processId).catch(() => null);
 			if (existing && !TERMINAL_PROCESS_STATUSES.has(existing.status)) return { accepted: true };
+			// Reclaim the slot: the job process never started, so nothing will
+			// ever report for this container.
+			await destroySandboxSafely(sandbox, sessionId).catch(() => undefined);
 			return { accepted: false, reason: classifySandboxFailure(error) };
 		}
 
@@ -241,6 +248,22 @@ export class PlatformRunner extends WorkerEntrypoint<RunnerEnv> {
 		await destroySandboxSafely(sandbox, sessionId).catch(() => undefined);
 		console.log(JSON.stringify({ event: "job-boot-failed", processId, exitCode: dead?.exitCode ?? null, stdout: logs?.stdout?.slice(-BOOT_DIAGNOSTIC_TAIL_CHARS) ?? null, stderr: logs?.stderr?.slice(-BOOT_DIAGNOSTIC_TAIL_CHARS) ?? null }));
 		return { accepted: false, reason: "job-boot-failed" };
+	}
+
+	/**
+	 * Release a run's container once the platform has ingested its terminal
+	 * result (or parked it on TTL). Without this, every completed run's
+	 * sandbox lingers until the SDK's idle sleep while the pool is capped at
+	 * max_instances — a burst of small runs could exhaust the pool and turn
+	 * into sandbox-capacity-exhausted refusals. Best-effort and idempotent:
+	 * destroying an already-gone sandbox is a no-op.
+	 */
+	async finishRun(runId: unknown): Promise<{ released: boolean }> {
+		if (typeof runId !== "string" || !IDENTIFIER.test(runId)) return { released: false };
+		const sandboxId = await deterministicId(runId);
+		const sandbox = getSandbox(this.env.Sandbox, sandboxId, { enableDefaultSession: false });
+		await destroySandboxSafely(sandbox, `${sandboxId}-session`).catch(() => undefined);
+		return { released: true };
 	}
 }
 

@@ -67,6 +67,10 @@ async function fail(classification) {
 }
 
 let input = "";
+// Decode as a UTF-8 stream: without setEncoding each chunk is a Buffer that
+// is coerced independently, so a multibyte character split across a chunk
+// boundary silently becomes U+FFFD inside the agent's evidence.
+process.stdin.setEncoding("utf8");
 for await (const chunk of process.stdin) {
 	input += chunk;
 	if (input.length > 24_000) await fail("agent-input-too-large");

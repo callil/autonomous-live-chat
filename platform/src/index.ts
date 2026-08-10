@@ -71,7 +71,6 @@ const INTENT_PREFIX = "intent:";
 const QUEUE_KEY = "queue";
 const ROOM_CONTROL_KEY = "room-control";
 const BUDGET_KEY = "budget";
-const DIRTY_KEY = "dirty";
 const REVERT_KEY = "pending-revert";
 const WATCHDOG_KEY = "deploy-watchdog";
 const GOOD_SHA_KEY = "observed-good-sha";
@@ -117,6 +116,21 @@ const IDENTITY_NAME_HEADER = "x-ahp-session-name";
 const encoder = new TextEncoder();
 const utf8Bytes = (value: string): number => encoder.encode(value).byteLength;
 
+/**
+ * Best-effort constant-time string comparison for the owner's admin bearer,
+ * matching the doctrine the webhook and session verifiers already follow
+ * (their comparisons ride crypto.subtle.verify). Length still leaks; bytes
+ * do not.
+ */
+function fixedTimeEqual(a: string, b: string): boolean {
+	const left = encoder.encode(a);
+	const right = encoder.encode(b);
+	if (left.byteLength !== right.byteLength) return false;
+	let diff = 0;
+	for (let index = 0; index < left.byteLength; index += 1) diff |= left[index] ^ right[index];
+	return diff === 0;
+}
+
 function budgetDay(now: number): string {
 	return new Date(now).toISOString().slice(0, 10);
 }
@@ -146,8 +160,8 @@ function sanitizeTimings(value: unknown): Record<string, number> | null {
 /**
  * The Room Durable Object: single-threaded owner of the append-only event
  * ledger, the strict FIFO singleton build queue, intent records, and the feed
- * projection. Webhooks and client actions only append facts and set a dirty
- * mark; the 60-second level-triggered reconciler re-reads durable state and
+ * projection. Webhooks and client actions only append facts and pull the
+ * alarm forward; the 60-second level-triggered reconciler re-reads durable state and
  * drives the delta through the pure decide() policy. No model output enters
  * this truth path — the Doctor's verdict is constrained to a typed
  * disposition plus a public note that renders as exactly that.
@@ -214,7 +228,10 @@ export class RoomDO extends DurableObject<RuntimeEnv> {
 	 * cadence can never change what the reconciler concludes, only how soon.
 	 */
 	private async nextReconcileDelayMs(): Promise<number> {
-		const active = (await this.loadQueue()).find((run) => run.state === "verifying" || run.state === "deploying");
+		// A queued run is also "active": it is waiting on nothing but this
+		// reconciler, so leaving it to the idle minute cadence inserts a ~60s
+		// stall between enqueue and dispatch (and between consecutive runs).
+		const active = (await this.loadQueue()).find((run) => run.state === "queued" || run.state === "verifying" || run.state === "deploying");
 		if (active) return ACTIVE_RECONCILE_INTERVAL_MS;
 		// A pending revert is also waiting on an observation.
 		const revert = await this.ctx.storage.get<RevertRecord>(REVERT_KEY);
@@ -255,9 +272,8 @@ export class RoomDO extends DurableObject<RuntimeEnv> {
 	webSocketClose(): void {}
 	webSocketError(): void {}
 
-	/** Webhooks and external systems poke here: set the dirty mark, pull the reconciler forward, decide nothing. */
+	/** Webhooks and external systems poke here: pull the reconciler forward, decide nothing. */
 	async poke(): Promise<{ accepted: true }> {
-		await this.ctx.storage.put(DIRTY_KEY, true);
 		await this.scheduleReconcile(Date.now() + POKE_DELAY_MS);
 		return { accepted: true };
 	}
@@ -311,6 +327,11 @@ export class RoomDO extends DurableObject<RuntimeEnv> {
 					const timing = sanitizeTimings(input.timings);
 					if (timing) await this.appendEvent("run-timing", { runId, intentId: run.intentId, tier: input.tier === "small" ? "small" : "normal", ...timing }, now);
 				} else {
+					// Once the attempt has reported "verifying" the run belongs to
+					// the platform: a late "failed" push (the in-container watchdog
+					// racing the job's own terminal report) must not yank a run whose
+					// PR the reconciler may be merging concurrently.
+					if (run.state !== "running") throw new Error("attempt-already-terminal");
 					const reason = typeof input.reason === "string" ? input.reason.slice(0, 500) : "unspecified";
 					queue = completeRun(queue, { runId, attemptId, state: "failed", at: now, detail: reason });
 					await this.ctx.storage.put(QUEUE_KEY, pruneTerminalRuns(queue));
@@ -322,6 +343,9 @@ export class RoomDO extends DurableObject<RuntimeEnv> {
 			// Zombie or stale pushes are inert by design; say so and move on.
 			return { accepted: false, reason: error instanceof Error ? error.message : "rejected" };
 		}
+		// The terminal report was the job's last act: release its container so
+		// the bounded pool is not held hostage to the SDK's idle sleep.
+		this.ctx.waitUntil(this.runnerPort.finishRun(runId));
 		await this.poke();
 		await this.broadcastFeed();
 		return { accepted: true };
@@ -367,7 +391,6 @@ export class RoomDO extends DurableObject<RuntimeEnv> {
 	 */
 	private async reconcile(): Promise<void> {
 		const now = Date.now();
-		await this.ctx.storage.delete(DIRTY_KEY);
 		const control = await this.loadControl();
 		const budget = await this.loadBudget(now);
 		const revert = (await this.ctx.storage.get<RevertRecord>(REVERT_KEY)) ?? null;
@@ -478,10 +501,12 @@ export class RoomDO extends DurableObject<RuntimeEnv> {
 
 	/** TTL enforcement: park-and-explain, then the queue advances; the Doctor gets the case. */
 	private async executeParkRun(now: number): Promise<void> {
+		let parkedRunId: string | null = null;
 		await this.ctx.storage.transaction(async () => {
 			const queue = await this.loadQueue();
 			const { queue: swept, parked } = parkExpiredRun(queue, now);
 			if (!parked) return;
+			parkedRunId = parked.runId;
 			const kind: DoctorCaseKind = parked.state === "running" ? "run-ttl-exceeded" : parked.state === "verifying" ? "verify-ttl-exceeded" : "deploy-ttl-exceeded";
 			const detail = parked.state === "deploying"
 				? `The change squash-merged at ${String(parked.mergeSha).slice(0, 7)} but the deploy was never observed serving it.`
@@ -490,6 +515,10 @@ export class RoomDO extends DurableObject<RuntimeEnv> {
 			await this.appendEvent("run-parked", { runId: parked.runId, intentId: parked.intentId, note: detail }, now);
 			await this.queueDoctorCase({ kind, runId: parked.runId, intentId: parked.intentId, detail }, now);
 		});
+		// A run parked from "running" may still hold a live (hung) container;
+		// release it. For later phases the container is already gone and this
+		// is an idempotent no-op.
+		if (parkedRunId) this.ctx.waitUntil(this.runnerPort.finishRun(parkedRunId));
 	}
 
 	/** An accepted request's cancel window elapsed: admit it to the FIFO queue. */
@@ -504,6 +533,10 @@ export class RoomDO extends DurableObject<RuntimeEnv> {
 			await this.appendEvent("run-queued", { runId, intentId: current.id }, now);
 			await this.appendEvent("intent-dispatched", { intentId: current.id, runId }, now);
 		});
+		// The freshly queued run is not in this cycle's snapshot, so decide()
+		// could not emit its dispatch. Pull the reconciler straight back rather
+		// than letting the queued head sit until the next cadence tick.
+		await this.poke();
 	}
 
 	private async announceBudgetExhausted(now: number): Promise<void> {
@@ -622,7 +655,18 @@ export class RoomDO extends DurableObject<RuntimeEnv> {
 		// observed-deploy path. Dispatch only when the push trigger will NOT
 		// fire, so a deploy always has exactly one cause.
 		const pushTriggerCovers = changedFiles.some((file) => file.startsWith("product/"));
-		const merge = await app.squashMerge(action.prNumber, action.headSha);
+		let merge = await app.squashMerge(action.prNumber, action.headSha);
+		if (!merge.merged) {
+			// Crash-window recovery: if a previous cycle's merge succeeded but the
+			// DO died before the beginDeploying transaction committed, this cycle
+			// re-merges an already-merged PR and GitHub answers 405. That is not a
+			// refusal of the change — read the PR and, when it is already merged
+			// from exactly the verified head, proceed with its real merge commit.
+			const already = await app.pullRequestMergeState(action.prNumber).catch(() => null);
+			if (already?.merged && already.mergeSha && already.headSha === action.headSha) {
+				merge = { merged: true, mergeSha: already.mergeSha };
+			}
+		}
 		if (!merge.merged) {
 			const detail = `GitHub refused the exact-SHA squash merge (${merge.reason}).`;
 			await this.ctx.storage.transaction(async () => {
@@ -1030,7 +1074,7 @@ export default {
 			// Owner levers require the ADMIN_TOKEN worker secret as a bearer
 			// credential and fail closed when the secret is not provisioned.
 			const token = env.ADMIN_TOKEN;
-			if (!token || request.headers.get("Authorization") !== `Bearer ${token}`) return new Response("Unauthorized", { status: 401 });
+			if (!token || !fixedTimeEqual(request.headers.get("Authorization") ?? "", `Bearer ${token}`)) return new Response("Unauthorized", { status: 401 });
 			if (request.method !== "POST") return new Response("Method not allowed", { status: 405 });
 			if (pathname === "/api/admin/freeze") return Response.json(await room().freeze(true));
 			if (pathname === "/api/admin/unfreeze") return Response.json(await room().freeze(false));
@@ -1120,8 +1164,8 @@ export default {
 
 		if (pathname === "/api/hooks/poke") {
 			// GitHub webhook ingress. HMAC signature verification fails closed:
-			// only verified deliveries set the dirty mark, and even a verified
-			// poke decides NOTHING — the reconciler re-reads durable state.
+			// only verified deliveries pull the reconciler forward, and even a
+			// verified poke decides NOTHING — the reconciler re-reads durable state.
 			if (request.method !== "POST") return new Response("Method not allowed", { status: 405 });
 			const body = await request.text();
 			if (utf8Bytes(body) > 1_000_000) return new Response(null, { status: 204 });
