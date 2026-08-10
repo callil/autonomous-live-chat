@@ -30,7 +30,14 @@ body { margin: 0; font: 15px/1.5 ui-sans-serif, system-ui, sans-serif; height: 1
 .messages { display: flex; flex-direction: column; gap: .55rem; min-width: 0; }
 .message { display: grid; grid-template-columns: 1.75rem minmax(0, 1fr); gap: .6rem; width: 100%; max-width: 46rem; }
 .message-avatar { display: grid; width: 1.75rem; height: 1.75rem; place-items: center; border-radius: .5rem; background: var(--soft); font-size: .7rem; font-weight: 650; text-transform: uppercase; }
-.message-body { min-width: 0; }.message .author { font-weight: 600; margin-right: .45rem; }.message .message-text { overflow-wrap: anywhere; }.message time { font-size: .72rem; opacity: .55; margin-left: .4rem; white-space: nowrap; }
+.message-body { display: flex; flex-direction: column; align-items: flex-start; min-width: 0; }
+.message-meta { display: flex; align-items: baseline; min-width: 0; margin-bottom: .15rem; }
+.message .author { font-weight: 600; margin-right: .45rem; }.message .message-text { display: block; max-width: 100%; overflow-wrap: anywhere; }.message time { font-size: .72rem; opacity: .55; white-space: nowrap; }
+.image-preview-button { display: block; max-width: 100%; border: 0; padding: 0; border-radius: .65rem; background: transparent; cursor: zoom-in; }
+.message-image { display: block; width: auto; max-width: min(100%, 32rem); max-height: 24rem; border-radius: .65rem; box-shadow: 0 .35rem 1rem color-mix(in srgb, #000 24%, transparent); object-fit: contain; }
+.image-lightbox { position: fixed; inset: 0; z-index: 30; display: grid; place-items: center; padding: 3rem 1rem 1rem; background: color-mix(in srgb, #000 82%, transparent); }
+.image-lightbox img { display: block; max-width: min(70rem, 100%); max-height: calc(100dvh - 4rem); border-radius: .65rem; box-shadow: 0 .75rem 2.5rem color-mix(in srgb, #000 55%, transparent); object-fit: contain; }
+.image-lightbox-close { position: absolute; top: .75rem; right: 1rem; border: 0; padding: .2rem .65rem; border-radius: .5rem; background: color-mix(in srgb, #fff 14%, transparent); color: #fff; font: 1.6rem/1 ui-sans-serif, system-ui, sans-serif; cursor: pointer; }
 .composer { display: flex; align-items: flex-end; gap: .5rem; min-width: 0; padding: .6rem 1rem .8rem; border-top: 1px solid var(--line); }
 .composer textarea { flex: 1 1 auto; min-width: 0; max-height: 9rem; resize: none; font: inherit; padding: .5rem .7rem; border-radius: .6rem; border: 1px solid var(--line); background: transparent; color: inherit; }
 .visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }

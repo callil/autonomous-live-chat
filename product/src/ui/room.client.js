@@ -10,6 +10,34 @@
 	const join = $("#join"), joinForm = $("#join-form"), joinName = $("#join-name"), joinError = $("#join-error");
 	const accountButton = $("#account-button"), accountCancel = $("#account-cancel"), joinTitle = $("#join-title"), accountSave = $("#account-save");
 
+	const imageLightbox = document.createElement("div");
+	imageLightbox.className = "image-lightbox";
+	imageLightbox.hidden = true;
+	imageLightbox.setAttribute("role", "dialog");
+	imageLightbox.setAttribute("aria-modal", "true");
+	imageLightbox.setAttribute("aria-label", "Image preview");
+	const lightboxClose = document.createElement("button");
+	lightboxClose.className = "image-lightbox-close";
+	lightboxClose.type = "button";
+	lightboxClose.setAttribute("aria-label", "Close image preview");
+	lightboxClose.textContent = "×";
+	const lightboxImage = document.createElement("img");
+	lightboxImage.alt = "Uploaded image preview";
+	imageLightbox.append(lightboxClose, lightboxImage);
+	document.body.append(imageLightbox);
+
+	function closeImageLightbox() {
+		imageLightbox.hidden = true;
+		lightboxImage.src = "";
+	}
+	function openImageLightbox(source) {
+		lightboxImage.src = source;
+		imageLightbox.hidden = false;
+	}
+	lightboxClose.addEventListener("click", closeImageLightbox);
+	imageLightbox.addEventListener("click", (event) => { if (event.target === imageLightbox) closeImageLightbox(); });
+	document.addEventListener("keydown", (event) => { if (event.key === "Escape" && !imageLightbox.hidden) closeImageLightbox(); });
+
 	let socket = null, reconnectTimer = null, identity = null, everConnected = false;
 	const renderedChat = new Set();
 	const cachedChat = [];
@@ -70,23 +98,34 @@
 		avatar.className = "message-avatar"; avatar.textContent = initials(message.author ?? ""); avatar.style.color = color; avatar.setAttribute("aria-hidden", "true");
 		const body = document.createElement("div");
 		body.className = "message-body";
+		const meta = document.createElement("div");
+		meta.className = "message-meta";
 		const author = document.createElement("span");
 		author.className = "author"; author.textContent = message.author; author.style.color = color;
-		const text = document.createElement("span");
-		text.className = "message-text";
-		if (/^data:image\/[a-z0-9.+-]+;base64,[a-z0-9+/=\s]+$/iu.test(message.text || "")) {
-			const image = document.createElement("img");
-			image.src = message.text; image.alt = "Uploaded image"; image.style.maxWidth = "min(100%, 32rem)"; image.style.maxHeight = "24rem";
-			text.append(image);
-		} else {
-			text.textContent = message.text;
-		}
 		const time = document.createElement("time");
 		if (message.at) {
 			time.dateTime = new Date(message.at).toISOString();
 			time.textContent = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(message.at);
 		}
-		body.append(author, text, time); row.append(avatar, body); messages.append(row);
+		meta.append(author, time);
+		const text = document.createElement("span");
+		text.className = "message-text";
+		if (/^data:image\/[a-z0-9.+-]+;base64,[a-z0-9+/=\s]+$/iu.test(message.text || "")) {
+			const preview = document.createElement("button");
+			preview.className = "image-preview-button";
+			preview.type = "button";
+			preview.setAttribute("aria-label", "View uploaded image");
+			const image = document.createElement("img");
+			image.className = "message-image";
+			image.src = message.text;
+			image.alt = "Uploaded image";
+			preview.append(image);
+			preview.addEventListener("click", () => openImageLightbox(image.src));
+			text.append(preview);
+		} else {
+			text.textContent = message.text;
+		}
+		body.append(meta, text); row.append(avatar, body); messages.append(row);
 		row.scrollIntoView({ block: "end", behavior: renderedChat.size > 1 ? "smooth" : "auto" });
 	}
 
