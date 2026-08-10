@@ -417,7 +417,7 @@ test("pending intents pin numbered markers to the elements they target", async (
 	const markers = root.getElementById("markers");
 	assert.equal(markers.children.length, 1, "one pending intent, one marker pin");
 	const marker = markers.children[0];
-	assert.equal(marker.textContent, "1", "markers are numbered");
+	assert.ok(marker.descendants().some((node) => node.textContent === "1"), "markers are numbered");
 	assert.equal(marker.dataset.phase, "building", "the pin carries its phase");
 	assert.match(marker.getAttribute("aria-label") ?? "", /Make it pop/u, "the pin names the request");
 
@@ -525,6 +525,90 @@ test("the harness's own chrome is annotatable in a distinct feedback mode that n
 
 	socket.deliver({ type: "harness:ack" });
 	assert.match(root.getElementById("msg").textContent, /outside this room/u, "the ack is honest: the harness improves outside the room's pipeline");
+});
+
+test("the Fast switch rides mode:fast on the envelope, defaults off, and sticks per user", async () => {
+	const harness = bootOverlay();
+	const { root, sandbox } = harness;
+	const socket = await connectOverlay(harness);
+	const app = appElement(harness);
+
+	// Default: standard.
+	root.getElementById("t-target").dispatchEvent({ type: "click" });
+	sandbox.document.dispatchEvent({ type: "click", clientX: 150, clientY: 120, target: app });
+	const fastToggle = root.getElementById("fast-toggle");
+	assert.equal(fastToggle.getAttribute("aria-checked"), "false", "fast is off by default");
+	root.getElementById("input").value = "First request";
+	root.getElementById("composer").dispatchEvent({ type: "submit" });
+	let frames = socket.sent.map((raw) => JSON.parse(raw)).filter((message) => message.type === "request:target");
+	assert.equal(frames[0].mode, "standard", "the agreed field name, standard by default");
+	assert.equal(frames[0].annotation.mode, "standard");
+
+	// Toggled: fast rides the envelope, and the choice persists per user.
+	socket.deliver({ type: "request:ack", intentId: "i1", cancelDeadline: Date.now() + 10_000 });
+	harness.flushTimers(2_000);
+	root.getElementById("t-target").dispatchEvent({ type: "click" });
+	sandbox.document.dispatchEvent({ type: "click", clientX: 150, clientY: 120, target: app });
+	fastToggle.dispatchEvent({ type: "click" });
+	assert.equal(fastToggle.getAttribute("aria-checked"), "true");
+	root.getElementById("input").value = "Second request";
+	root.getElementById("composer").dispatchEvent({ type: "submit" });
+	frames = socket.sent.map((raw) => JSON.parse(raw)).filter((message) => message.type === "request:target");
+	assert.equal(frames[1].mode, "fast", "the switch sets mode:fast");
+	assert.equal(frames[1].annotation.mode, "fast", "and it rides the verbatim annotation too");
+	assert.equal(JSON.parse(sandbox.localStorage.getItem("app-harness.dock.v1")).fast, true, "sticky per user");
+});
+
+test("fast intents show the lightning on queue rows and markers", async () => {
+	const harness = bootOverlay();
+	const { root } = harness;
+	const socket = await connectOverlay(harness);
+	appElement(harness, { dataLoc: "src/ui/page.html:42:3" });
+
+	socket.deliver({
+		type: "feed:update",
+		items: [],
+		queue: [{ intentId: "i1", phase: "building", label: "building", text: "Make it pop", by: "Ada", mode: "fast", anchor: { dataLoc: "src/ui/page.html:42:3" } }],
+	});
+	const row = root.getElementById("queue").children[0];
+	assert.ok(row.descendants().some((node) => node.classNames().includes("bolt")), "the queue row carries the lightning");
+	const marker = root.getElementById("markers").children[0];
+	assert.equal(marker.dataset.fast, "true", "the marker carries the fast state");
+	assert.ok(marker.descendants().some((node) => node.classNames().includes("bolt")), "with a visible bolt");
+	assert.match(marker.getAttribute("aria-label") ?? "", /fast/u, "and says so to assistive tech");
+});
+
+test("a draw stroke opens the composer with the drawn region riding the envelope", async () => {
+	const harness = bootOverlay();
+	const { root, sandbox } = harness;
+	const socket = await connectOverlay(harness);
+	appElement(harness, { rect: { left: 80, top: 80, width: 400, height: 200 } });
+
+	root.getElementById("t-draw").dispatchEvent({ type: "click" });
+	// Drawing suppresses page text selection while armed…
+	assert.equal(sandbox.document.documentElement.style.getPropertyValue("user-select"), "none", "a stroke is never a selection gesture");
+
+	const draw = root.getElementById("draw");
+	draw.dispatchEvent({ type: "pointerdown", target: draw, clientX: 100, clientY: 100, pointerId: 7 });
+	draw.dispatchEvent({ type: "pointermove", target: draw, clientX: 220, clientY: 160, buttons: 1, pointerId: 7 });
+	draw.dispatchEvent({ type: "pointermove", target: draw, clientX: 300, clientY: 120, buttons: 1, pointerId: 7 });
+	draw.dispatchEvent({ type: "pointerup", target: draw, clientX: 300, clientY: 120, pointerId: 7 });
+
+	const composer = root.getElementById("composer");
+	assert.equal(composer.hidden, false, "a completed stroke opens the composer");
+	assert.equal(sandbox.document.documentElement.style.getPropertyValue("user-select"), "", "selection suppression is released with the mode");
+
+	// A wordless draw is refused kindly — it used to park at dispatch.
+	composer.dispatchEvent({ type: "submit" });
+	assert.ok(root.getElementById("msg").textContent.length > 0, "empty draw submissions are refused client-side");
+	assert.ok(!socket.sent.some((raw) => JSON.parse(raw).type === "request:draw"), "nothing was sent");
+
+	root.getElementById("input").value = "Put a banner across this area";
+	composer.dispatchEvent({ type: "submit" });
+	const frame = socket.sent.map((raw) => JSON.parse(raw)).find((message) => message.type === "request:draw");
+	assert.ok(frame, "the draw request goes out once it has words");
+	assert.ok(Array.isArray(frame.annotation.drawingPoints) && frame.annotation.drawingPoints.length >= 2, "the stroke's points ride the envelope");
+	assert.deepEqual(frame.annotation.drawnRegion, { x: 100, y: 100, width: 200, height: 60 }, "with the drawn region's bounding box");
 });
 
 test("a second overlay tag on the same page is a no-op, not a second surface", () => {

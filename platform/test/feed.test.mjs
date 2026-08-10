@@ -148,6 +148,12 @@ test("chips carry the intent's identity: anchor, verbatim request, requester", (
 	const wordy = { ...decorated, id: "intent-y", requestText: "x".repeat(400) };
 	const [clipped] = renderQueueChips([], 10_000, [wordy]);
 	assert.ok(clipped.text.length <= 121, "chip text is bounded");
+
+	// A fast build's lightning rides the chip; standard stays unmarked.
+	const fast = { ...decorated, id: "intent-z", requestMode: "fast" };
+	const [fastChip] = renderQueueChips([], 10_000, [fast]);
+	assert.equal(fastChip.mode, "fast", "fast mode rides the chip");
+	assert.equal(chip.mode, undefined, "standard requests carry no mode marker");
 });
 
 test("ETAs read as estimates", () => {

@@ -1064,18 +1064,24 @@ export class RoomDO extends DurableObject<RuntimeEnv> {
 	 * building and pin pending work to the exact element it targets. Bounded
 	 * work: only non-terminal intents (a handful at most) are decorated.
 	 */
-	private async loadIntentsForFeed(): Promise<(Intent & { anchor?: Record<string, unknown>; requestText?: string; requestedBy?: string })[]> {
+	private async loadIntentsForFeed(): Promise<(Intent & { anchor?: Record<string, unknown>; requestText?: string; requestedBy?: string; requestMode?: "fast" })[]> {
 		const intents = await this.loadIntents();
-		const out: (Intent & { anchor?: Record<string, unknown>; requestText?: string; requestedBy?: string })[] = [];
+		const out: (Intent & { anchor?: Record<string, unknown>; requestText?: string; requestedBy?: string; requestMode?: "fast" })[] = [];
 		for (const intent of intents) {
 			if (intent.state !== "open" && intent.state !== "dispatched") { out.push(intent); continue; }
-			let decorated: Intent & { anchor?: Record<string, unknown>; requestText?: string; requestedBy?: string } = intent;
+			let decorated: Intent & { anchor?: Record<string, unknown>; requestText?: string; requestedBy?: string; requestMode?: "fast" } = intent;
 			const annotationSeq = intent.refs?.annotationSeqs?.[0];
 			if (Number.isSafeInteger(annotationSeq)) {
 				const event = await this.ctx.storage.get<LedgerEvent>(eventStorageKey(annotationSeq as number));
 				const annotation = event?.payload?.annotation as Record<string, unknown> | undefined;
 				if (annotation && typeof annotation === "object") {
-					decorated = { ...decorated, anchor: { kind: annotation.kind, dataLoc: annotation.dataLoc, selector: annotation.selector ?? null, selectorPath: annotation.selectorPath ?? null } };
+					decorated = {
+						...decorated,
+						anchor: { kind: annotation.kind, dataLoc: annotation.dataLoc, selector: annotation.selector ?? null, selectorPath: annotation.selectorPath ?? null },
+						// The build mode (fast/standard) rides the verbatim
+						// annotation; chips surface it as the lightning.
+						...(annotation.mode === "fast" ? { requestMode: "fast" as const } : {}),
+					};
 				}
 			}
 			const acceptedSeq = intent.refs?.utteranceSeqs?.[0];
