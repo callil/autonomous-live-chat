@@ -17,35 +17,39 @@
    toggled chrome would otherwise override the UA's [hidden] { display: none }
    and leave the join scrim covering the room forever. */
 [hidden] { display: none !important; }
-body { margin: 0; font: 15px/1.5 ui-sans-serif, system-ui, sans-serif; height: 100dvh; }
-.app { display: grid; grid-template-rows: auto 1fr auto; height: 100dvh; }
+html, body { width: 100%; min-width: 0; overflow: hidden; }
+body { margin: 0; font: 15px/1.5 ui-sans-serif, system-ui, sans-serif; height: 100vh; height: 100dvh; }
+.app { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; width: 100%; min-width: 0; height: 100vh; height: 100dvh; overflow: hidden; }
 
-.topbar { display: flex; justify-content: space-between; align-items: baseline; gap: .75rem; padding: .65rem 1rem; border-bottom: 1px solid var(--line); }
-.room-title { font-weight: 650; }
-.room-meta { margin-left: .5rem; font-size: .8rem; opacity: .65; }
+.topbar { display: flex; justify-content: space-between; align-items: baseline; gap: .75rem; min-width: 0; padding: .65rem 1rem; border-bottom: 1px solid var(--line); }
+.room-heading { display: inline-flex; align-items: baseline; min-width: 0; }
+.room-title { font-weight: 650; overflow-wrap: anywhere; }
+.room-meta { flex: 0 0 auto; margin-left: .5rem; font-size: .8rem; opacity: .65; }
 .topbar-status, .app-update { display: inline-flex; align-items: center; gap: .65rem; }
+.topbar-status { flex: 0 0 auto; }
 .app-update { padding: .12rem .25rem .12rem .6rem; border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent); border-radius: 999px; background: color-mix(in srgb, var(--accent) 9%, Canvas); font-size: .75rem; }
 .app-update button { padding: .15rem .5rem; border: 0; border-radius: 999px; background: var(--accent); color: #fff; font: inherit; cursor: pointer; }
-.connection { display: inline-flex; align-items: center; gap: .4rem; font-size: .8rem; opacity: .8; }
-.dot { width: .5rem; height: .5rem; border-radius: 50%; background: #c9822f; display: inline-block; }
+.connection { display: inline-flex; align-items: center; gap: .4rem; font-size: .8rem; opacity: .8; white-space: nowrap; }
+.dot { flex: 0 0 auto; width: .5rem; height: .5rem; border-radius: 50%; background: #c9822f; display: inline-block; }
 .dot.live { background: var(--live); }
 
-.columns { display: grid; grid-template-columns: 1fr; min-height: 0; }
-.conversation { overflow-y: auto; padding: 1rem 1.25rem; }
-.room-intro { position: fixed; top: 4rem; right: 1rem; z-index: 10; display: flex; align-items: flex-start; gap: .75rem; width: min(32rem, calc(100vw - 2rem)); padding: .85rem 1rem; border: 1px solid var(--line); border-radius: .75rem; background: Canvas; box-shadow: 0 .5rem 1.5rem color-mix(in srgb, #000 18%, transparent); }
+.columns { display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; min-height: 0; }
+.conversation { min-width: 0; overflow-y: auto; overscroll-behavior: contain; padding: 1rem 1.25rem; }
+.room-intro { position: fixed; top: 4rem; right: 1rem; z-index: 10; display: flex; align-items: flex-start; gap: .75rem; width: min(32rem, calc(100vw - 2rem)); max-height: calc(100dvh - 8rem); overflow-y: auto; padding: .85rem 1rem; border: 1px solid var(--line); border-radius: .75rem; background: Canvas; box-shadow: 0 .5rem 1.5rem color-mix(in srgb, #000 18%, transparent); }
+.room-intro > div { min-width: 0; }
 .room-intro h1 { margin: 0 0 .2rem; font-size: 1rem; }
-.room-intro p { margin: 0; opacity: .75; }
+.room-intro p { margin: 0; overflow-wrap: anywhere; opacity: .75; }
 .toast-dismiss { flex: 0 0 auto; border: 0; padding: 0 .2rem; background: transparent; color: inherit; font: 1.25rem/1 ui-sans-serif, system-ui, sans-serif; opacity: .65; cursor: pointer; }
 .toast-dismiss:hover { opacity: 1; }
-.messages { display: flex; flex-direction: column; gap: .55rem; }
+.messages { display: flex; flex-direction: column; gap: .55rem; min-width: 0; }
 /* Each message leads with a small initials placeholder; the author name and
    the placeholder share one generated per-user color (see room.client.js). */
-.message { display: grid; grid-template-columns: 1.75rem minmax(0, 1fr); gap: .6rem; max-width: 46rem; }
+.message { display: grid; grid-template-columns: 1.75rem minmax(0, 1fr); gap: .6rem; width: 100%; max-width: 46rem; }
 .message-avatar { display: grid; width: 1.75rem; height: 1.75rem; place-items: center; border-radius: .5rem; background: var(--soft); font-size: .7rem; font-weight: 650; text-transform: uppercase; }
 .message-body { min-width: 0; }
 .message .author { font-weight: 600; margin-right: .45rem; }
 .message .message-text { overflow-wrap: anywhere; }
-.message time { font-size: .72rem; opacity: .55; margin-left: .4rem; }
+.message time { font-size: .72rem; opacity: .55; margin-left: .4rem; white-space: nowrap; }
 
 /* The App Harness overlay is a TRUE overlay: it floats above this page and
    never influences its layout — this app styles itself as if the overlay did
@@ -53,9 +57,9 @@ body { margin: 0; font: 15px/1.5 ui-sans-serif, system-ui, sans-serif; height: 1
    and it is pointer-transparent outside its visible controls, so Send stays
    clickable regardless of where the dock sits.) */
 .composer {
-  display: flex; gap: .5rem; padding: .6rem 1rem .8rem; border-top: 1px solid var(--line);
+  display: flex; align-items: flex-end; gap: .5rem; min-width: 0; padding: .6rem 1rem .8rem; border-top: 1px solid var(--line);
 }
-.composer textarea { flex: 1; resize: none; font: inherit; padding: .5rem .7rem; border-radius: .6rem; border: 1px solid var(--line); background: transparent; color: inherit; }
+.composer textarea { flex: 1 1 auto; min-width: 0; max-height: 9rem; resize: none; font: inherit; padding: .5rem .7rem; border-radius: .6rem; border: 1px solid var(--line); background: transparent; color: inherit; }
 button.send, button.primary { font: inherit; padding: .5rem .9rem; border-radius: .6rem; border: 0; background: var(--accent); color: #fff; cursor: pointer; }
 button.secondary { font: inherit; padding: .5rem .9rem; border-radius: .6rem; border: 1px solid var(--line); background: transparent; color: inherit; cursor: pointer; }
 button:disabled { opacity: .5; cursor: default; }
@@ -68,9 +72,35 @@ button:disabled { opacity: .5; cursor: default; }
 .request-error { margin: 0; font-size: .78rem; color: #c94f2f; }
 .request-error:empty { display: none; }
 
-.join-scrim { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; background: color-mix(in srgb, Canvas 75%, transparent); backdrop-filter: blur(3px); }
-.join-card { display: grid; gap: .5rem; width: min(20rem, calc(100vw - 2rem)); padding: 1.1rem; border: 1px solid var(--line); border-radius: .9rem; background: Canvas; }
+.join-scrim { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; overflow-y: auto; padding: 1rem; background: color-mix(in srgb, Canvas 75%, transparent); backdrop-filter: blur(3px); }
+.join-card { display: grid; gap: .5rem; width: min(20rem, 100%); max-height: 100%; overflow-y: auto; padding: 1.1rem; border: 1px solid var(--line); border-radius: .9rem; background: Canvas; }
 .join-card h2 { margin: 0 0 .25rem; font-size: 1rem; }
-.join-card input { font: inherit; padding: .5rem .6rem; border-radius: .5rem; border: 1px solid var(--line); background: transparent; color: inherit; }
+.join-card input { min-width: 0; font: inherit; padding: .5rem .6rem; border-radius: .5rem; border: 1px solid var(--line); background: transparent; color: inherit; }
 
-@media (max-width: 34rem) { .app-update > span { display: none; } .topbar-status { gap: .4rem; } }
+@media (max-width: 34rem) {
+  .topbar { flex-wrap: wrap; gap: .3rem .75rem; padding: .55rem .75rem; }
+  .room-heading { flex: 1 1 auto; }
+  .topbar-status { margin-left: auto; gap: .4rem; }
+  .app-update > span { display: none; }
+  .conversation { padding: .75rem; }
+  .room-intro { top: auto; right: .75rem; bottom: 4.75rem; width: calc(100vw - 1.5rem); max-height: calc(100dvh - 8rem); }
+  .composer { gap: .4rem; padding: .5rem .75rem max(.6rem, env(safe-area-inset-bottom)); }
+  .composer textarea { font-size: 16px; }
+  button.send { min-width: 3.25rem; min-height: 2.75rem; padding-inline: .7rem; }
+  .join-scrim { padding: .75rem; }
+  .join-card input { font-size: 16px; }
+}
+
+@media (max-width: 22rem) {
+  .topbar { align-items: stretch; }
+  .room-heading, .topbar-status { width: 100%; justify-content: space-between; }
+  .topbar-status { margin-left: 0; }
+  .room-meta { margin-left: .35rem; }
+}
+
+@media (max-height: 30rem) and (orientation: landscape) {
+  .topbar { padding-block: .3rem; }
+  .conversation { padding-block: .5rem; }
+  .room-intro { top: .5rem; bottom: auto; max-height: calc(100dvh - 1rem); }
+  .composer { padding-block: .35rem; }
+}
