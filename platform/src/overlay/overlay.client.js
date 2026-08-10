@@ -343,12 +343,6 @@
 	const submit = $("submit"), cancel = $("cancel");
 	const tools = { target: $("t-target"), comment: $("t-comment"), draw: $("t-draw") };
 
-	function mount() {
-		(document.body || document.documentElement).append(host);
-		publishInsets();
-	}
-	if (document.body) mount(); else document.addEventListener("DOMContentLoaded", mount, { once: true });
-
 	// ---- Published insets ----------------------------------------------------
 	//
 	// Correct hit-testing (above) is what makes the overlay safe over an app it
@@ -361,6 +355,10 @@
 	// clear of the dock can consume them; an app that ignores them is still
 	// fully usable. Nothing is hardcoded on either side: the app never needs to
 	// know the dock's size, and the overlay never needs to know the app's.
+	//
+	// This block sits ABOVE mount() on purpose: mount() publishes immediately,
+	// and a `const` declared after it would still be in its temporal dead zone,
+	// throwing before the transport below ever starts.
 	const INSET_RIGHT = "--app-harness-dock-inset-right";
 	const INSET_BOTTOM = "--app-harness-dock-inset-bottom";
 	const dockEl = root.querySelector(".dock");
@@ -393,6 +391,15 @@
 		for (const el of dockEl.children) observer.observe(el);
 	}
 	addEventListener("resize", publishInsets);
+
+	function mount() {
+		(document.body || document.documentElement).append(host);
+		// The dock has no layout until it is in the document, so measure on the
+		// next frame. Publishing is best-effort decoration: it must never be able
+		// to take down the transport below it.
+		try { requestAnimationFrame(publishInsets); } catch { /* measured on the next resize instead */ }
+	}
+	if (document.body) mount(); else document.addEventListener("DOMContentLoaded", mount, { once: true });
 
 	// ---- State ---------------------------------------------------------------
 
