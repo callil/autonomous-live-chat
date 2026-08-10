@@ -623,6 +623,10 @@
 	document.addEventListener("keydown", (event) => {
 		if (event.key !== "Escape") return;
 		if (!composer.hidden) { pendingDraw?.path?.remove(); closeComposer(); }
+		// Abandon an in-progress draw too: without this, the pointer capture
+		// still delivers the eventual pointerup to finishDraw, which reopens
+		// the composer for the stroke the user just cancelled.
+		if (drawing) { drawing = false; draftPath?.remove(); draftPath = null; draftPoints = []; }
 		clearMode();
 	});
 	for (const [name, button] of Object.entries(tools)) button.addEventListener("click", () => setMode(name));

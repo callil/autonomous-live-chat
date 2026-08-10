@@ -191,10 +191,30 @@ test("the app connects same-origin over a secure socket, never to a hardcoded ho
 });
 
 test("losing the connection schedules a reconnect rather than going quiet", async () => {
-	const { sockets, timers } = await bootJoined();
+	const { sockets, timers, fetches } = await bootJoined();
 	sockets[0].emit("open", {});
 	sockets[0].emit("close", {});
+	// The client re-checks the session before retrying, so a still-valid
+	// session reconnects and an expired one re-shows the join scrim instead
+	// of looping a doomed reconnect forever.
+	await Promise.resolve();
+	fetches.at(-1).respond({ ok: true, json: async () => ({ id: "s1", name: "Ada" }) });
+	await Promise.resolve();
+	await Promise.resolve();
 	assert.ok(timers.some((timer) => !timer.repeating && timer.ms > 0), "a dropped socket must schedule a retry");
+});
+
+test("an expired session on reconnect re-shows the join scrim instead of looping", async () => {
+	const { document, sockets, timers, fetches } = await bootJoined();
+	sockets[0].emit("open", {});
+	const timersBefore = timers.length;
+	sockets[0].emit("close", {});
+	await Promise.resolve();
+	fetches.at(-1).respond({ ok: false, status: 401, text: async () => "A signed session is required." });
+	await Promise.resolve();
+	await Promise.resolve();
+	assert.equal(document.getElementById("join").hidden, false, "an expired session must surface the join scrim");
+	assert.equal(timers.length, timersBefore, "no reconnect is scheduled for a session that cannot succeed");
 });
 
 test("the page carries the boot contract the platform's fallback and version checks rely on", () => {

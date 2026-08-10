@@ -134,6 +134,24 @@ export class GitHubApp {
 		return { merged: true, mergeSha: body.sha };
 	}
 
+	/**
+	 * Read whether a PR is ALREADY merged, and from which head into which merge
+	 * commit. Recovery read for the crash window between a successful squash
+	 * merge and its ledger transaction: re-merging an already-merged PR gets a
+	 * 405 from GitHub, which must not be misread as a refusal of the change.
+	 */
+	async pullRequestMergeState(prNumber: number): Promise<{ merged: boolean; mergeSha: string | null; headSha: string | null }> {
+		if (!Number.isSafeInteger(prNumber) || prNumber < 1) throw new Error("PR merge-state observation requires a PR number.");
+		const response = await fetch(`https://api.github.com/repos/${this.config.repository}/pulls/${prNumber}`, bounded({ headers: githubHeaders(await this.installationToken()) }));
+		if (!response.ok) throw new Error(`GitHub PR merge-state observation failed (${response.status}).`);
+		const body = await response.json() as { merged?: unknown; merge_commit_sha?: unknown; head?: { sha?: unknown } };
+		return {
+			merged: body.merged === true,
+			mergeSha: typeof body.merge_commit_sha === "string" && GIT_SHA.test(body.merge_commit_sha) ? body.merge_commit_sha : null,
+			headSha: typeof body.head?.sha === "string" && GIT_SHA.test(body.head.sha) ? body.head.sha : null,
+		};
+	}
+
 	/** Dispatch a workflow on main. Used for the product deploy and the revert redeploy. */
 	async dispatchWorkflow(workflowFile: string, inputs: Record<string, string>): Promise<void> {
 		if (!/^[A-Za-z0-9._-]+\.ya?ml$/u.test(workflowFile)) throw new Error("Workflow dispatch requires a workflow file name.");

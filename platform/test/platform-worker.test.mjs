@@ -22,7 +22,7 @@ test("the platform worker never imports the legacy operator machinery", () => {
 
 test("owner levers fail closed on the ADMIN_TOKEN bearer secret", () => {
 	assert.match(worker, /pathname\.startsWith\("\/api\/admin\/"\)/u);
-	assert.match(worker, /if \(!token \|\| request\.headers\.get\("Authorization"\) !== `Bearer \$\{token\}`\) return new Response\("Unauthorized", \{ status: 401 \}\);/u);
+	assert.match(worker, /if \(!token \|\| !fixedTimeEqual\(request\.headers\.get\("Authorization"\) \?\? "", `Bearer \$\{token\}`\)\) return new Response\("Unauthorized", \{ status: 401 \}\);/u);
 	assert.match(worker, /"\/api\/admin\/freeze"/u);
 	assert.match(worker, /"\/api\/admin\/revert"/u);
 });
@@ -33,9 +33,8 @@ test("the runner callback is guarded by runId-as-bearer plus the attempt ID zomb
 	assert.match(worker, /outcome\.accepted \? 200 : 403/u);
 });
 
-test("pokes only set the dirty mark; the level-triggered reconciler drives the delta through decide()", () => {
+test("pokes only pull the alarm forward; the level-triggered reconciler drives the delta through decide()", () => {
 	assert.match(worker, /async poke\(\)/u);
-	assert.match(worker, /DIRTY_KEY, true/u);
 	assert.match(worker, /RECONCILE_INTERVAL_MS = 60_000/u);
 	// The alarm ALWAYS reconciles and then always reschedules itself: the loop
 	// can never terminate, whatever cadence it picks.
