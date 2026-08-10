@@ -99,7 +99,14 @@ SHA matching the merge, the page's stamp agrees with it, both deployed scripts
 (room client *and* platform overlay) execute without throwing, the send control
 is hit-testable, a session can be created, and the fallback UI is reachable.
 
-Runs in about 400ms against the live origin; budget is 60s.
+Runs in about 300ms against a settled deploy; budget is 60s. A revision mismatch
+retries for up to 30s before failing, because a Workers deploy does not flip
+every edge colo at the same instant — successive requests can legitimately be
+answered by the old and the new revision while it propagates. The first version
+of this job asserted on a single sample and went red over a perfectly healthy
+deploy. **A post-deploy check that cries wolf gets ignored, which is the same
+outage as having no check at all** — so the waiting lives inside the assertion
+that cares, where the retry and the check see the same samples.
 
 **Catches:** a deploy that did not land, a stale asset, a binding that is not
 wired, a platform and product that disagree about what is live — none of which

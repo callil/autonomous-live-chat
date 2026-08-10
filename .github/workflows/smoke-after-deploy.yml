@@ -51,24 +51,15 @@ jobs:
       # The smoke checks are dependency-free by design: they use Node's own
       # fetch and the repo's DOM harness, so there is nothing to install and
       # nothing that can rot between a deploy and its verification.
-      - name: Wait for the deployment to become the live revision
-        env:
-          EXPECTED_SHA: ${{ github.event.workflow_run.head_sha || inputs.sha }}
-          SMOKE_URL: ${{ inputs.url || 'https://app-harness-product.coda-a.workers.dev' }}
-        run: |
-          set -uo pipefail
-          # A Workers deploy propagates in seconds, but not instantly. Poll
-          # briefly for the expected revision so the smoke below tests the
-          # deploy that just ran rather than the one it replaced.
-          if [ -z "${EXPECTED_SHA}" ]; then echo "No expected revision; skipping the wait."; exit 0; fi
-          for attempt in $(seq 1 20); do
-            live="$(curl -fsS --max-time 10 "${SMOKE_URL}/version" | sed -n 's/.*"sha":"\([0-9a-f]*\)".*/\1/p' || true)"
-            echo "attempt ${attempt}: live=${live:-unknown} expected=${EXPECTED_SHA}"
-            if [ "${live}" = "${EXPECTED_SHA}" ]; then echo "The expected revision is live."; exit 0; fi
-            sleep 6
-          done
-          echo "::warning::${SMOKE_URL} never reported ${EXPECTED_SHA}; smoking whatever is live."
-
+      #
+      # There is deliberately no "wait for propagation" step here. A shell loop
+      # that polls until the revision appears, and then hands off to a separate
+      # process that samples it again, still races: a Workers deploy does not
+      # flip every edge colo at the same instant, so the two samples can
+      # disagree. That produced a red smoke job over a perfectly good deploy on
+      # the very first run. The waiting belongs inside the check that cares
+      # about the revision, where the retry and the assertion see the same
+      # samples — so it lives in smoke.mjs.
       - name: Smoke the live deployment
         id: smoke
         env:
