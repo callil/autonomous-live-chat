@@ -51,6 +51,7 @@ const TEMPLATES = {
 	"revert-requested": (payload) => `Owner requested a revert to ${payload.sha.slice(0, 7)}.`,
 	"budget-exhausted": () => "Today's build budget is spent — queued work resumes after the daily reset.",
 	"doctor-note": (payload) => `Doctor: ${clip(payload.note, 240)}`,
+	"harness-feedback": (payload) => `${payload.by} left feedback on the harness UI (${clip(payload.annotation?.label, 60) || "chrome"}): “${clip(payload.text, 160)}” — recorded; the harness improves outside this room's build pipeline.`,
 };
 
 /**

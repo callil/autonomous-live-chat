@@ -431,6 +431,40 @@ test("the panel opens toward available space when the dock sits in the top-left"
 	assert.notEqual(dock.style.top, "auto", "the dock anchors by the edge it opens away from");
 });
 
+test("the harness's own chrome is annotatable in a distinct feedback mode that never dispatches a build", async () => {
+	const harness = bootOverlay();
+	const { root } = harness;
+	const socket = await connectOverlay(harness);
+
+	root.getElementById("t-target").dispatchEvent({ type: "click" });
+	// Hovering harness chrome switches the preview into the feedback style —
+	// the user sees they are pointing at the harness, not the app.
+	const pill = root.getElementById("pill");
+	pill.dispatchEvent({ type: "mousemove", target: pill, clientX: 640, clientY: 700 });
+	const box = root.getElementById("hover-box");
+	assert.equal(box.hidden, false, "harness chrome previews too");
+	assert.ok(box.classNames().includes("harness"), "in a visibly different style than app elements");
+	assert.match(root.getElementById("chip-name").textContent, /App Harness UI/u, "the chip says what is being pointed at");
+
+	// Option-click opens the composer in harness-feedback mode.
+	pill.dispatchEvent({ type: "click", target: pill, altKey: true, clientX: 640, clientY: 700 });
+	const composer = root.getElementById("composer");
+	assert.equal(composer.hidden, false, "the composer opens for harness feedback");
+
+	root.getElementById("input").value = "The dock hides my send button";
+	composer.dispatchEvent({ type: "submit" });
+	const frames = socket.sent.map((raw) => JSON.parse(raw));
+	const feedback = frames.find((message) => message.type === "harness:feedback");
+	assert.ok(feedback, "feedback rides its own message type");
+	assert.equal(feedback.annotation.kind, "harness-feedback");
+	assert.ok(feedback.annotation.selectorPath.length > 0, "the anchored chrome element rides the payload");
+	// The architectural guarantee: harness feedback is NEVER a build request.
+	assert.ok(!frames.some((message) => String(message.type).startsWith("request:")), "no request envelope is ever sent for harness feedback");
+
+	socket.deliver({ type: "harness:ack" });
+	assert.match(root.getElementById("msg").textContent, /outside this room/u, "the ack is honest: the harness improves outside the room's pipeline");
+});
+
 test("a second overlay tag on the same page is a no-op, not a second surface", () => {
 	const harness = createSandbox({ scriptDataset: { room: "main" } });
 	runScript(overlay, harness.sandbox);
