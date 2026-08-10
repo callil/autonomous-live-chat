@@ -160,7 +160,11 @@ await check("the platform overlay asset is served and executes without throwing"
 	const harness = createSandbox({ scriptDataset: { room: "main" }, location: { origin, host: new URL(origin).host } });
 	runScript(overlaySource, harness.sandbox);
 	assert.deepEqual(harness.consoleErrors, [], `the deployed overlay logged errors: ${harness.consoleErrors.join("; ")}`);
-	assert.ok(harness.body.children.length > 0, "the deployed overlay mounted nothing");
+	// The overlay mounts its host on <html> (outside <body>, so framed mode's
+	// body transform can never scale the overlay's own chrome) — accept a
+	// mount anywhere in the document.
+	const mounted = harness.documentElement.descendants().some((element) => element.getAttribute?.("data-app-harness") === "overlay");
+	assert.ok(mounted, "the deployed overlay mounted nothing");
 	assert.equal(harness.fetches.length, 1, "the deployed overlay never started its transport");
 	assert.match(harness.fetches[0].url, /\/api\/session/u);
 });

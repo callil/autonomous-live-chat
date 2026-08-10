@@ -337,7 +337,7 @@
 		transform: translateX(-50%) rotate(45deg);
 		width: 8px; height: 8px; background: #1a1a1a; border-radius: 0 0 2px 0;
 	}
-	.wrap:hover .tip, .wrap:focus-within .tip {
+	.wrap:hover .tip, .wrap:has(:focus-visible) .tip {
 		opacity: 1; visibility: visible; transform: translateX(-50%) scale(1);
 		transition-delay: 0.85s;
 	}
@@ -644,7 +644,7 @@
 	// clip-path (not overflow/border-radius): rounding the page's corners via
 	// clip-path is pure paint — overflow would change body's formatting
 	// context and margin collapsing, which IS a reflow.
-	const FRAME_BODY_PROPS = ["transform", "transform-origin", "transition", "clip-path", "will-change"];
+	const FRAME_BODY_PROPS = ["transform", "transform-origin", "transition", "clip-path", "will-change", "background-color"];
 	const savedFrameStyles = { html: new Map(), body: new Map() };
 	let framed = false, frameRestoreTimer = null, gradientFrame = null, gradientStartedAt = 0;
 
@@ -678,6 +678,17 @@
 		clearTimeout(frameRestoreTimer);
 		for (const prop of FRAME_HTML_PROPS) savedFrameStyles.html.set(prop, html.style.getPropertyValue(prop));
 		for (const prop of FRAME_BODY_PROPS) savedFrameStyles.body.set(prop, body.style.getPropertyValue(prop));
+		// Many apps paint no background of their own and rely on <body>'s (or
+		// the UA's) background propagating to the canvas. Painting the gradient
+		// on <html> stops that propagation, which would leave the whole page
+		// see-through onto the gradient instead of floating on it. So when the
+		// body's computed background is fully transparent, give it the UA's
+		// canvas color for the duration — `Canvas` follows the app's own
+		// color-scheme, so a dark app stays dark and a light app stays light.
+		let bodyBackground = "";
+		try { bodyBackground = getComputedStyle(body).getPropertyValue("background-color"); } catch { bodyBackground = ""; }
+		const transparent = !bodyBackground || bodyBackground === "transparent" || bodyBackground === "rgba(0, 0, 0, 0)";
+		if (transparent) body.style.setProperty("background-color", "Canvas");
 		html.style.setProperty("background", FRAME_GRADIENT);
 		html.style.setProperty("background-size", "300% 300%");
 		html.style.setProperty("background-position", "0% 50%");
