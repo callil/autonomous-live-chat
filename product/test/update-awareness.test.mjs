@@ -19,6 +19,7 @@ import { createSandbox, parseFragment, runScript } from "../../platform/test/sup
 
 const html = await readFile(new URL("../src/ui/room.html", import.meta.url), "utf8");
 const worker = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
+const client = await readFile(new URL("../src/ui/room.client.js", import.meta.url), "utf8");
 
 const LOADED_SHA = "a".repeat(40);
 const NEWER_SHA = "b".repeat(40);
@@ -102,6 +103,93 @@ test("a garbage or unreachable /version never breaks the page or shows a false a
 		assert.equal(harness.document.getElementById("app-update").hidden, true, "only a valid, different revision is worth announcing");
 		assert.deepEqual(harness.consoleErrors, [], "a version check is best-effort and must never surface as an error");
 	}
+});
+
+/**
+ * PUSH beats poll: the platform records deploy-observed at the exact moment
+ * /version serves the new revision and broadcasts it over the room WebSocket.
+ * The banner must appear the INSTANT that fact arrives — and never before it,
+ * because a banner during edge propagation tells the user to refresh into the
+ * OLD code, which is worse than a late banner.
+ */
+
+/** Boot the full page: inline head script + room client, socket connected, load-time poll settled as current. */
+async function bootPageWithClient() {
+	const harness = bootPage();
+	const versionProbe = harness.fetches.find((request) => /\/version/u.test(request.url));
+	versionProbe.respond({ ok: true, json: async () => ({ sha: LOADED_SHA }) });
+	runScript(client, harness.sandbox);
+	const session = harness.fetches.at(-1);
+	assert.match(session.url, /\/api\/session/u);
+	session.respond({ ok: true, json: async () => ({ id: "s1", name: "Ada" }) });
+	await Promise.resolve();
+	await Promise.resolve();
+	await Promise.resolve();
+	const socket = harness.sockets.at(-1);
+	assert.ok(socket, "the room client connects its socket");
+	socket.emit("open", {});
+	return { harness, socket };
+}
+
+test("a deploy-observed frame renders the update banner instantly, no poll required", async () => {
+	const { harness, socket } = await bootPageWithClient();
+	const notice = harness.document.getElementById("app-update");
+	assert.equal(notice.hidden, true);
+
+	const fetchesBefore = harness.fetches.length;
+	socket.deliver({
+		type: "feed:update",
+		queue: [],
+		items: [{ seq: 9, at: Date.now() + 1_000, kind: "deploy-observed", text: "Deploy observed serving.", refs: { sha: NEWER_SHA } }],
+	});
+	assert.equal(notice.hidden, false, "the banner appears the instant the deploy-observed fact arrives");
+	assert.equal(harness.fetches.length, fetchesBefore, "push needs no /version round-trip");
+});
+
+test("deploy-requested alone never shows the banner", async () => {
+	// Between the merge and the observed deploy, a refresh serves the OLD
+	// code. The banner before deploy-observed would be actively harmful.
+	const { harness, socket } = await bootPageWithClient();
+	socket.deliver({
+		type: "feed:update",
+		queue: [],
+		items: [{ seq: 9, at: Date.now() + 1_000, kind: "deploy-requested", text: "Deploy requested.", refs: { sha: NEWER_SHA } }],
+	});
+	assert.equal(harness.document.getElementById("app-update").hidden, true, "a requested deploy is not a served deploy");
+});
+
+test("historical deploy-observed facts replayed in a snapshot are not news", async () => {
+	// Snapshots and updates carry recent history; a deploy observed BEFORE
+	// this page loaded produced this page (or an older one the load-time poll
+	// already covers) and must not fire the push path.
+	const { harness, socket } = await bootPageWithClient();
+	socket.deliver({
+		type: "room:snapshot",
+		chat: [],
+		feed: { queue: [], items: [{ seq: 3, at: Date.now() - 60_000, kind: "deploy-observed", text: "Deploy observed serving.", refs: { sha: NEWER_SHA } }] },
+	});
+	assert.equal(harness.document.getElementById("app-update").hidden, true, "old facts are history, not an update offer");
+});
+
+test("a reconnect re-checks the deployed revision as the poll fallback", async () => {
+	// Push cannot cover a deploy that happened while the socket was down, so
+	// reconnecting runs the /version check once.
+	const { harness, socket } = await bootPageWithClient();
+
+	socket.close();
+	const sessionRecheck = harness.fetches.at(-1);
+	assert.match(sessionRecheck.url, /\/api\/session/u, "the client validates its session before reconnecting");
+	sessionRecheck.respond({ ok: true, json: async () => ({ id: "s1", name: "Ada" }) });
+	await Promise.resolve();
+	await Promise.resolve();
+	harness.flushTimers(2_000);
+	const reopened = harness.sockets.at(-1);
+	assert.notEqual(reopened, socket, "a new socket is opened");
+	const fetchesBefore = harness.fetches.length;
+	reopened.emit("open", {});
+	assert.ok(harness.fetches.length > fetchesBefore, "reconnecting triggers the fallback version check");
+	await answerVersion(harness, NEWER_SHA);
+	assert.equal(harness.document.getElementById("app-update").hidden, false, "a deploy missed while offline is still surfaced");
 });
 
 test("the error boundary bails to the platform fallback only when the app never boots", () => {
