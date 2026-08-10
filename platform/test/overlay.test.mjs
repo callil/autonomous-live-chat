@@ -151,6 +151,87 @@ test("the overlay publishes its occupied region instead of apps hardcoding it", 
 	assert.match(overlay, /if \(el\.hidden\) continue;/u);
 });
 
+/**
+ * The overlay must actually RUN. The source-grep tests above all passed while
+ * the shipped overlay threw `ReferenceError: Cannot access 'dockEl' before
+ * initialization` on load — a `const` used by mount() was declared below it,
+ * so the whole IIFE died before the transport started and the surface went
+ * silent. Executing the script against a DOM stub is the only assertion that
+ * catches an ordering mistake like that.
+ */
+test("the overlay script executes cleanly and publishes insets on mount", () => {
+	const frames = [];
+	const rafCallbacks = [];
+	const rootStyle = new Map();
+	const dockChildren = [
+		{ hidden: false, getBoundingClientRect: () => ({ left: 1000, top: 660, width: 264, height: 44 }) },
+		{ hidden: true, getBoundingClientRect: () => ({ left: 780, top: 300, width: 480, height: 400 }) },
+	];
+
+	const makeEl = () => ({
+		style: { cssText: "", setProperty() {} },
+		dataset: {},
+		children: [],
+		hidden: false,
+		classList: { add() {}, remove() {}, toggle() {} },
+		setAttribute() {}, removeAttribute() {}, getAttribute: () => null,
+		addEventListener() {}, append() {}, replaceChildren() {}, remove() {},
+		getBoundingClientRect: () => ({ x: 0, y: 0, left: 0, top: 0, width: 0, height: 0 }),
+		attachShadow() {
+			return {
+				innerHTML: "",
+				getElementById: () => makeEl(),
+				querySelector: (selector) => (selector === ".dock" ? { children: dockChildren } : null),
+			};
+		},
+	});
+
+	const documentElement = { style: { setProperty: (name, value) => rootStyle.set(name, value) } };
+	const sandbox = {
+		document: {
+			currentScript: { dataset: { room: "main" } },
+			documentElement,
+			body: makeEl(),
+			createElement: makeEl,
+			createElementNS: makeEl,
+			addEventListener() {},
+			querySelectorAll: () => [],
+			elementFromPoint: () => null,
+		},
+		window: {},
+		innerWidth: 1280,
+		innerHeight: 720,
+		requestAnimationFrame: (fn) => { rafCallbacks.push(fn); return rafCallbacks.length; },
+		addEventListener() {},
+		ResizeObserver: class { observe() {} },
+		WebSocket: class { constructor() { this.readyState = 0; } addEventListener() {} close() {} },
+		fetch: () => new Promise(() => {}),
+		setTimeout: () => 0,
+		clearTimeout() {},
+		getComputedStyle: () => ({ getPropertyValue: () => "" }),
+		crypto: { randomUUID: () => "id" },
+		location: { pathname: "/", protocol: "https:", host: "example.test", origin: "https://example.test" },
+		URL,
+		console: { error: (...args) => frames.push(args) },
+	};
+	sandbox.window = sandbox;
+	sandbox.globalThis = sandbox;
+
+	// Executing the real overlay source: a ReferenceError from declaration order
+	// (or any other load-time throw) surfaces right here.
+	const run = new Function(...Object.keys(sandbox), overlay);
+	assert.doesNotThrow(() => run(...Object.values(sandbox)), "the overlay must not throw while loading");
+
+	// mount() defers measurement to the next frame; run it.
+	assert.equal(rafCallbacks.length, 1, "mount must schedule a measurement");
+	assert.doesNotThrow(() => rafCallbacks[0](), "measuring must not throw");
+
+	// The visible pill (right edge 1264 of a 1280 viewport) is measured; the
+	// hidden panel, which is the wider child, is correctly ignored.
+	assert.equal(rootStyle.get("--app-harness-dock-inset-right"), "280px");
+	assert.equal(rootStyle.get("--app-harness-dock-inset-bottom"), "60px");
+});
+
 test("the example tenant consumes the published inset and hardcodes no dock size", async () => {
 	const css = await readFile(new URL("../../product/src/ui/room.css", import.meta.url), "utf8");
 	assert.match(css, /var\(--app-harness-dock-inset-right, 0px\)/u);
