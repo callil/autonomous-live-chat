@@ -21,16 +21,7 @@
   setTimeout(bail, 8000);
 
   /* Compare the revision that rendered this document with the currently
-     deployed revision. The user chooses when to reload, so drafts are safe.
-
-     PUSH first, poll as fallback: the room client dispatches
-     'ahp:deploy-observed' the instant the platform's deploy-observed fact
-     arrives over the WebSocket (recorded exactly when /version serves the new
-     revision), so the banner appears immediately — never during the edge
-     propagation window, when a refresh would hand back the OLD code. The
-     /version poll remains only for the gaps push cannot cover: initial load
-     of an already-stale page, returning to a backgrounded tab, and WebSocket
-     reconnects ('ahp:version-recheck'). */
+     deployed revision. The user chooses when to reload, so drafts are safe. */
   window.addEventListener('DOMContentLoaded', function () {
     var versionMeta = document.querySelector('meta[name=ahp-version]');
     var loadedSha = versionMeta && versionMeta.content;
@@ -49,9 +40,7 @@
       } catch (_) { /* Connection state already reports outages. */ }
     }
     button.addEventListener('click', function () { location.reload(); });
-    document.addEventListener('ahp:deploy-observed', function (event) {
-      announce(event && event.detail && event.detail.sha);
-    });
+    document.addEventListener('ahp:deploy-observed', function (event) { announce(event && event.detail && event.detail.sha); });
     document.addEventListener('ahp:version-recheck', checkVersion);
     document.addEventListener('visibilitychange', function () { if (!document.hidden) checkVersion(); });
     window.addEventListener('focus', checkVersion);
@@ -63,24 +52,15 @@
 <body>
 <div class="app">
   <header class="topbar">
-    <span class="room-heading">
-      <span class="room-title">The Tinker Tank</span>
-    </span>
+    <span class="room-heading"><span class="room-title">The Tinker Tank</span></span>
     <span class="topbar-status">
-      <span class="app-update" id="app-update" role="status" hidden>
-        <span>A newer version is ready.</span>
-        <button id="app-update-button" type="button">Update</button>
-      </span>
+      <span class="app-update" id="app-update" role="status" hidden><span>A newer version is ready.</span><button id="app-update-button" type="button">Update</button></span>
       <span class="connection"><i class="dot" id="dot"></i><span id="connection">Connecting</span></span>
       <span class="room-meta" id="concurrent-users" aria-live="polite">0 users</span>
-      <button class="account-button" id="account-button" type="button" hidden>Account</button>
+      <button class="account-button" id="account-button" type="button" aria-label="Open account settings" title="Account settings" hidden><span id="account-initials">G</span><img id="account-avatar" alt=""></button>
     </span>
   </header>
-  <main class="columns">
-    <section class="conversation" aria-live="polite" data-persist-messages="true">
-      <div class="messages" id="messages"></div>
-    </section>
-  </main>
+  <main class="columns"><section class="conversation" aria-live="polite" data-persist-messages="true"><div class="messages" id="messages"></div></section></main>
   <form class="composer" id="composer">
     <label class="image-upload-button" for="image-upload" title="Upload image" aria-label="Upload image">＋</label>
     <input id="image-upload" class="visually-hidden" type="file" accept="image/*" aria-label="Upload image">
@@ -88,45 +68,30 @@
     <button class="send" id="send" type="submit" aria-label="Send message">Send</button>
   </form>
 </div>
-<aside class="room-intro" id="room-intro" role="status">
-  <div>
-    <h1>Ask for a change</h1>
-    <p>Chat with the room, or use <strong>Target</strong>, <strong>Comment</strong>, and <strong>Draw</strong> to request a change — the agent builds it, CI verifies it, and the feed tells the truth about every step.</p>
-  </div>
-  <button class="toast-dismiss" id="room-intro-dismiss" type="button" aria-label="Dismiss introduction">×</button>
-</aside>
+<aside class="room-intro" id="room-intro" role="status"><div><h1>Ask for a change</h1><p>Chat with the room, or use <strong>Target</strong>, <strong>Comment</strong>, and <strong>Draw</strong> to request a change — the agent builds it, CI verifies it, and the feed tells the truth about every step.</p></div><button class="toast-dismiss" id="room-intro-dismiss" type="button" aria-label="Dismiss introduction">×</button></aside>
 <script>
 (function () {
-  /* Bump this key only when a major introduction change should be shown again. */
   var dismissalKey = 'ahp:room-intro-dismissed:v1';
   var intro = document.getElementById('room-intro');
   var dismiss = document.getElementById('room-intro-dismiss');
   try { intro.hidden = localStorage.getItem(dismissalKey) === 'true'; } catch (_) {}
-  dismiss.addEventListener('click', function () {
-    try { localStorage.setItem(dismissalKey, 'true'); } catch (_) {}
-  });
+  dismiss.addEventListener('click', function () { try { localStorage.setItem(dismissalKey, 'true'); } catch (_) {} });
 })();
 </script>
 <div class="join-scrim" id="join" hidden>
   <form class="join-card" id="join-form">
     <h2 id="join-title">Join the room</h2>
+    <div class="profile-photo-field">
+      <span class="profile-photo-preview"><span id="profile-initials">G</span><img id="profile-avatar" alt="Profile photo preview"></span>
+      <div><label class="secondary profile-photo-button" for="profile-upload">Upload PFP</label><input id="profile-upload" class="visually-hidden" type="file" accept="image/*"><button class="remove-photo" id="profile-remove" type="button" hidden>Remove photo</button></div>
+    </div>
     <label for="join-name">Display name</label>
     <input id="join-name" maxlength="64" autocomplete="nickname" placeholder="Ada">
-    <div class="account-actions">
-      <button type="button" class="secondary" id="account-cancel" hidden>Cancel</button>
-      <button type="submit" class="primary" id="account-save">Join</button>
-    </div>
+    <div class="account-actions"><button type="button" class="secondary" id="account-cancel" hidden>Cancel</button><button type="submit" class="primary" id="account-save">Join</button></div>
     <p class="request-error" id="join-error" role="alert"></p>
   </form>
 </div>
 <script src="/assets/room.client.js" defer></script>
-<!--
-  THE APP HARNESS OVERLAY. Served by the frozen platform, not by this app:
-  the authoring tools (Target/Comment/Draw), the build queue, the activity
-  feed, and its provenance links all live inside a closed shadow root that
-  this page cannot style, script, or break. This one tag is the entire
-  integration surface — the same tag `npx app-harness init` adds to any app.
--->
 <script src="/overlay.js" defer data-room="main" data-anchor-mode="data-loc" data-repo-url="https://github.com/callil/autonomous-live-chat"></script>
 </body>
 </html>
