@@ -95,7 +95,9 @@ await check("the deployed revision matches the merge under test", async () => {
 	// Skipped locally; in CI this is the assertion that proves the deploy that
 	// just ran is the one being smoked, rather than a stale worker.
 	if (!expectedSha) {
-		results.push({ name: "  (no --sha given; revision match not asserted)", ok: true, ms: 0, note: true });
+		// Not silent: an unasserted revision is a real gap in what this run
+		// proved, and it should read as one rather than as a pass.
+		results.push({ name: "  (no expected revision given — revision match NOT asserted this run)", ok: true, ms: 0, note: true });
 		return;
 	}
 

@@ -108,6 +108,15 @@ deploy. **A post-deploy check that cries wolf gets ignored, which is the same
 outage as having no check at all** — so the waiting lives inside the assertion
 that cares, where the retry and the check see the same samples.
 
+The revision match is also **scoped**: `/version` is served by the product
+worker, which only redeploys on a `product/**` change, so the workflow asserts
+it exactly when the merge touched `product/`. Asserting it after a
+platform-only deploy compares the product's revision against a SHA it was never
+going to serve. When the match is not asserted the run says so explicitly
+rather than quietly reporting a pass — an unasserted check is a gap in what the
+run proved, and it should read like one. Every other check runs either way,
+because a platform deploy can absolutely break the live page.
+
 **Catches:** a deploy that did not land, a stale asset, a binding that is not
 wired, a platform and product that disagree about what is live — none of which
 any working-tree test can see.

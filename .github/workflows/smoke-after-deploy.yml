@@ -41,12 +41,44 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-          # Smoke the checks as they exist at the revision that was deployed.
+          # Smoke the checks as they exist at the revision that was deployed,
+          # with history so the product-diff test below can be computed.
           ref: ${{ github.event.workflow_run.head_sha || inputs.sha || github.sha }}
+          fetch-depth: 2
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           cache: npm
+
+      # /version is served by the PRODUCT worker, and the product worker only
+      # redeploys on a product/** change. So the revision match is meaningful
+      # exactly when this merge touched product/ — asserting it after a
+      # platform-only deploy compares the product's revision against a SHA it
+      # was never going to serve, which is a guaranteed false failure. That is
+      # not a hypothetical: it is what this job did on its first platform-only
+      # merge, with all eight substantive checks passing.
+      #
+      # Everything else the job checks — the page, both deployed scripts, the
+      # send control, a live session — still runs either way, because a
+      # platform deploy absolutely can break them.
+      - name: Decide whether the product revision is expected to have moved
+        id: scope
+        env:
+          REVISION: ${{ github.event.workflow_run.head_sha || inputs.sha || github.sha }}
+        run: |
+          set -uo pipefail
+          if ! changed="$(git diff --name-only "${REVISION}~1" "${REVISION}" 2>/dev/null)"; then
+            echo "expect_sha=" >> "$GITHUB_OUTPUT"
+            echo "Could not compute the diff; not asserting the revision."
+            exit 0
+          fi
+          if echo "$changed" | grep -q '^product/'; then
+            echo "expect_sha=${REVISION}" >> "$GITHUB_OUTPUT"
+            echo "This merge touched product/; the live revision must become ${REVISION}."
+          else
+            echo "expect_sha=" >> "$GITHUB_OUTPUT"
+            echo "No product/ change; the product worker keeps its current revision by design."
+          fi
 
       # The smoke checks are dependency-free by design: they use Node's own
       # fetch and the repo's DOM harness, so there is nothing to install and
@@ -64,7 +96,7 @@ jobs:
         id: smoke
         env:
           SMOKE_URL: ${{ inputs.url || 'https://app-harness-product.coda-a.workers.dev' }}
-          SMOKE_SHA: ${{ github.event.workflow_run.head_sha || inputs.sha }}
+          SMOKE_SHA: ${{ steps.scope.outputs.expect_sha }}
         run: npm run smoke
 
       # Loud on purpose. A broken deploy that only shows up as a grey X on a
