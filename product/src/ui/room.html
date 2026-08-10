@@ -7,6 +7,11 @@
 <meta name="ahp-fallback" content="/fallback">
 <meta name="ahp-version" content="__DEPLOY_SHA__">
 <link rel="stylesheet" href="/assets/room.css">
+<style>
+.message-reactions { display: flex; gap: .25rem; margin-top: .25rem; }
+.message-reaction { padding: .08rem .4rem; border: 1px solid var(--line); border-radius: 999px; background: var(--soft); color: inherit; font: inherit; font-size: .8rem; cursor: pointer; }
+.message-reaction[aria-pressed="true"] { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
+</style>
 <script>
 /* The product error boundary (task 13): if the room bundle fails to load or
    never finishes booting, fall back to the platform's frozen minimal UI. */
@@ -92,6 +97,41 @@
   </form>
 </div>
 <script src="/assets/room.client.js" defer></script>
+<script>
+(function () {
+  var messages = document.getElementById('messages');
+  var reactions = [['👍', 'Like'], ['❤️', 'Love'], ['😂', 'Laugh']];
+  function addReactions(message) {
+    if (message.querySelector('.message-reactions')) return;
+    var body = message.querySelector('.message-body');
+    if (!body) return;
+    var bar = document.createElement('div');
+    bar.className = 'message-reactions';
+    bar.setAttribute('aria-label', 'Reactions');
+    reactions.forEach(function (reaction) {
+      var button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'message-reaction';
+      button.textContent = reaction[0];
+      button.setAttribute('aria-label', reaction[1]);
+      button.setAttribute('aria-pressed', 'false');
+      button.addEventListener('click', function () {
+        button.setAttribute('aria-pressed', button.getAttribute('aria-pressed') === 'true' ? 'false' : 'true');
+      });
+      bar.appendChild(button);
+    });
+    body.appendChild(bar);
+  }
+  new MutationObserver(function (records) {
+    records.forEach(function (record) {
+      record.addedNodes.forEach(function (node) {
+        if (node.nodeType === 1 && node.matches('.message')) addReactions(node);
+      });
+    });
+  }).observe(messages, { childList: true });
+  messages.querySelectorAll('.message').forEach(addReactions);
+})();
+</script>
 <script src="/overlay.js" defer data-room="main" data-anchor-mode="data-loc" data-repo-url="https://github.com/callil/autonomous-live-chat"></script>
 </body>
 </html>
