@@ -11,6 +11,8 @@
 
 	let socket = null, reconnectTimer = null, identity = null, everConnected = false;
 	const renderedChat = new Set();
+	const cachedChat = [];
+	const chatCacheKey = "ahp:room:main:chat";
 	const people = new Map();
 	const pageLoadedAt = Date.now();
 
@@ -47,11 +49,19 @@
 		return `hsl(${(hash >>> 0) % 360} 70% 40%)`;
 	}
 	function initials(value) { return value.trim().split(/\s+/u).slice(0, 2).map((part) => part[0]).join("").slice(0, 2) || "G"; }
+	function chatKey(message) { return message.seq ?? `${message.author}:${message.at}:${message.text}`; }
 
-	function addChat(message) {
-		const key = message.seq ?? `${message.author}:${message.at}:${message.text}`;
+	function cacheChat(message) {
+		cachedChat.push({ seq: message.seq, author: message.author, at: message.at, text: message.text });
+		if (cachedChat.length > 500) cachedChat.splice(0, cachedChat.length - 500);
+		try { localStorage.setItem(chatCacheKey, JSON.stringify(cachedChat)); } catch { /* The live server remains authoritative if storage is unavailable. */ }
+	}
+
+	function addChat(message, cache = true) {
+		const key = chatKey(message);
 		if (renderedChat.has(key)) return;
 		renderedChat.add(key);
+		if (cache) cacheChat(message);
 		rememberPerson(message.author);
 		const row = document.createElement("article");
 		row.className = "message";
@@ -79,6 +89,11 @@
 		body.append(author, text, time); row.append(avatar, body); messages.append(row);
 		row.scrollIntoView({ block: "end", behavior: renderedChat.size > 1 ? "smooth" : "auto" });
 	}
+
+	try {
+		const saved = JSON.parse(localStorage.getItem(chatCacheKey) || "[]");
+		if (Array.isArray(saved)) saved.forEach((message) => { cachedChat.push(message); addChat(message, false); });
+	} catch { /* Ignore damaged or unavailable browser storage. */ }
 
 	function send(payload) { if (socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(payload)); }
 
