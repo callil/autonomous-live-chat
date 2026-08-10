@@ -85,6 +85,83 @@ test("the target description prefers the app's own words over a selector", () =>
 	assert.equal(describeTarget({ tagName: "H1", getAttribute: () => null, textContent: "  The Live Room  " }), "“The Live Room”");
 });
 
+/**
+ * HIT-TESTING. The overlay floats over an app it knows nothing about, so any
+ * region it captures but does not draw is a control the app silently loses.
+ * This actually happened: the dock container was pointer-events:auto, so its
+ * shrink-to-fit box swallowed clicks ~290px wide while the visible pill was a
+ * fraction of that, and the host app's Send button became unclickable.
+ *
+ * These assertions read the overlay's real CSS rules rather than grepping for
+ * a string, so a container that regains pointer-events:auto fails here even if
+ * it is written differently.
+ */
+const overlayCss = overlay.slice(overlay.indexOf("<style>"), overlay.indexOf("</style>"));
+
+/** Every declared value of `property` for `selector`, in source order. */
+function declaredValues(selector, property) {
+	const values = [];
+	const escaped = selector.replaceAll(/[.*+?^${}()|[\]\\]/gu, String.raw`\$&`);
+	const matcher = new RegExp(String.raw`(?:^|[,{}])\s*${escaped}\s*\{([^}]*)\}`, "gmu");
+	for (const match of overlayCss.matchAll(matcher)) {
+		for (const decl of match[1].split(";")) {
+			const [name, value] = decl.split(":");
+			if (name?.trim() === property) values.push(value.trim());
+		}
+	}
+	return values;
+}
+
+test("the overlay never captures clicks outside the controls it actually draws", () => {
+	// The host is transparent, and so is every container inside it. Only leaf
+	// controls opt back in. An app that knows nothing about the overlay keeps
+	// every click that does not land on visible overlay chrome.
+	assert.match(overlay, /host\.style\.cssText = "[^"]*pointer-events:none/u, "the host element must be pointer-transparent");
+
+	for (const container of [".layer", ".dock", ".draw", ".hint"]) {
+		const values = declaredValues(container, "pointer-events");
+		assert.ok(values.length > 0, `${container} must state pointer-events explicitly`);
+		assert.ok(
+			values.every((value) => value === "none"),
+			`${container} is a container: it must never capture clicks (found ${values.join(", ")})`,
+		);
+	}
+
+	// The controls the user can see DO take clicks — otherwise the overlay is
+	// merely broken in the opposite direction.
+	for (const control of [".pill", ".panel", ".composer"]) {
+		assert.deepEqual(declaredValues(control, "pointer-events"), ["auto"], `${control} is a real control and must be clickable`);
+	}
+
+	// The draw layer is the one container that arms itself, and only while the
+	// draw tool is active.
+	assert.deepEqual(declaredValues(".draw.active", "pointer-events"), ["auto"]);
+});
+
+test("the overlay publishes its occupied region instead of apps hardcoding it", () => {
+	// Measured from real layout, not a constant.
+	assert.match(overlay, /getBoundingClientRect\(\)/u);
+	assert.match(overlay, /--app-harness-dock-inset-right/u);
+	assert.match(overlay, /--app-harness-dock-inset-bottom/u);
+	assert.match(overlay, /new ResizeObserver/u, "the published region must track layout changes");
+	assert.match(overlay, /setProperty\(INSET_RIGHT/u);
+	// Measurement walks the dock's visible children, never the pointer-transparent
+	// container, whose box is wider than what is drawn.
+	assert.match(overlay, /for \(const el of dockEl\.children\)/u);
+	assert.match(overlay, /if \(el\.hidden\) continue;/u);
+});
+
+test("the example tenant consumes the published inset and hardcodes no dock size", async () => {
+	const css = await readFile(new URL("../../product/src/ui/room.css", import.meta.url), "utf8");
+	assert.match(css, /var\(--app-harness-dock-inset-right, 0px\)/u);
+	assert.match(css, /var\(--app-harness-dock-inset-bottom, 0px\)/u);
+	// The guess this replaced. Any reappearing magic gutter fails the test.
+	assert.doesNotMatch(css, /padding-right:\s*1[0-9]rem/u, "the app must not guess the dock's width");
+	// Falling back to zero is deliberate: with correct hit-testing the app is
+	// usable with no inset at all, so the variable is polish, never a crutch.
+	assert.doesNotMatch(css, /var\(--app-harness-dock-inset-right,\s*[1-9]/u);
+});
+
 test("tenancy is configuration, and the example room is just an installed tenant", () => {
 	assert.equal(INSTALLED_TENANT.id, "example-room");
 	assert.equal(INSTALLED_TENANT.sourceRoot, "product");

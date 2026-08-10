@@ -37,9 +37,52 @@ The overlay renders into `attachShadow({ mode: "closed" })`.
   coupling we are removing. The shadow root gives the same style isolation
   while keeping same-document hit-testing.
 
-The overlay writes exactly one thing to the host DOM: a
-`data-app-harness-hilite` attribute on the element currently selected, removed
-as soon as the selection clears.
+The overlay writes exactly two things to the host DOM, both additive and both
+ignorable:
+
+1. A `data-app-harness-hilite` attribute on the element currently selected,
+   removed as soon as the selection clears.
+2. Two CSS custom properties on `:root` —
+   `--app-harness-dock-inset-right` and `--app-harness-dock-inset-bottom` —
+   see below.
+
+## The overlay must never swallow a click it does not draw
+
+The overlay floats over the whole viewport, so any region it captures but does
+not paint is a control the app underneath silently loses. This is not
+hypothetical: the dock container was `pointer-events: auto`, and because a
+shrink-to-fit flex column is as wide as its widest child (including the
+sometimes-hidden activity panel), it swallowed clicks across ~290px while the
+visible pill was a fraction of that. The example tenant's Send button sat in
+the invisible remainder and became 100% unclickable — masked for a while
+because Enter-to-send still worked.
+
+The rule, enforced by `platform/test/overlay.test.mjs`: **every container is
+`pointer-events: none`; only the leaf controls the user can actually see take
+`pointer-events: auto`.** This is what makes the overlay safe over a
+third-party app that knows nothing about it — no cooperation required, because
+every click that misses a real control reaches the app.
+
+## Published insets: opt-in polish, never a requirement
+
+An app *may* want its own chrome to sit visually clear of the dock. It must not
+have to know the dock's size to do that — that would be exactly the coupling
+this design removes, and a hardcoded guess is how the bug above was originally
+"fixed".
+
+So the overlay measures its own visible chrome from real layout
+(`getBoundingClientRect` over the dock's shown children, tracked by a
+`ResizeObserver` and republished when the panel toggles) and publishes the
+region it occupies as the two custom properties above. An app opts in with
+nothing more than:
+
+```css
+padding-right: calc(1rem + var(--app-harness-dock-inset-right, 0px));
+```
+
+An app that never reads them is still fully usable, because correct
+hit-testing — not the inset — is what keeps its controls clickable. The
+fallback is `0px` on purpose: the variable is polish, never a crutch.
 
 ## Anchoring degrades; it never requires a build plugin
 

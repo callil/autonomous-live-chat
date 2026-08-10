@@ -18,9 +18,15 @@
  *    projection over the room WebSocket. The app cannot write to it, so an
  *    agent change to the app can neither break nor falsify the status surface.
  *
- * The overlay reads the app's DOM (to hit-test what a requester points at)
- * but never writes to it, and never depends on its structure: anchoring
- * degrades from data-loc refs to structural selectors automatically.
+ * The overlay reads the app's DOM (to hit-test what a requester points at) and
+ * never depends on its structure: anchoring degrades from data-loc refs to
+ * structural selectors automatically. It writes only two additive, ignorable
+ * things back — a highlight attribute on the selected element, and the dock
+ * inset custom properties described further down.
+ *
+ * It also never captures a click it does not draw: every container here is
+ * pointer-events:none and only visible leaf controls opt back in, so an app
+ * that knows nothing about this overlay keeps all of its own controls.
  */
 (() => {
 	"use strict";
@@ -171,13 +177,23 @@
 	.draw.active { pointer-events: auto; cursor: crosshair; }
 	.draw path { fill: none; stroke: #7cc4ff; stroke-width: 3; stroke-linecap: round; stroke-linejoin: round; }
 
+	/* HIT-TESTING CONTRACT. Every container in this overlay is
+	   pointer-events:none; only the leaf controls the user can actually see
+	   take pointer-events:auto. A container that captures clicks swallows them
+	   across its whole box, which is always wider than the visible chrome
+	   inside it (a shrink-to-fit flex column is as wide as its widest child,
+	   including ones that are only sometimes shown). That is invisible to the
+	   eye and fatal to the app underneath: it made the host app's Send button
+	   unclickable across ~290px while the visible pill was ~60px of that.
+	   The app beneath must receive every click that does not land on a real
+	   control, and no app should have to know this overlay exists. */
 	.dock {
-		position: fixed; right: 16px; bottom: 16px; pointer-events: auto;
+		position: fixed; right: 16px; bottom: 16px; pointer-events: none;
 		display: flex; flex-direction: column; align-items: flex-end; gap: 8px;
 		max-height: calc(100vh - 32px);
 	}
 	.pill {
-		display: flex; align-items: center; gap: 4px; padding: 5px;
+		display: flex; align-items: center; gap: 4px; padding: 5px; pointer-events: auto;
 		background: #1f2023; border: 1px solid #35373b; border-radius: 999px;
 		box-shadow: 0 6px 24px rgba(0,0,0,.38);
 	}
@@ -204,7 +220,7 @@
 
 	.panel {
 		width: min(30rem, calc(100vw - 32px)); max-height: min(32rem, calc(100vh - 96px));
-		display: flex; flex-direction: column; overflow: hidden;
+		display: flex; flex-direction: column; overflow: hidden; pointer-events: auto;
 		background: #1f2023; border: 1px solid #35373b; border-radius: 12px;
 		box-shadow: 0 16px 48px rgba(0,0,0,.5);
 	}
@@ -329,8 +345,54 @@
 
 	function mount() {
 		(document.body || document.documentElement).append(host);
+		publishInsets();
 	}
 	if (document.body) mount(); else document.addEventListener("DOMContentLoaded", mount, { once: true });
+
+	// ---- Published insets ----------------------------------------------------
+	//
+	// Correct hit-testing (above) is what makes the overlay safe over an app it
+	// knows nothing about: clicks that miss a control reach the app, so a
+	// third-party app needs no cooperation and no knowledge of this overlay.
+	//
+	// This is the optional polish on top. The overlay MEASURES its own dock from
+	// real layout and publishes the screen region it occupies as CSS custom
+	// properties on :root. An app that wants to keep its own chrome visually
+	// clear of the dock can consume them; an app that ignores them is still
+	// fully usable. Nothing is hardcoded on either side: the app never needs to
+	// know the dock's size, and the overlay never needs to know the app's.
+	const INSET_RIGHT = "--app-harness-dock-inset-right";
+	const INSET_BOTTOM = "--app-harness-dock-inset-bottom";
+	const dockEl = root.querySelector(".dock");
+	let lastRight = -1, lastBottom = -1;
+
+	function publishInsets() {
+		if (!document.documentElement || !dockEl) return;
+		// Measure the visible chrome only — the pill, plus the panel when open.
+		// The dock container itself is pointer-transparent and may be wider than
+		// what is actually drawn, so measuring it would republish the very
+		// over-estimate this change exists to eliminate.
+		let right = 0, bottom = 0;
+		for (const el of dockEl.children) {
+			if (el.hidden) continue;
+			const rect = el.getBoundingClientRect();
+			if (rect.width <= 0 || rect.height <= 0) continue;
+			right = Math.max(right, Math.ceil(innerWidth - rect.left));
+			bottom = Math.max(bottom, Math.ceil(innerHeight - rect.top));
+		}
+		if (right === lastRight && bottom === lastBottom) return;
+		lastRight = right; lastBottom = bottom;
+		const style = document.documentElement.style;
+		style.setProperty(INSET_RIGHT, `${right}px`);
+		style.setProperty(INSET_BOTTOM, `${bottom}px`);
+	}
+
+	if (typeof ResizeObserver === "function" && dockEl) {
+		const observer = new ResizeObserver(() => publishInsets());
+		observer.observe(dockEl);
+		for (const el of dockEl.children) observer.observe(el);
+	}
+	addEventListener("resize", publishInsets);
 
 	// ---- State ---------------------------------------------------------------
 
@@ -341,8 +403,9 @@
 	const pending = new Map();
 	const renderedFeed = new Set();
 	// The overlay marks the app's DOM with ONE attribute while targeting, and
-	// removes it on clear. It is the only write the overlay ever performs, it
-	// is visual-only, and it never persists past a selection.
+	// removes it on clear. It is visual-only and never persists past a
+	// selection. (The only other host-DOM write is the pair of inset custom
+	// properties published above, which are additive and safely ignorable.)
 	const HILITE = "data-app-harness-hilite";
 
 	function setHint(text) {
@@ -560,10 +623,12 @@
 	statusToggle.addEventListener("click", () => {
 		panel.hidden = !panel.hidden;
 		statusToggle.setAttribute("aria-expanded", String(!panel.hidden));
+		publishInsets();
 	});
 	$("panel-close").addEventListener("click", () => {
 		panel.hidden = true;
 		statusToggle.setAttribute("aria-expanded", "false");
+		publishInsets();
 	});
 
 	// ---- Transport -----------------------------------------------------------
