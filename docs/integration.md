@@ -15,7 +15,7 @@ The overlay mounts the authoring tools (Target, Comment, Draw), the build queue,
 
 - Anchors ride the `data-loc` attributes the product build stamps at module init (file:line references into the product source), so a request points at real code, not a brittle selector.
 - Target envelopes contain stable anchors, tag/role, a concise label, same-origin path, and viewport rectangle. They do not contain form values, message bodies, query strings, credentials, or arbitrary DOM serialization.
-- The overlay is pointer-transparent except for its own visible controls, and it publishes its occupied insets so the host can keep its own controls clear.
+- The overlay is pointer-transparent except for its own visible controls, and it never influences the host's layout: the dock is draggable and closeable on the overlay's side, and the host renders exactly as if the overlay were absent.
 - Submission requires a signed session — the same identity the room itself uses.
 
 The legacy `@app-harness/react` workspace package was removed with the rest of the pre-rebuild system; the overlay above is the one supported integration path.

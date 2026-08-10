@@ -4,7 +4,10 @@
  * This script attaches the authoring tools and the status surface (build
  * queue, activity feed, per-item provenance) to an app it knows NOTHING
  * about. It is the drop-in layer `npx app-harness init` installs into a
- * third-party application.
+ * third-party application. Its look and interaction model deliberately copy
+ * benjitaylor/agentation (the toolbar, the hover-highlight preview of the
+ * element you are about to annotate, the label chip, the dark/light theming),
+ * re-implemented in dependency-free vanilla JS inside a closed shadow root.
  *
  * Isolation contract (why this file is safe against an app that agents keep
  * rewriting):
@@ -18,11 +21,20 @@
  *    projection over the room WebSocket. The app cannot write to it, so an
  *    agent change to the app can neither break nor falsify the status surface.
  *
+ * TRUE-OVERLAY contract (hard invariant): the overlay NEVER influences the
+ * app's layout. No inset variables are published, no padding is expected of
+ * the app, and nothing here causes a reflow of the page underneath — the app
+ * renders exactly as if the overlay were absent. Overlap is handled on the
+ * overlay's side: the dock is compact, draggable, and closeable. The one
+ * page-level effect the overlay owns — FRAMED MODE, which insets the page
+ * ~8px onto a slow gradient while the harness is open — is done purely with
+ * a transform (paint, never layout) and is restored verbatim on exit.
+ *
  * The overlay reads the app's DOM (to hit-test what a requester points at) and
  * never depends on its structure: anchoring degrades from data-loc refs to
- * structural selectors automatically. It writes only two additive, ignorable
- * things back — a highlight attribute on the selected element, and the dock
- * inset custom properties described further down.
+ * structural selectors automatically. The only writes to the app's DOM are
+ * visual and reversible: the selection highlight attribute, and the framed-
+ * mode inline transform/background pair, both removed on exit.
  *
  * It also never captures a click it does not draw: every container here is
  * pointer-events:none and only visible leaf controls opt back in, so an app
@@ -42,7 +54,7 @@
 	};
 
 	if (window.__appHarnessOverlay) return;
-	window.__appHarnessOverlay = { version: 1 };
+	window.__appHarnessOverlay = { version: 2 };
 
 	const MAX_SNAPSHOT_CHARS = 4000;
 	const STYLE_KEYS = ["color", "background-color", "font-size", "font-weight", "padding", "margin", "border", "border-radius", "display"];
@@ -51,6 +63,7 @@
 	const STABLE_ATTRIBUTES = ["data-testid", "data-test", "data-qa", "data-component", "id", "name", "aria-label", "role"];
 	const MAX_SELECTOR_DEPTH = 5;
 	const UNSTABLE_CLASS = /^(?:[a-z]+-)?[a-f0-9]{5,}$|^css-|^sc-|^jsx-|^_[A-Za-z0-9]{4,}|^ng-|^svelte-/u;
+	const STORAGE_KEY = "app-harness.dock.v1";
 
 	// ---- Anchoring (mirrors platform/contracts/anchor.js; kept dependency-free
 	// so the overlay stays one standalone file an app can drop in) ------------
@@ -115,6 +128,31 @@
 		return { selector, unique };
 	}
 
+	/**
+	 * A short human-readable ancestor path (agentation's element identification,
+	 * ported minimally): `main > .messages > .message`. Shown on the hover chip
+	 * so the user sees what they are about to target BEFORE clicking, and sent
+	 * on the envelope as an extra structural hint alongside data-loc.
+	 */
+	function readablePath(element, maxDepth = 4) {
+		const parts = [];
+		let current = element;
+		for (let depth = 0; depth < maxDepth && current && current.tagName; depth += 1) {
+			const tag = String(current.tagName).toLowerCase();
+			if (tag === "html" || tag === "body") break;
+			let identity = tag;
+			const id = current.getAttribute?.("id");
+			if (typeof id === "string" && id.length && cssSafe(id)) identity = `#${id}`;
+			else {
+				const classes = stableClasses(current);
+				if (classes.length) identity = `.${classes[0]}`;
+			}
+			parts.unshift(identity);
+			current = current.parentElement;
+		}
+		return parts.join(" > ");
+	}
+
 	function describeTarget(element) {
 		const attribute = stableAttribute(element);
 		if (attribute && attribute.name !== "role") return `${attribute.name}="${attribute.value}"`;
@@ -125,8 +163,10 @@
 
 	/**
 	 * The annotation envelope. `dataLoc` is present only when the app opted
-	 * into stamping; `selector` and `domSnapshot` are ALWAYS present, and are
-	 * what make this work against an app with no build cooperation at all.
+	 * into stamping; `selector`, `selectorPath`, and `domSnapshot` are ALWAYS
+	 * present, and are what make this work against an app with no build
+	 * cooperation at all. Richer anchors mean better builds; the payload is
+	 * stored verbatim by the platform.
 	 */
 	function captureEnvelope(element) {
 		const rect = element.getBoundingClientRect();
@@ -135,16 +175,18 @@
 		for (const key of STYLE_KEYS) computedStyles[key] = computed.getPropertyValue(key);
 		const structural = structuralSelector(element);
 		const dataLoc = element.getAttribute?.("data-loc") || element.closest?.("[data-loc]")?.getAttribute("data-loc") || null;
+		const tag = String(element.tagName || "").toLowerCase();
 		return {
 			// The ledger requires a non-empty dataLoc; the structural selector is
 			// the honest stand-in when the app does not stamp its source.
-			dataLoc: dataLoc || (structural ? `dom:${structural.selector}` : `dom:${String(element.tagName || "node").toLowerCase()}`),
+			dataLoc: dataLoc || (structural ? `dom:${structural.selector}` : `dom:${tag || "node"}`),
 			anchorMode: dataLoc ? "data-loc" : "structural",
 			selector: structural ? structural.selector : null,
 			selectorUnique: structural ? structural.unique : false,
+			selectorPath: readablePath(element),
 			label: describeTarget(element),
-			domSnapshot: element.outerHTML.slice(0, MAX_SNAPSHOT_CHARS),
-			tag: String(element.tagName || "").toLowerCase(),
+			domSnapshot: (typeof element.outerHTML === "string" && element.outerHTML.length ? element.outerHTML : `<${tag || "node"}>`).slice(0, MAX_SNAPSHOT_CHARS),
+			tag,
 			page: location.pathname,
 			rect: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) },
 			computedStyles,
@@ -157,153 +199,275 @@
 	const host = document.createElement("div");
 	host.setAttribute("data-app-harness", "overlay");
 	// The host element itself is positioned; everything inside is shadowed.
+	// It mounts on <html>, NOT <body>: framed mode transforms <body>, and the
+	// overlay's chrome must stay at true viewport scale above the shrunk page.
 	host.style.cssText = "position:fixed;inset:0;z-index:2147483647;pointer-events:none;";
 	// A CLOSED root: the app cannot reach in via host.shadowRoot.
 	const root = host.attachShadow({ mode: "closed" });
 
+	// Small crisp stroke icons in agentation's style (24 viewBox, 1.5 stroke).
+	const ICONS = {
+		target: '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" aria-hidden="true"><path d="M5 4.5 10.2 19l2.1-5.6L18 11.2 5 4.5Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="m13 13.5 4.8 4.8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>',
+		comment: '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" aria-hidden="true"><path d="M12 4.5c-4.1 0-7.5 3-7.5 6.8 0 3.7 3.4 6.7 7.5 6.7.9 0 1.8-.1 2.6-.4l3.6 1.1-.9-3c1.1-1.2 1.8-2.7 1.8-4.4 0-3.8-3.4-6.8-7.1-6.8Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><circle cx="9" cy="11.3" r="1" fill="currentColor"/><circle cx="12" cy="11.3" r="1" fill="currentColor"/><circle cx="15" cy="11.3" r="1" fill="currentColor"/></svg>',
+		draw: '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" aria-hidden="true"><path d="m14.5 5.6 3.9 3.9L8.9 19 4.5 19.5 5 15.1l9.5-9.5Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="m13 7.1 3.9 3.9" stroke="currentColor" stroke-width="1.5"/></svg>',
+		activity: '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" aria-hidden="true"><path d="M11.5 12H5.5M18.5 6.75H5.5M9.25 17.25H5.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="m16 12.75.52 1.22c.29.68.83 1.22 1.51 1.51l1.22.52-1.22.52c-.68.29-1.22.83-1.51 1.51L16 19.25l-.52-1.22c-.29-.68-.83-1.22-1.51-1.51L12.75 16l1.22-.52c.68-.29 1.22-.83 1.51-1.51L16 12.75Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>',
+		close: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" aria-hidden="true"><path d="m6.5 6.5 11 11m0-11-11 11" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>',
+		grip: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" aria-hidden="true"><circle cx="9" cy="6" r="1.3" fill="currentColor"/><circle cx="15" cy="6" r="1.3" fill="currentColor"/><circle cx="9" cy="12" r="1.3" fill="currentColor"/><circle cx="15" cy="12" r="1.3" fill="currentColor"/><circle cx="9" cy="18" r="1.3" fill="currentColor"/><circle cx="15" cy="18" r="1.3" fill="currentColor"/></svg>',
+		sparkle: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" aria-hidden="true"><path d="M12 5.5l1.1 2.9c.4 1 1.2 1.8 2.2 2.2l2.9 1.1-2.9 1.1c-1 .4-1.8 1.2-2.2 2.2L12 18.5l-1.1-2.9c-.4-1-1.2-1.8-2.2-2.2L5.8 12.3l2.9-1.1c1-.4 1.8-1.2 2.2-2.2L12 5.5Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>',
+	};
+
 	root.innerHTML = `
 <style>
 	:host, * { box-sizing: border-box; }
-	/* Every value is stated explicitly: nothing is inherited from the app. */
+	/* Every value is stated explicitly: nothing is inherited from the app.
+	   Visual language ported from agentation's toolbar/popup SCSS: #1a1a1a
+	   surfaces, 44px pill, circular icon buttons, 16px-radius panels, the
+	   accent color tokens, and the hoverHighlightIn/hoverTooltipIn timing. */
 	.layer {
 		position: fixed; inset: 0; pointer-events: none;
-		font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+		--accent: #0088FF; --green: #34C759; --yellow: #FFCC00; --red: #FF383C;
+		--chrome: #1a1a1a; --chrome-hover: rgba(255, 255, 255, 0.12);
+		--ink: rgba(255, 255, 255, 0.85); --ink-dim: rgba(255, 255, 255, 0.5);
+		--ink-faint: rgba(255, 255, 255, 0.35); --ring: rgba(255, 255, 255, 0.08);
+		--well: rgba(255, 255, 255, 0.05); --edge: rgba(255, 255, 255, 0.15);
+		font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
 		font-size: 13px; line-height: 1.45; font-weight: 400; font-style: normal;
 		letter-spacing: normal; text-transform: none; text-align: left;
-		color: #e8eaed; direction: ltr;
-		color-scheme: dark;
+		color: var(--ink); direction: ltr; color-scheme: dark;
 	}
+	@supports (color: color(display-p3 0 0 0)) {
+		.layer { --accent: color(display-p3 0 0.53 1); --green: color(display-p3 0.2 0.78 0.35); }
+	}
+	@media (prefers-color-scheme: light) {
+		.layer {
+			--chrome: #ffffff; --chrome-hover: rgba(0, 0, 0, 0.07);
+			--ink: rgba(0, 0, 0, 0.85); --ink-dim: rgba(0, 0, 0, 0.5);
+			--ink-faint: rgba(0, 0, 0, 0.35); --ring: rgba(0, 0, 0, 0.08);
+			--well: rgba(0, 0, 0, 0.04); --edge: rgba(0, 0, 0, 0.15);
+			color-scheme: light;
+		}
+	}
+
+	@keyframes hoverHighlightIn { from { opacity: 0; transform: scale(0.98); } to { opacity: 1; transform: scale(1); } }
+	@keyframes hoverTooltipIn { from { opacity: 0; transform: scale(0.95) translateY(4px); } to { opacity: 1; transform: scale(1) translateY(0); } }
+	@keyframes popupEnter { from { opacity: 0; transform: scale(0.95) translateY(4px); } to { opacity: 1; transform: scale(1) translateY(0); } }
+	@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+	@media (prefers-reduced-motion: reduce) {
+		.hover-box, .hover-chip, .composer, .panel { animation: none !important; }
+		.dot.busy { animation: none; }
+	}
+
 	.draw { position: fixed; inset: 0; pointer-events: none; }
 	.draw.active { pointer-events: auto; cursor: crosshair; }
-	.draw path { fill: none; stroke: #7cc4ff; stroke-width: 3; stroke-linecap: round; stroke-linejoin: round; }
+	.draw path { fill: none; stroke: var(--accent); stroke-width: 3; stroke-linecap: round; stroke-linejoin: round; }
+
+	/* HOVER PREVIEW (agentation's headline interaction). The whole preview
+	   lane is pointer-events:none: it must never affect hit-testing, so the
+	   element under the cursor is always the app's own. */
+	.hover-box {
+		position: fixed; pointer-events: none !important;
+		border: 2px solid color-mix(in srgb, var(--accent) 50%, transparent);
+		border-radius: 4px;
+		background: color-mix(in srgb, var(--accent) 4%, transparent);
+		will-change: opacity; contain: layout style;
+	}
+	.hover-box.enter { animation: hoverHighlightIn 0.12s ease-out forwards; }
+	.hover-box[hidden] { display: none !important; }
+	.hover-chip {
+		position: fixed; pointer-events: none !important;
+		max-width: 320px; padding: 5px 9px; border-radius: 6px;
+		background: rgba(0, 0, 0, 0.85); color: #fff;
+		font-size: 11px; font-weight: 500; white-space: nowrap; overflow: hidden;
+	}
+	.hover-chip.enter { animation: hoverTooltipIn 0.1s ease-out forwards; }
+	.hover-chip[hidden] { display: none !important; }
+	.chip-path { font-size: 10px; color: rgba(255, 255, 255, 0.6); overflow: hidden; text-overflow: ellipsis; }
+	.chip-path:empty { display: none; }
+	.chip-name { overflow: hidden; text-overflow: ellipsis; }
 
 	/* HIT-TESTING CONTRACT. Every container in this overlay is
 	   pointer-events:none; only the leaf controls the user can actually see
 	   take pointer-events:auto. A container that captures clicks swallows them
-	   across its whole box, which is always wider than the visible chrome
-	   inside it (a shrink-to-fit flex column is as wide as its widest child,
-	   including ones that are only sometimes shown). That is invisible to the
-	   eye and fatal to the app underneath: it made the host app's Send button
-	   unclickable across ~290px while the visible pill was ~60px of that.
-	   The app beneath must receive every click that does not land on a real
-	   control, and no app should have to know this overlay exists. */
+	   across its whole box, which is invisible to the eye and fatal to the app
+	   underneath. The app beneath must receive every click that does not land
+	   on a real control, and no app should have to know this overlay exists. */
 	.dock {
-		position: fixed; right: 16px; bottom: 16px; pointer-events: none;
-		display: flex; flex-direction: column; align-items: flex-end; gap: 8px;
-		max-height: calc(100vh - 32px);
+		position: fixed; right: 20px; bottom: 20px; pointer-events: none;
+		display: flex; flex-direction: column; align-items: flex-end; gap: 10px;
+		max-height: calc(100vh - 40px);
 	}
+	.dock[hidden] { display: none !important; }
+
 	.pill {
-		display: flex; align-items: center; gap: 4px; padding: 5px; pointer-events: auto;
-		background: #1f2023; border: 1px solid #35373b; border-radius: 999px;
-		box-shadow: 0 6px 24px rgba(0,0,0,.38);
+		display: flex; align-items: center; gap: 4px; height: 44px; padding: 5px;
+		pointer-events: auto; cursor: default;
+		background: var(--chrome); border-radius: 22px;
+		box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2), 0 4px 16px rgba(0, 0, 0, 0.1), 0 0 0 1px var(--ring);
 	}
-	.tool {
-		appearance: none; border: 0; background: transparent; color: #c9ccd1;
-		font: inherit; font-size: 12px; padding: 6px 11px; border-radius: 999px;
-		cursor: pointer; white-space: nowrap;
+	.wrap { position: relative; display: flex; align-items: center; justify-content: center; }
+	.tool, .icon-btn, .grip {
+		appearance: none; border: 0; background: transparent; color: var(--ink);
+		display: flex; align-items: center; justify-content: center;
+		width: 34px; height: 34px; border-radius: 50%; cursor: pointer; padding: 0;
+		transition: background-color 0.15s ease, color 0.15s ease, transform 0.1s ease;
 	}
-	.tool:hover { background: #2b2d31; color: #fff; }
-	.tool[aria-pressed="true"] { background: #3b82f6; color: #fff; }
-	.tool:focus-visible { outline: 2px solid #7cc4ff; outline-offset: 1px; }
+	.tool:hover, .icon-btn:hover, .grip:hover { background: var(--chrome-hover); }
+	.tool:active, .icon-btn:active { transform: scale(0.92); }
+	.tool[aria-pressed="true"] {
+		color: var(--accent);
+		background: color-mix(in srgb, var(--accent) 25%, transparent);
+	}
+	.grip { width: 20px; color: var(--ink-faint); cursor: grab; border-radius: 10px; }
+	.grip:active { cursor: grabbing; }
+	:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+	/* Per-control tooltips, agentation-style: dark, above, arrowed, delayed. */
+	.tip {
+		position: absolute; bottom: calc(100% + 14px); left: 50%;
+		transform: translateX(-50%) scale(0.95);
+		padding: 6px 10px; border-radius: 8px; background: #1a1a1a;
+		color: rgba(255, 255, 255, 0.9); font-size: 12px; font-weight: 500;
+		white-space: nowrap; opacity: 0; visibility: hidden;
+		pointer-events: none !important;
+		box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+		transition: opacity 0.135s ease, transform 0.135s ease, visibility 0.135s ease;
+	}
+	.tip::after {
+		content: ""; position: absolute; top: calc(100% - 4px); left: 50%;
+		transform: translateX(-50%) rotate(45deg);
+		width: 8px; height: 8px; background: #1a1a1a; border-radius: 0 0 2px 0;
+	}
+	.wrap:hover .tip, .wrap:focus-within .tip {
+		opacity: 1; visibility: visible; transform: translateX(-50%) scale(1);
+		transition-delay: 0.85s;
+	}
+	.divider { width: 1px; height: 12px; background: var(--edge); margin: 0 3px; pointer-events: none; }
+
 	.status {
-		display: flex; align-items: center; gap: 6px; padding: 6px 11px;
-		border-radius: 999px; cursor: pointer; background: transparent;
-		border: 0; color: #c9ccd1; font: inherit; font-size: 12px;
-		border-left: 1px solid #35373b; margin-left: 2px;
+		appearance: none; border: 0; background: transparent; color: var(--ink);
+		display: flex; align-items: center; gap: 6px; height: 34px; padding: 0 12px;
+		border-radius: 17px; cursor: pointer; font: inherit; font-size: 12px; font-weight: 500;
+		transition: background-color 0.15s ease;
 	}
-	.status:hover { background: #2b2d31; color: #fff; }
-	.dot { width: 7px; height: 7px; border-radius: 50%; background: #4b5563; flex: none; }
-	.dot.busy { background: #f59e0b; animation: pulse 1.6s ease-in-out infinite; }
-	.dot.live { background: #22c55e; }
-	@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
-	@media (prefers-reduced-motion: reduce) { .dot.busy { animation: none; } }
+	.status:hover { background: var(--chrome-hover); }
+	.status[aria-expanded="true"] { background: color-mix(in srgb, var(--accent) 25%, transparent); color: var(--accent); }
+	.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ink-faint); flex: none; transition: background-color 0.3s ease; }
+	.dot.busy { background: var(--yellow); animation: pulse 1.6s ease-in-out infinite; }
+	.dot.live { background: var(--green); }
+	.phase { color: var(--ink-dim); font-weight: 400; }
+	.phase[hidden] { display: none !important; }
+
+	/* The tiny reopen handle when the dock is dismissed. */
+	.handle {
+		position: fixed; right: 20px; bottom: 20px; pointer-events: auto;
+		appearance: none; border: 0; width: 30px; height: 30px; border-radius: 50%;
+		display: flex; align-items: center; justify-content: center; cursor: pointer;
+		background: var(--chrome); color: var(--ink-dim);
+		box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2), 0 0 0 1px var(--ring);
+		transition: color 0.15s ease, transform 0.15s ease;
+	}
+	.handle:hover { color: var(--accent); transform: scale(1.08); }
+	.handle[hidden] { display: none !important; }
 
 	.panel {
-		width: min(30rem, calc(100vw - 32px)); max-height: min(32rem, calc(100vh - 96px));
-		display: flex; flex-direction: column; overflow: hidden; pointer-events: auto;
-		background: #1f2023; border: 1px solid #35373b; border-radius: 12px;
-		box-shadow: 0 16px 48px rgba(0,0,0,.5);
+		width: min(24rem, calc(100vw - 40px)); max-height: min(30rem, calc(100vh - 104px));
+		display: flex; flex-direction: column; overflow: hidden; pointer-events: auto; cursor: default;
+		background: color-mix(in srgb, var(--chrome) 96%, transparent);
+		-webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px);
+		border-radius: 16px;
+		box-shadow: 0 4px 24px rgba(0, 0, 0, 0.3), 0 0 0 1px var(--ring);
+		animation: popupEnter 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
 	}
 	.panel[hidden] { display: none !important; }
 	.panel-head {
 		display: flex; align-items: center; justify-content: space-between; gap: 8px;
-		padding: 10px 12px; border-bottom: 1px solid #303236; flex: none;
+		padding: 12px 10px 10px 16px; flex: none;
 	}
-	.panel-title { font-size: 12px; font-weight: 600; color: #fff; letter-spacing: .01em; }
-	.panel-sub { font-size: 11px; color: #9aa0a6; }
-	.close {
-		appearance: none; border: 0; background: transparent; color: #9aa0a6;
-		font: inherit; font-size: 16px; line-height: 1; cursor: pointer; padding: 4px 6px; border-radius: 6px;
-	}
-	.close:hover { background: #2b2d31; color: #fff; }
-	.panel-body { overflow-y: auto; overscroll-behavior: contain; padding: 4px 0 8px; }
+	.panel-title { font-size: 13px; font-weight: 600; color: var(--ink); letter-spacing: -0.1px; }
+	.panel-sub { font-size: 11px; color: var(--ink-dim); }
+	.icon-btn.small { width: 28px; height: 28px; color: var(--ink-dim); }
+	.icon-btn.small:hover { color: var(--ink); }
+	.panel-body { overflow-y: auto; overscroll-behavior: contain; padding: 0 8px 10px; }
 	.section-label {
-		font-size: 10px; text-transform: uppercase; letter-spacing: .07em; color: #7f858c;
-		padding: 10px 12px 5px; font-weight: 600;
+		font-size: 10px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--ink-faint);
+		padding: 8px 8px 5px; font-weight: 600;
 	}
-	.queue { display: flex; flex-direction: column; gap: 5px; padding: 0 12px 4px; }
+	.queue { display: flex; flex-direction: column; gap: 4px; padding: 0 4px; }
 	.queue-item {
-		display: flex; align-items: center; gap: 8px; padding: 7px 9px;
-		background: #26282c; border: 1px solid #303236; border-radius: 7px; font-size: 12px; color: #d6d9dd;
+		display: flex; align-items: center; gap: 8px; padding: 7px 10px;
+		background: var(--well); border-radius: 8px; font-size: 12px; color: var(--ink);
 	}
-	.queue-empty, .feed-empty { padding: 4px 12px 8px; font-size: 12px; color: #7f858c; }
-	.feed { list-style: none; margin: 0; padding: 0 12px; display: flex; flex-direction: column; }
+	.queue-item .phase-label { color: var(--ink-dim); margin-left: auto; font-size: 11px; }
+	.queue-empty, .feed-empty { padding: 2px 8px 8px; font-size: 12px; color: var(--ink-faint); }
+	.feed { list-style: none; margin: 0; padding: 0 8px; display: flex; flex-direction: column; }
 	.feed li {
-		padding: 7px 0; border-bottom: 1px solid #2a2c30; font-size: 12px; color: #c9ccd1;
-		display: flex; flex-direction: column; gap: 3px;
+		padding: 7px 0; border-bottom: 1px solid var(--well); font-size: 12px; color: var(--ink-dim);
+		display: flex; flex-direction: column; gap: 3px; overflow-wrap: anywhere;
 	}
 	.feed li:last-child { border-bottom: 0; }
-	.feed .kind-run-failed, .feed .kind-run-parked, .feed .kind-liveness-failed { color: #fca5a5; }
-	.feed .kind-run-merged, .feed .kind-deploy-observed { color: #86efac; }
+	.feed .kind-run-failed, .feed .kind-run-parked, .feed .kind-liveness-failed { color: var(--red); }
+	.feed .kind-run-merged, .feed .kind-deploy-observed { color: var(--green); }
 	.prov { display: flex; gap: 8px; flex-wrap: wrap; }
-	.prov a { color: #7cc4ff; text-decoration: none; font-size: 11px; font-variant-numeric: tabular-nums; }
+	.prov a { color: var(--accent); text-decoration: none; font-size: 11px; font-variant-numeric: tabular-nums; }
 	.prov a:hover { text-decoration: underline; }
 
 	.composer {
-		position: fixed; width: 22rem; max-width: calc(100vw - 24px); pointer-events: auto;
-		display: flex; flex-direction: column; gap: 8px; padding: 11px;
-		background: #1f2023; border: 1px solid #3d4045; border-radius: 10px;
-		box-shadow: 0 16px 48px rgba(0,0,0,.5);
+		position: fixed; width: 300px; max-width: calc(100vw - 24px); pointer-events: auto;
+		display: flex; flex-direction: column; gap: 8px; padding: 12px 14px 12px;
+		background: var(--chrome); border-radius: 16px; margin: 0;
+		box-shadow: 0 4px 24px rgba(0, 0, 0, 0.3), 0 0 0 1px var(--ring);
+		animation: popupEnter 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
 	}
 	.composer[hidden] { display: none !important; }
-	.context { font-size: 11px; color: #9aa0a6; word-break: break-word; }
+	.context { font-size: 12px; color: var(--ink-dim); word-break: break-word; }
 	.composer textarea {
-		width: 100%; resize: vertical; min-height: 3.6em; padding: 7px 9px;
-		background: #141517; color: #e8eaed; border: 1px solid #3d4045; border-radius: 7px;
-		font: inherit; font-size: 12px;
+		width: 100%; resize: none; min-height: 3.6em; padding: 8px 10px;
+		background: var(--well); color: var(--ink); border: 1px solid var(--edge); border-radius: 8px;
+		font: inherit; font-size: 13px; outline: none;
+		transition: border-color 0.15s ease;
 	}
-	.composer textarea:focus { outline: 2px solid #3b82f6; outline-offset: -1px; }
-	.actions { display: flex; justify-content: flex-end; gap: 7px; }
+	.composer textarea:focus { border-color: var(--accent); }
+	.composer textarea::placeholder { color: var(--ink-faint); }
+	.actions { display: flex; justify-content: flex-end; gap: 6px; }
 	.btn {
-		appearance: none; font: inherit; font-size: 12px; padding: 6px 13px; border-radius: 7px; cursor: pointer;
-		border: 1px solid #3d4045; background: #26282c; color: #d6d9dd;
+		appearance: none; border: 0; font: inherit; font-size: 12px; font-weight: 500;
+		padding: 7px 14px; border-radius: 16px; cursor: pointer;
+		transition: background-color 0.15s ease, color 0.15s ease, opacity 0.15s ease, filter 0.15s ease;
 	}
-	.btn:hover { background: #303236; }
-	.btn.primary { background: #3b82f6; border-color: #3b82f6; color: #fff; }
-	.btn.primary:hover { background: #2f6fd8; }
-	.btn:disabled { opacity: .55; cursor: default; }
-	.msg { font-size: 11px; color: #fca5a5; margin: 0; min-height: 1em; }
-	.msg.ok { color: #86efac; }
+	.btn.cancel { background: transparent; color: var(--ink-dim); }
+	.btn.cancel:hover { background: var(--chrome-hover); color: var(--ink); }
+	.btn.primary { background: var(--accent); color: #fff; }
+	.btn.primary:hover:not(:disabled) { filter: brightness(0.9); }
+	.btn:disabled { opacity: 0.55; cursor: not-allowed; }
+	.msg { font-size: 11px; color: var(--red); margin: 0; min-height: 1em; }
+	.msg.ok { color: var(--green); }
 
 	.hint {
-		position: fixed; left: 50%; transform: translateX(-50%); top: 14px;
-		background: #1f2023; border: 1px solid #3d4045; border-radius: 999px;
-		padding: 6px 14px; font-size: 12px; color: #d6d9dd; pointer-events: none;
-		box-shadow: 0 6px 24px rgba(0,0,0,.38);
+		position: fixed; left: 50%; transform: translateX(-50%); top: 16px;
+		background: rgba(0, 0, 0, 0.85); border-radius: 999px;
+		padding: 6px 14px; font-size: 12px; color: rgba(255, 255, 255, 0.9);
+		pointer-events: none !important;
+		box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
 	}
 	.hint[hidden] { display: none !important; }
+	.hint .kbd { opacity: 0.5; margin-left: 4px; }
 </style>
 <div class="layer">
 	<svg class="draw" id="draw" aria-hidden="true"></svg>
-	<div class="hint" id="hint" hidden></div>
-	<div class="dock">
+	<div class="hover-box" id="hover-box" hidden></div>
+	<div class="hover-chip" id="hover-chip" hidden>
+		<div class="chip-path" id="chip-path"></div>
+		<div class="chip-name" id="chip-name"></div>
+	</div>
+	<div class="hint" id="hint" hidden role="status"></div>
+	<div class="dock" id="dock">
 		<div class="panel" id="panel" hidden role="dialog" aria-label="App Harness build activity">
 			<div class="panel-head">
 				<div>
 					<div class="panel-title">Build activity</div>
 					<div class="panel-sub" id="panel-sub">Connecting…</div>
 				</div>
-				<button class="close" id="panel-close" type="button" aria-label="Close">×</button>
+				<button class="icon-btn small" id="panel-close" type="button" aria-label="Close activity panel" tabindex="-1">${ICONS.close}</button>
 			</div>
 			<div class="panel-body">
 				<div class="section-label">Queue</div>
@@ -314,123 +478,622 @@
 				<div class="feed-empty" id="feed-empty">No activity yet.</div>
 			</div>
 		</div>
-		<div class="pill">
-			<button class="tool" id="t-target" type="button" aria-pressed="false" title="Point at an element and request a change">Target</button>
-			<button class="tool" id="t-comment" type="button" aria-pressed="false" title="Comment on an element">Comment</button>
-			<button class="tool" id="t-draw" type="button" aria-pressed="false" title="Draw on the page">Draw</button>
-			<button class="status" id="status-toggle" type="button" aria-expanded="false" title="Show build queue and activity">
-				<span class="dot" id="dot"></span><span id="status-text">0 active</span>
-			</button>
+		<div class="pill" id="pill" role="toolbar" aria-label="App Harness tools">
+			<button class="grip" id="grip" type="button" aria-label="Move the toolbar (drag, or press arrow keys)">${ICONS.grip}</button>
+			<span class="wrap">
+				<button class="tool" id="t-target" type="button" aria-pressed="false" aria-label="Target an element and request a change">${ICONS.target}</button>
+				<span class="tip" aria-hidden="true">Target</span>
+			</span>
+			<span class="wrap">
+				<button class="tool" id="t-comment" type="button" aria-pressed="false" aria-label="Comment on an element">${ICONS.comment}</button>
+				<span class="tip" aria-hidden="true">Comment</span>
+			</span>
+			<span class="wrap">
+				<button class="tool" id="t-draw" type="button" aria-pressed="false" aria-label="Draw on the page">${ICONS.draw}</button>
+				<span class="tip" aria-hidden="true">Draw</span>
+			</span>
+			<span class="divider" aria-hidden="true"></span>
+			<span class="wrap">
+				<button class="status" id="status-toggle" type="button" aria-expanded="false" aria-label="Show build queue and activity">
+					<span class="dot" id="dot"></span><span id="status-text">0 active</span><span class="phase" id="status-phase" hidden></span>
+				</button>
+				<span class="tip" aria-hidden="true">Activity</span>
+			</span>
+			<span class="wrap">
+				<button class="icon-btn" id="dock-close" type="button" aria-label="Hide the toolbar">${ICONS.close}</button>
+				<span class="tip" aria-hidden="true">Hide</span>
+			</span>
 		</div>
 	</div>
+	<button class="handle" id="handle" type="button" hidden aria-label="Show the App Harness toolbar">${ICONS.sparkle}</button>
 	<form class="composer" id="composer" hidden>
 		<span class="context" id="context"></span>
 		<textarea id="input" rows="2" aria-label="Describe the change"></textarea>
 		<div class="actions">
-			<button type="button" class="btn" id="cancel">Cancel</button>
+			<button type="button" class="btn cancel" id="cancel">Cancel</button>
 			<button type="submit" class="btn primary" id="submit" title="Submit (Cmd/Ctrl + Enter)">Submit</button>
 		</div>
-		<p class="msg" id="msg"></p>
+		<p class="msg" id="msg" role="status"></p>
 	</form>
 </div>`;
 
 	const $ = (id) => root.getElementById(id);
 	const drawLayer = $("draw"), hint = $("hint");
-	const panel = $("panel"), panelSub = $("panel-sub"), queueEl = $("queue"), queueEmpty = $("queue-empty");
+	const hoverBox = $("hover-box"), hoverChip = $("hover-chip"), chipPath = $("chip-path"), chipName = $("chip-name");
+	const dockEl = $("dock"), pill = $("pill"), grip = $("grip"), dockClose = $("dock-close"), handle = $("handle");
+	const panel = $("panel"), panelClose = $("panel-close"), panelSub = $("panel-sub"), queueEl = $("queue"), queueEmpty = $("queue-empty");
 	const feedEl = $("feed"), feedEmpty = $("feed-empty");
-	const statusToggle = $("status-toggle"), statusText = $("status-text"), dot = $("dot");
+	const statusToggle = $("status-toggle"), statusText = $("status-text"), statusPhase = $("status-phase"), dot = $("dot");
 	const composer = $("composer"), context = $("context"), input = $("input"), msg = $("msg");
 	const submit = $("submit"), cancel = $("cancel");
 	const tools = { target: $("t-target"), comment: $("t-comment"), draw: $("t-draw") };
 
-	// ---- Published insets ----------------------------------------------------
-	//
-	// Correct hit-testing (above) is what makes the overlay safe over an app it
-	// knows nothing about: clicks that miss a control reach the app, so a
-	// third-party app needs no cooperation and no knowledge of this overlay.
-	//
-	// This is the optional polish on top. The overlay MEASURES its own dock from
-	// real layout and publishes the screen region it occupies as CSS custom
-	// properties on :root. An app that wants to keep its own chrome visually
-	// clear of the dock can consume them; an app that ignores them is still
-	// fully usable. Nothing is hardcoded on either side: the app never needs to
-	// know the dock's size, and the overlay never needs to know the app's.
-	//
-	// This block sits ABOVE mount() on purpose: mount() publishes immediately,
-	// and a `const` declared after it would still be in its temporal dead zone,
-	// throwing before the transport below ever starts.
-	const INSET_RIGHT = "--app-harness-dock-inset-right";
-	const INSET_BOTTOM = "--app-harness-dock-inset-bottom";
-	const dockEl = root.querySelector(".dock");
-	let lastRight = -1, lastBottom = -1;
-
-	function publishInsets() {
-		if (!document.documentElement || !dockEl) return;
-		// Measure the visible chrome only — the pill, plus the panel when open.
-		// The dock container itself is pointer-transparent and may be wider than
-		// what is actually drawn, so measuring it would republish the very
-		// over-estimate this change exists to eliminate.
-		let right = 0, bottom = 0;
-		for (const el of dockEl.children) {
-			if (el.hidden) continue;
-			const rect = el.getBoundingClientRect();
-			if (rect.width <= 0 || rect.height <= 0) continue;
-			right = Math.max(right, Math.ceil(innerWidth - rect.left));
-			bottom = Math.max(bottom, Math.ceil(innerHeight - rect.top));
-		}
-		if (right === lastRight && bottom === lastBottom) return;
-		lastRight = right; lastBottom = bottom;
-		const style = document.documentElement.style;
-		style.setProperty(INSET_RIGHT, `${right}px`);
-		style.setProperty(INSET_BOTTOM, `${bottom}px`);
-	}
-
-	if (typeof ResizeObserver === "function" && dockEl) {
-		const observer = new ResizeObserver(() => publishInsets());
-		observer.observe(dockEl);
-		for (const el of dockEl.children) observer.observe(el);
-	}
-	addEventListener("resize", publishInsets);
-
 	function mount() {
-		(document.body || document.documentElement).append(host);
-		// The dock has no layout until it is in the document, so measure on the
-		// next frame. Publishing is best-effort decoration: it must never be able
-		// to take down the transport below it.
-		try { requestAnimationFrame(publishInsets); } catch { /* measured on the next resize instead */ }
+		// On <html>, deliberately outside <body>: body carries the framed-mode
+		// transform and the overlay must not scale with the page. Appending an
+		// element to <html> is valid DOM and renders normally.
+		(document.documentElement || document.body).append(host);
 	}
-	if (document.body) mount(); else document.addEventListener("DOMContentLoaded", mount, { once: true });
+	if (document.documentElement || document.body) mount();
+	else document.addEventListener("DOMContentLoaded", mount, { once: true });
+
+	// ---- Dock position, drag, close (persisted in the overlay's own key) -----
+
+	let dockState = { right: 20, bottom: 20, closed: false };
+	try {
+		const raw = localStorage.getItem(STORAGE_KEY);
+		if (raw) {
+			const parsed = JSON.parse(raw);
+			if (Number.isFinite(parsed.right)) dockState.right = parsed.right;
+			if (Number.isFinite(parsed.bottom)) dockState.bottom = parsed.bottom;
+			dockState.closed = parsed.closed === true;
+		}
+	} catch { /* Private mode or a full store: the defaults are fine. */ }
+
+	function saveDockState() {
+		try { localStorage.setItem(STORAGE_KEY, JSON.stringify(dockState)); } catch { /* best-effort */ }
+	}
+
+	function applyDockState() {
+		const right = Math.max(4, Math.min(dockState.right, innerWidth - 48));
+		const bottom = Math.max(4, Math.min(dockState.bottom, innerHeight - 48));
+		dockState.right = right; dockState.bottom = bottom;
+		dockEl.style.right = `${right}px`;
+		dockEl.style.bottom = `${bottom}px`;
+		handle.style.right = `${right}px`;
+		handle.style.bottom = `${bottom}px`;
+		dockEl.hidden = dockState.closed;
+		handle.hidden = !dockState.closed;
+		// Only the controls that are actually actuatable in the current state
+		// participate in the tab order (agentation's dynamic tabIndex pattern).
+		handle.tabIndex = dockState.closed ? 0 : -1;
+		panelClose.tabIndex = panel.hidden ? -1 : 0;
+	}
+
+	let dragFrom = null;
+	function beginDockDrag(event) {
+		dragFrom = { x: event.clientX, y: event.clientY, right: dockState.right, bottom: dockState.bottom };
+		grip.setPointerCapture?.(event.pointerId);
+		event.preventDefault?.();
+	}
+	function moveDockDrag(event) {
+		if (!dragFrom) return;
+		dockState.right = dragFrom.right - (event.clientX - dragFrom.x);
+		dockState.bottom = dragFrom.bottom - (event.clientY - dragFrom.y);
+		applyDockState();
+	}
+	function endDockDrag() {
+		if (!dragFrom) return;
+		dragFrom = null;
+		saveDockState();
+	}
+	grip.addEventListener("pointerdown", beginDockDrag);
+	// Agentation drags by the toolbar background; the pill's own empty area
+	// works here too, while buttons keep their clicks.
+	pill.addEventListener("pointerdown", (event) => { if (event.target === pill) beginDockDrag(event); });
+	grip.addEventListener("pointermove", moveDockDrag);
+	pill.addEventListener("pointermove", moveDockDrag);
+	grip.addEventListener("pointerup", endDockDrag);
+	pill.addEventListener("pointerup", endDockDrag);
+	grip.addEventListener("pointercancel", endDockDrag);
+	// Keyboard operability for the drag (a deliberate addition beyond
+	// agentation): the focused grip nudges the dock with the arrow keys.
+	grip.addEventListener("keydown", (event) => {
+		const step = event.shiftKey ? 32 : 8;
+		const moves = { ArrowLeft: [step, 0], ArrowRight: [-step, 0], ArrowUp: [0, step], ArrowDown: [0, -step] };
+		const move = moves[event.key];
+		if (!move) return;
+		event.preventDefault();
+		dockState.right += move[0];
+		dockState.bottom += move[1];
+		applyDockState();
+		saveDockState();
+	});
+
+	dockClose.addEventListener("click", () => {
+		dockState.closed = true;
+		hidePanel();
+		clearMode();
+		applyDockState();
+		saveDockState();
+		handle.focus?.();
+	});
+	handle.addEventListener("click", () => {
+		dockState.closed = false;
+		applyDockState();
+		saveDockState();
+		tools.target.focus?.();
+	});
+
+	// ---- Framed mode ---------------------------------------------------------
+	//
+	// While the harness is OPEN (a tool armed, the panel open, or the composer
+	// up) the page insets 8px on every side and floats, 12px-rounded, on a
+	// slow flowing gradient. Implementation constraint: the no-reflow
+	// invariant. transform:scale is paint-only — the app's layout metrics stay
+	// byte-identical — and every inline property this writes is recorded first
+	// and restored verbatim on exit. The gradient is painted as <html>'s own
+	// background (which also stops the app's body background from propagating
+	// to the canvas), so it survives arbitrary app restyling; its motion is a
+	// rAF background-position walk because the overlay never injects
+	// stylesheets into the host document.
+	const FRAME_INSET = 8;
+	const FRAME_RADIUS = 12;
+	const FRAME_GRADIENT = "linear-gradient(130deg, #a5d8ff, #d0bfff, #fcc2d7, #ffe8a1, #b2f2bb, #a5d8ff)";
+	const FRAME_HTML_PROPS = ["background", "background-size", "background-position"];
+	// clip-path (not overflow/border-radius): rounding the page's corners via
+	// clip-path is pure paint — overflow would change body's formatting
+	// context and margin collapsing, which IS a reflow.
+	const FRAME_BODY_PROPS = ["transform", "transform-origin", "transition", "clip-path", "will-change"];
+	const savedFrameStyles = { html: new Map(), body: new Map() };
+	let framed = false, frameRestoreTimer = null, gradientFrame = null, gradientStartedAt = 0;
+
+	function prefersReducedMotion() {
+		try { return typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches; } catch { return false; }
+	}
+
+	function sizeFrame() {
+		const body = document.body;
+		if (!framed || !body) return;
+		// Exact 8px inset on every side: per-axis scale about the center. The
+		// axis factors differ by under a percent — imperceptible, exact inset.
+		const sx = Math.max(0.5, (innerWidth - FRAME_INSET * 2) / Math.max(1, innerWidth));
+		const sy = Math.max(0.5, (innerHeight - FRAME_INSET * 2) / Math.max(1, innerHeight));
+		body.style.setProperty("transform", `scale(${sx.toFixed(5)}, ${sy.toFixed(5)})`);
+		body.style.setProperty("clip-path", `inset(0 round ${FRAME_RADIUS}px)`);
+	}
+
+	function gradientTick() {
+		if (!framed) return;
+		const elapsed = (Date.now() - gradientStartedAt) / 30000; // one slow sweep ≈ 30s
+		const position = (1 - Math.cos(elapsed * Math.PI * 2)) / 2 * 100;
+		document.documentElement.style.setProperty("background-position", `${position.toFixed(2)}% 50%`);
+		gradientFrame = requestAnimationFrame(gradientTick);
+	}
+
+	function enterFrame() {
+		const html = document.documentElement, body = document.body;
+		if (framed || !html || !body) return;
+		framed = true;
+		clearTimeout(frameRestoreTimer);
+		for (const prop of FRAME_HTML_PROPS) savedFrameStyles.html.set(prop, html.style.getPropertyValue(prop));
+		for (const prop of FRAME_BODY_PROPS) savedFrameStyles.body.set(prop, body.style.getPropertyValue(prop));
+		html.style.setProperty("background", FRAME_GRADIENT);
+		html.style.setProperty("background-size", "300% 300%");
+		html.style.setProperty("background-position", "0% 50%");
+		body.style.setProperty("transform-origin", "50% 50%");
+		body.style.setProperty("will-change", "transform");
+		if (!prefersReducedMotion()) {
+			body.style.setProperty("transition", "transform 0.2s ease, clip-path 0.2s ease");
+			gradientStartedAt = Date.now();
+			gradientFrame = requestAnimationFrame(gradientTick);
+		}
+		sizeFrame();
+	}
+
+	function exitFrame() {
+		const html = document.documentElement, body = document.body;
+		if (!framed || !html || !body) return;
+		framed = false;
+		if (gradientFrame !== null) { cancelAnimationFrame(gradientFrame); gradientFrame = null; }
+		const restore = () => {
+			for (const [prop, value] of savedFrameStyles.body) value ? body.style.setProperty(prop, value) : body.style.removeProperty(prop);
+			for (const [prop, value] of savedFrameStyles.html) value ? html.style.setProperty(prop, value) : html.style.removeProperty(prop);
+			savedFrameStyles.body.clear();
+			savedFrameStyles.html.clear();
+		};
+		if (prefersReducedMotion()) { restore(); return; }
+		// Ease back to full size, then restore every touched property verbatim.
+		body.style.setProperty("transform", "scale(1)");
+		body.style.setProperty("clip-path", "inset(0 round 0px)");
+		frameRestoreTimer = setTimeout(restore, 240);
+	}
+
+	function syncFrame() {
+		const open = mode !== null || !panel.hidden || !composer.hidden;
+		if (open) enterFrame(); else exitFrame();
+	}
+
+	addEventListener("resize", () => { applyDockState(); sizeFrame(); });
 
 	// ---- State ---------------------------------------------------------------
 
 	let socket = null, reconnectTimer = null, connected = false;
 	let mode = null, selected = null, selectedEnvelope = null, pendingDraw = null;
 	let drawing = false, draftPoints = [], draftPath = null;
-	let queueCount = 0, optimistic = 0;
+	let optimistic = 0, chipsState = [];
+	let composerInvoker = null;
 	const pending = new Map();
 	const renderedFeed = new Set();
 	// The overlay marks the app's DOM with ONE attribute while targeting, and
 	// removes it on clear. It is visual-only and never persists past a
-	// selection. (The only other host-DOM write is the pair of inset custom
-	// properties published above, which are additive and safely ignorable.)
+	// selection.
 	const HILITE = "data-app-harness-hilite";
 
-	function setHint(text) {
-		hint.textContent = text || "";
+	function setHint(text, kbd) {
+		hint.replaceChildren();
+		if (text) {
+			const label = document.createElement("span");
+			label.textContent = text;
+			hint.append(label);
+			if (kbd) {
+				const key = document.createElement("span");
+				key.className = "kbd";
+				key.textContent = kbd;
+				hint.append(key);
+			}
+		}
 		hint.hidden = !text;
 	}
 
+	// ---- Page cursor while armed --------------------------------------------
+	// Crosshair over the PAGE only: the overlay's own chrome states its own
+	// cursors (default on surfaces, pointer on controls) inside the shadow
+	// root, so the armed-mode cursor never leaks onto the toolbar.
+	let savedPageCursor = null;
+	function setPageCursor(value) {
+		const html = document.documentElement;
+		if (!html) return;
+		if (value) {
+			if (savedPageCursor === null) savedPageCursor = html.style.getPropertyValue("cursor");
+			html.style.setProperty("cursor", value);
+		} else if (savedPageCursor !== null) {
+			savedPageCursor ? html.style.setProperty("cursor", savedPageCursor) : html.style.removeProperty("cursor");
+			savedPageCursor = null;
+		}
+	}
+
+	// ---- Hover preview (agentation's deepElementFromPoint + highlight) -------
+
+	/** Pierce open shadow roots to the deepest element at a point. */
+	function deepElementFromPoint(x, y) {
+		let element = document.elementFromPoint ? document.elementFromPoint(x, y) : null;
+		let guard = 0;
+		while (element && element.shadowRoot && typeof element.shadowRoot.elementFromPoint === "function" && guard < 20) {
+			const deeper = element.shadowRoot.elementFromPoint(x, y);
+			if (!deeper || deeper === element) break;
+			element = deeper;
+			guard += 1;
+		}
+		return element;
+	}
+
+	/** True when the node belongs to the overlay rather than the app (crosses shadow boundaries, agentation's closestCrossingShadow). */
+	function overlayOwns(node) {
+		let current = node;
+		let guard = 0;
+		while (current && guard < 200) {
+			if (current === host) return true;
+			current = current.parentElement
+				|| (current.host ?? null)
+				|| (current.parentNode && current.parentNode.host ? current.parentNode.host : null);
+			guard += 1;
+		}
+		return false;
+	}
+
+	let hoverEl = null;
+
+	function restartAnimation(element) {
+		element.classList.remove("enter");
+		// Force a style flush so re-adding the class restarts the animation.
+		element.getBoundingClientRect();
+		element.classList.add("enter");
+	}
+
+	function positionChip(x, y) {
+		hoverChip.style.left = `${Math.max(8, Math.min(x + 12, innerWidth - 120))}px`;
+		hoverChip.style.top = `${Math.max(8, y - 44)}px`;
+	}
+
+	function syncHoverBox() {
+		if (!hoverEl) return;
+		const rect = hoverEl.getBoundingClientRect();
+		hoverBox.style.left = `${rect.left}px`;
+		hoverBox.style.top = `${rect.top}px`;
+		hoverBox.style.width = `${rect.width}px`;
+		hoverBox.style.height = `${rect.height}px`;
+	}
+
+	function setHover(element, x, y) {
+		if (!element) {
+			hoverEl = null;
+			hoverBox.hidden = true;
+			hoverChip.hidden = true;
+			return;
+		}
+		const changed = element !== hoverEl;
+		hoverEl = element;
+		hoverBox.hidden = false;
+		hoverChip.hidden = false;
+		syncHoverBox();
+		positionChip(x, y);
+		if (changed) {
+			const dataLoc = element.getAttribute?.("data-loc") || element.closest?.("[data-loc]")?.getAttribute("data-loc") || null;
+			chipPath.textContent = readablePath(element);
+			chipName.textContent = dataLoc ? `${describeTarget(element)} · ${dataLoc}` : describeTarget(element);
+			restartAnimation(hoverBox);
+			restartAnimation(hoverChip);
+		}
+	}
+
+	document.addEventListener("mousemove", (event) => {
+		if (mode !== "target" && mode !== "comment") return;
+		if (!composer.hidden) return;
+		const raw = (typeof event.composedPath === "function" ? event.composedPath()[0] : null) || event.target;
+		if (raw && overlayOwns(raw)) { setHover(null); return; }
+		const element = deepElementFromPoint(event.clientX, event.clientY);
+		if (!element || overlayOwns(element)) { setHover(null); return; }
+		setHover(element, event.clientX, event.clientY);
+	});
+	// The highlight tracks its element through scroll and resize, like
+	// agentation's live-tracked boxes.
+	addEventListener("scroll", () => { if (hoverEl) syncHoverBox(); }, true);
+	addEventListener("resize", () => { if (hoverEl) syncHoverBox(); });
+
+	function clearSelection() {
+		if (selected) selected.removeAttribute(HILITE);
+		selected = null; selectedEnvelope = null; pendingDraw = null;
+	}
+
+	function setMode(next) {
+		mode = mode === next ? null : next;
+		for (const [name, button] of Object.entries(tools)) button.setAttribute("aria-pressed", String(mode === name));
+		drawLayer.classList.toggle("active", mode === "draw");
+		setPageCursor(mode === "target" || mode === "comment" ? "crosshair" : null);
+		if (mode !== "target" && mode !== "comment") setHover(null);
+		setHint(mode === "target" ? "Click any element to request a change"
+			: mode === "comment" ? "Click any element to comment"
+			: mode === "draw" ? "Draw to annotate an area" : "", mode ? "esc" : "");
+		if (mode === null) clearSelection(); else closeComposer(false);
+		syncFrame();
+	}
+	function clearMode() {
+		mode = null;
+		for (const button of Object.values(tools)) button.setAttribute("aria-pressed", "false");
+		drawLayer.classList.remove("active");
+		setPageCursor(null);
+		setHover(null);
+		setHint("");
+		syncFrame();
+	}
+
+	function positionComposer(anchor) {
+		composer.style.left = "0px"; composer.style.top = "0px";
+		const rect = composer.getBoundingClientRect();
+		let left = anchor.x + GUTTER, top = anchor.y + GUTTER;
+		if (left + rect.width > innerWidth - GUTTER) left = anchor.x - rect.width - GUTTER;
+		if (top + rect.height > innerHeight - GUTTER) top = anchor.y - rect.height - GUTTER;
+		composer.style.left = `${Math.max(GUTTER, Math.min(left, innerWidth - rect.width - GUTTER))}px`;
+		composer.style.top = `${Math.max(GUTTER, Math.min(top, innerHeight - rect.height - GUTTER))}px`;
+	}
+
+	function openComposer(kind, label, anchor) {
+		composer.dataset.kind = kind;
+		context.textContent = label;
+		input.value = "";
+		input.placeholder = kind === "comment" ? "Leave feedback…" : "Request a change…";
+		msg.textContent = ""; msg.classList.remove("ok");
+		submit.disabled = false; composer.hidden = false;
+		positionComposer(anchor);
+		setHover(null);
+		input.focus();
+		syncFrame();
+	}
+
+	function closeComposer(clear = true) {
+		const wasOpen = !composer.hidden;
+		composer.hidden = true;
+		if (clear) clearSelection();
+		// Focus returns to the control that started the flow (agentation's
+		// popup contract), so keyboard users are never dropped on <body>.
+		if (wasOpen && composerInvoker) { composerInvoker.focus?.(); composerInvoker = null; }
+		syncFrame();
+	}
+
+	// Capture-phase, so the app never sees the click that selects an element.
+	document.addEventListener("click", (event) => {
+		if (mode !== "target" && mode !== "comment") return;
+		const raw = (typeof event.composedPath === "function" ? event.composedPath()[0] : null) || event.target;
+		if (raw && overlayOwns(raw)) return;
+		// Prefer the live hover preview's element — it is exactly what the
+		// highlight told the user they were about to pick — then fall back to
+		// a fresh hit-test at the click point.
+		const element = (hoverEl && !overlayOwns(hoverEl) ? hoverEl : null)
+			|| deepElementFromPoint(event.clientX, event.clientY)
+			|| (raw && raw.tagName && !overlayOwns(raw) ? raw : null);
+		if (!element || !element.tagName || typeof element.getBoundingClientRect !== "function") return;
+		event.preventDefault?.();
+		event.stopImmediatePropagation?.();
+		clearSelection();
+		selected = element;
+		element.setAttribute(HILITE, "");
+		selectedEnvelope = captureEnvelope(element);
+		const kind = mode;
+		composerInvoker = tools[kind] ?? null;
+		clearMode();
+		openComposer(kind, `${kind === "comment" ? "Comment on" : "Target"}: ${selectedEnvelope.label}`, { x: event.clientX, y: event.clientY });
+	}, true);
+
+	const pathFor = (points) => points.map((p, i) => `${i ? "L" : "M"}${p.x} ${p.y}`).join(" ");
+
+	drawLayer.addEventListener("pointermove", (event) => {
+		// The draw-mode affordance: the same chip, telling the user what a drag
+		// will do, following the crosshair.
+		if (mode !== "draw" || drawing) return;
+		chipPath.textContent = "";
+		chipName.textContent = "Draw to annotate an area";
+		hoverChip.hidden = false;
+		positionChip(event.clientX, event.clientY);
+	});
+
+	drawLayer.addEventListener("pointerdown", (event) => {
+		if (mode !== "draw") return;
+		event.preventDefault();
+		drawing = true;
+		hoverChip.hidden = true;
+		draftPoints = [{ x: Math.round(event.clientX), y: Math.round(event.clientY) }];
+		draftPath = document.createElementNS("http://www.w3.org/2000/svg", "path");
+		drawLayer.append(draftPath);
+		drawLayer.setPointerCapture?.(event.pointerId);
+	});
+	drawLayer.addEventListener("pointermove", (event) => {
+		if (!drawing) return;
+		const point = { x: Math.round(event.clientX), y: Math.round(event.clientY) };
+		const previous = draftPoints[draftPoints.length - 1];
+		if (Math.hypot(point.x - previous.x, point.y - previous.y) < MIN_DRAW_DISTANCE) return;
+		draftPoints.push(point);
+		draftPath.setAttribute("d", pathFor(draftPoints));
+	});
+	function finishDraw(event) {
+		if (!drawing) return;
+		drawing = false;
+		drawLayer.releasePointerCapture?.(event.pointerId);
+		if (draftPoints.length < 2) { draftPath?.remove(); draftPath = null; return; }
+		// Hit-test the app UNDER the overlay: the draw layer stops capturing
+		// first, so elementFromPoint returns the app's element.
+		drawLayer.classList.remove("active");
+		const under = deepElementFromPoint(draftPoints[0].x, draftPoints[0].y);
+		const target = under && !overlayOwns(under) ? under : document.body;
+		pendingDraw = { points: draftPoints.slice(0, 600), envelope: captureEnvelope(target), path: draftPath };
+		draftPath = null;
+		composerInvoker = tools.draw;
+		clearMode();
+		openComposer("draw", `Drawing over: ${pendingDraw.envelope.label}`, draftPoints[draftPoints.length - 1]);
+	}
+	drawLayer.addEventListener("pointerup", finishDraw);
+	drawLayer.addEventListener("pointercancel", finishDraw);
+
+	// ---- Submission ----------------------------------------------------------
+
+	composer.addEventListener("submit", (event) => {
+		event.preventDefault();
+		const kind = composer.dataset.kind;
+		const text = input.value.trim();
+		if (kind !== "draw" && !text.length) {
+			msg.textContent = kind === "comment" ? "Write a brief comment." : "Describe the change you want.";
+			return;
+		}
+		if (!socket || socket.readyState !== WebSocket.OPEN) {
+			msg.textContent = "Not connected yet.";
+			return;
+		}
+		let annotation;
+		if (kind === "draw") {
+			if (!pendingDraw) { msg.textContent = "Draw something first."; return; }
+			annotation = { kind: "draw", ...pendingDraw.envelope, drawingPoints: pendingDraw.points };
+		} else if (kind === "comment") {
+			annotation = { kind: "comment", ...selectedEnvelope, text };
+		} else {
+			annotation = { kind: "target", ...selectedEnvelope };
+		}
+		send({ type: `request:${kind}`, text, annotation, clientSubmissionId: crypto.randomUUID() });
+		optimistic += 1; updateStatus();
+		submit.disabled = true; msg.classList.remove("ok"); msg.textContent = "Submitting…";
+	});
+
+	input.addEventListener("keydown", (event) => {
+		if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+			event.preventDefault();
+			if (!submit.disabled) composer.requestSubmit();
+		}
+	});
+	cancel.addEventListener("click", () => { pendingDraw?.path?.remove(); closeComposer(); });
+
+	// Escape peels exactly ONE layer per press, innermost first (agentation's
+	// ordering): composer → in-progress stroke → armed mode → open panel.
+	document.addEventListener("keydown", (event) => {
+		if (event.key !== "Escape") return;
+		if (!composer.hidden) {
+			pendingDraw?.path?.remove();
+			closeComposer();
+			return;
+		}
+		if (drawing) {
+			// Abandon an in-progress draw: without this, the pointer capture
+			// still delivers the eventual pointerup to finishDraw, which
+			// reopens the composer for the stroke the user just cancelled.
+			drawing = false; draftPath?.remove(); draftPath = null; draftPoints = [];
+			return;
+		}
+		if (mode !== null) {
+			clearMode();
+			clearSelection();
+			return;
+		}
+		if (!panel.hidden) {
+			hidePanel();
+			statusToggle.focus?.();
+		}
+	});
+	for (const [name, button] of Object.entries(tools)) button.addEventListener("click", () => setMode(name));
+
+	function showPanel() {
+		panel.hidden = false;
+		statusToggle.setAttribute("aria-expanded", "true");
+		panelClose.tabIndex = 0;
+		syncFrame();
+	}
+	function hidePanel() {
+		panel.hidden = true;
+		statusToggle.setAttribute("aria-expanded", "false");
+		panelClose.tabIndex = -1;
+		syncFrame();
+	}
+	statusToggle.addEventListener("click", () => { panel.hidden ? showPanel() : hidePanel(); });
+	panelClose.addEventListener("click", () => { hidePanel(); statusToggle.focus?.(); });
+
+	// ---- Status / queue / feed (projection of durable facts only) -----------
+
+	function activeCount() {
+		// Chips are the platform's truth: one per intent, from acceptance to
+		// its terminal fact. Locally pending acks fill the sub-second gap
+		// before the ack's own chip arrives, deduped by intent id.
+		const chipIntents = new Set(chipsState.map((chip) => chip.intentId));
+		let waiting = 0;
+		for (const intentId of pending.keys()) if (!chipIntents.has(intentId)) waiting += 1;
+		return chipsState.length + waiting + optimistic;
+	}
+
 	function updateStatus() {
-		const count = queueCount + pending.size + optimistic;
+		const count = activeCount();
 		statusText.textContent = `${count} active`;
+		// Surface the pipeline phase right on the dock: the user watches their
+		// change progress instead of wondering whether it landed.
+		const phased = chipsState.find((chip) => chip.phase === "building" || chip.phase === "verifying" || chip.phase === "deploying") ?? chipsState[0];
+		statusPhase.textContent = phased ? `· ${phased.phase}` : "";
+		statusPhase.hidden = !phased;
 		dot.className = `dot${count > 0 ? " busy" : connected ? " live" : ""}`;
 		panelSub.textContent = connected ? (count > 0 ? `${count} in flight` : "Idle · connected") : "Reconnecting…";
 	}
 
 	function renderQueue(chips) {
 		queueEl.replaceChildren();
-		const list = chips || [];
-		for (const chip of list) {
+		chipsState = Array.isArray(chips) ? chips : [];
+		for (const chip of chipsState) {
+			// The platform's chip is now the whole pipeline truth; a chip that
+			// arrives means any local pending entry for it is superseded.
+			if (chip.intentId) pending.delete(chip.intentId);
 			const row = document.createElement("div");
 			row.className = "queue-item";
 			const d = document.createElement("span");
@@ -438,10 +1101,15 @@
 			const label = document.createElement("span");
 			label.textContent = chip.label;
 			row.append(d, label);
+			if (chip.phase && chip.phase !== "queued") {
+				const phase = document.createElement("span");
+				phase.className = "phase-label";
+				phase.textContent = chip.phase;
+				row.append(phase);
+			}
 			queueEl.append(row);
 		}
-		queueEmpty.hidden = list.length > 0;
-		queueCount = list.length;
+		queueEmpty.hidden = chipsState.length > 0;
 		updateStatus();
 	}
 
@@ -484,163 +1152,6 @@
 		}
 		feedEmpty.hidden = feedEl.children.length > 0;
 	}
-
-	// ---- Targeting -----------------------------------------------------------
-
-	/** True when the node belongs to the overlay rather than the app. */
-	const isOverlay = (node) => node === host || (node instanceof Node && host.contains(node));
-
-	function clearSelection() {
-		if (selected) selected.removeAttribute(HILITE);
-		selected = null; selectedEnvelope = null; pendingDraw = null;
-	}
-
-	function setMode(next) {
-		mode = mode === next ? null : next;
-		for (const [name, button] of Object.entries(tools)) button.setAttribute("aria-pressed", String(mode === name));
-		drawLayer.classList.toggle("active", mode === "draw");
-		setHint(mode === "target" ? "Click any element to request a change · Esc to cancel"
-			: mode === "comment" ? "Click any element to comment · Esc to cancel"
-			: mode === "draw" ? "Drag to draw · Esc to cancel" : "");
-		if (mode === null) clearSelection(); else closeComposer(false);
-	}
-	const clearMode = () => { mode = null; for (const b of Object.values(tools)) b.setAttribute("aria-pressed", "false"); drawLayer.classList.remove("active"); setHint(""); };
-
-	function positionComposer(anchor) {
-		composer.style.left = "0px"; composer.style.top = "0px";
-		const rect = composer.getBoundingClientRect();
-		let left = anchor.x + GUTTER, top = anchor.y + GUTTER;
-		if (left + rect.width > innerWidth - GUTTER) left = anchor.x - rect.width - GUTTER;
-		if (top + rect.height > innerHeight - GUTTER) top = anchor.y - rect.height - GUTTER;
-		composer.style.left = `${Math.max(GUTTER, Math.min(left, innerWidth - rect.width - GUTTER))}px`;
-		composer.style.top = `${Math.max(GUTTER, Math.min(top, innerHeight - rect.height - GUTTER))}px`;
-	}
-
-	function openComposer(kind, label, anchor) {
-		composer.dataset.kind = kind;
-		context.textContent = label;
-		input.value = "";
-		input.placeholder = kind === "comment" ? "Leave feedback…" : "Request a change…";
-		msg.textContent = ""; msg.classList.remove("ok");
-		submit.disabled = false; composer.hidden = false;
-		positionComposer(anchor); input.focus();
-	}
-
-	function closeComposer(clear = true) {
-		composer.hidden = true;
-		if (clear) clearSelection();
-	}
-
-	// Capture-phase, so the app never sees the click that selects an element.
-	document.addEventListener("click", (event) => {
-		if (mode !== "target" && mode !== "comment") return;
-		if (isOverlay(event.target)) return;
-		const element = event.target;
-		if (!(element instanceof Element)) return;
-		event.preventDefault();
-		event.stopImmediatePropagation();
-		clearSelection();
-		selected = element;
-		element.setAttribute(HILITE, "");
-		selectedEnvelope = captureEnvelope(element);
-		const kind = mode;
-		clearMode();
-		openComposer(kind, `${kind === "comment" ? "Comment on" : "Target"}: ${selectedEnvelope.label}`, { x: event.clientX, y: event.clientY });
-	}, true);
-
-	const pathFor = (points) => points.map((p, i) => `${i ? "L" : "M"}${p.x} ${p.y}`).join(" ");
-
-	drawLayer.addEventListener("pointerdown", (event) => {
-		if (mode !== "draw") return;
-		event.preventDefault();
-		drawing = true;
-		draftPoints = [{ x: Math.round(event.clientX), y: Math.round(event.clientY) }];
-		draftPath = document.createElementNS("http://www.w3.org/2000/svg", "path");
-		drawLayer.append(draftPath);
-		drawLayer.setPointerCapture(event.pointerId);
-	});
-	drawLayer.addEventListener("pointermove", (event) => {
-		if (!drawing) return;
-		const point = { x: Math.round(event.clientX), y: Math.round(event.clientY) };
-		const previous = draftPoints[draftPoints.length - 1];
-		if (Math.hypot(point.x - previous.x, point.y - previous.y) < MIN_DRAW_DISTANCE) return;
-		draftPoints.push(point);
-		draftPath.setAttribute("d", pathFor(draftPoints));
-	});
-	function finishDraw(event) {
-		if (!drawing) return;
-		drawing = false;
-		drawLayer.releasePointerCapture?.(event.pointerId);
-		if (draftPoints.length < 2) { draftPath?.remove(); draftPath = null; return; }
-		// Hit-test the app UNDER the overlay: the host is pointer-transparent at
-		// this moment, so elementFromPoint returns the app's element.
-		drawLayer.classList.remove("active");
-		const under = document.elementFromPoint(draftPoints[0].x, draftPoints[0].y);
-		const target = under && !isOverlay(under) ? under : document.body;
-		pendingDraw = { points: draftPoints.slice(0, 600), envelope: captureEnvelope(target), path: draftPath };
-		draftPath = null;
-		clearMode();
-		openComposer("draw", `Drawing over: ${pendingDraw.envelope.label}`, draftPoints[draftPoints.length - 1]);
-	}
-	drawLayer.addEventListener("pointerup", finishDraw);
-	drawLayer.addEventListener("pointercancel", finishDraw);
-
-	// ---- Submission ----------------------------------------------------------
-
-	composer.addEventListener("submit", (event) => {
-		event.preventDefault();
-		const kind = composer.dataset.kind;
-		const text = input.value.trim();
-		if (kind !== "draw" && !text.length) {
-			msg.textContent = kind === "comment" ? "Write a brief comment." : "Describe the change you want.";
-			return;
-		}
-		if (!socket || socket.readyState !== WebSocket.OPEN) {
-			msg.textContent = "Not connected yet.";
-			return;
-		}
-		let annotation;
-		if (kind === "draw") {
-			if (!pendingDraw) { msg.textContent = "Draw something first."; return; }
-			annotation = { kind: "draw", ...pendingDraw.envelope, drawingPoints: pendingDraw.points };
-		} else if (kind === "comment") {
-			annotation = { kind: "comment", ...selectedEnvelope, text };
-		} else {
-			annotation = { kind: "target", ...selectedEnvelope };
-		}
-		send({ type: `request:${kind}`, text, annotation, clientSubmissionId: crypto.randomUUID() });
-		optimistic += 1; updateStatus();
-		submit.disabled = true; msg.classList.remove("ok"); msg.textContent = "Submitting…";
-	});
-
-	input.addEventListener("keydown", (event) => {
-		if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
-			event.preventDefault();
-			if (!submit.disabled) composer.requestSubmit();
-		}
-	});
-	cancel.addEventListener("click", () => { pendingDraw?.path?.remove(); closeComposer(); });
-	document.addEventListener("keydown", (event) => {
-		if (event.key !== "Escape") return;
-		if (!composer.hidden) { pendingDraw?.path?.remove(); closeComposer(); }
-		// Abandon an in-progress draw too: without this, the pointer capture
-		// still delivers the eventual pointerup to finishDraw, which reopens
-		// the composer for the stroke the user just cancelled.
-		if (drawing) { drawing = false; draftPath?.remove(); draftPath = null; draftPoints = []; }
-		clearMode();
-	});
-	for (const [name, button] of Object.entries(tools)) button.addEventListener("click", () => setMode(name));
-
-	statusToggle.addEventListener("click", () => {
-		panel.hidden = !panel.hidden;
-		statusToggle.setAttribute("aria-expanded", String(!panel.hidden));
-		publishInsets();
-	});
-	$("panel-close").addEventListener("click", () => {
-		panel.hidden = true;
-		statusToggle.setAttribute("aria-expanded", "false");
-		publishInsets();
-	});
 
 	// ---- Transport -----------------------------------------------------------
 
@@ -699,6 +1210,7 @@
 			.then((response) => { if (response.ok) connect(); else setTimeout(start, 4000); })
 			.catch(() => setTimeout(start, 4000));
 	}
+	applyDockState();
 	start();
 	updateStatus();
 })();
