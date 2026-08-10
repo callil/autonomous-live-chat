@@ -54,7 +54,6 @@
 
 	function cacheChat(message) {
 		cachedChat.push({ seq: message.seq, author: message.author, at: message.at, text: message.text });
-		if (cachedChat.length > 500) cachedChat.splice(0, cachedChat.length - 500);
 		try { localStorage.setItem(chatCacheKey, JSON.stringify(cachedChat)); } catch { /* The live server remains authoritative if storage is unavailable. */ }
 	}
 
