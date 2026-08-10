@@ -86,37 +86,26 @@ test("the target description prefers the app's own words over a selector", () =>
 });
 
 /**
- * HIT-TESTING and INSET PUBLISHING used to be asserted here by parsing the
- * overlay's CSS text and grepping its source. Both are now asserted where they
- * are observable: overlay-boot.test.mjs mounts the real overlay, applies its
- * real stylesheet to the real tree, and hit-tests geometrically — so a
- * container that regains pointer-events:auto, or a measurement that starts
- * counting hidden chrome, fails on behaviour rather than on wording.
+ * HIT-TESTING is asserted where it is observable: overlay-boot.test.mjs mounts
+ * the real overlay, applies its real stylesheet to the real tree, and
+ * hit-tests geometrically — so a container that regains pointer-events:auto
+ * fails on behaviour rather than on wording.
  *
  * The defect that motivated it: the dock container was pointer-events:auto, so
  * its shrink-to-fit box swallowed clicks ~290px wide while the visible pill was
  * a fraction of that, and the host app's Send button became unclickable.
  */
 
-/**
- * Executing the overlay — that it loads, mounts, starts its transport, keeps
- * its controls hittable, and publishes measured insets — is covered in
- * overlay-boot.test.mjs against a shared DOM harness. That layer replaced the
- * bespoke inline stub that used to live here, and it is what catches the
- * `ReferenceError: Cannot access 'dockEl' before initialization` class of
- * outage that every grep in this file sailed straight through.
- */
-
-test("the example tenant consumes the published inset instead of guessing the dock's size", async () => {
-	// A tenant-integration invariant, not a style rule: the app reads whatever
-	// the overlay measures, and defaults to zero. It may restyle freely; it may
-	// not hardcode a gutter, because the dock's real size is not knowable here.
+test("TRUE OVERLAY: the overlay publishes no layout contract for the app to consume", async () => {
+	// The overlay floats ABOVE the app with zero layout influence — the app
+	// renders exactly as if the overlay were absent. The old inset-variable
+	// mechanism (the overlay published its dock's occupied region and the app
+	// padded around it) made the page reflow around harness chrome, which is
+	// exactly what a drop-in overlay must never do. Overlap is handled on the
+	// overlay's side: the dock is draggable and closeable.
+	assert.doesNotMatch(overlay, /--app-harness-dock-inset/u, "the overlay must not publish inset hints");
 	const css = await readFile(new URL("../../product/src/ui/room.css", import.meta.url), "utf8");
-	assert.match(css, /var\(--app-harness-dock-inset-right, 0px\)/u);
-	assert.match(css, /var\(--app-harness-dock-inset-bottom, 0px\)/u);
-	// Falling back to zero is deliberate: with correct hit-testing the app is
-	// usable with no inset at all, so the variable is polish, never a crutch.
-	assert.doesNotMatch(css, /var\(--app-harness-dock-inset-right,\s*[1-9]/u, "the fallback must be zero, not a guessed gutter");
+	assert.doesNotMatch(css, /--app-harness-dock-inset/u, "no app should pad itself around harness chrome");
 });
 
 test("tenancy is configuration, and the example room is just an installed tenant", () => {

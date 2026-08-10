@@ -37,14 +37,15 @@ The overlay renders into `attachShadow({ mode: "closed" })`.
   coupling we are removing. The shadow root gives the same style isolation
   while keeping same-document hit-testing.
 
-The overlay writes exactly two things to the host DOM, both additive and both
-ignorable:
+The overlay writes exactly two things to the host DOM, both visual-only and
+both fully reversible:
 
 1. A `data-app-harness-hilite` attribute on the element currently selected,
    removed as soon as the selection clears.
-2. Two CSS custom properties on `:root` —
-   `--app-harness-dock-inset-right` and `--app-harness-dock-inset-bottom` —
-   see below.
+2. Framed-mode inline styles while the harness is open — a paint-only
+   `transform`/`clip-path` pair on `<body>` and a gradient background on
+   `<html>` — every touched property recorded first and restored verbatim on
+   exit. See "A true overlay" below.
 
 ## The overlay must never swallow a click it does not draw
 
@@ -63,26 +64,33 @@ The rule, enforced by `platform/test/overlay.test.mjs`: **every container is
 third-party app that knows nothing about it — no cooperation required, because
 every click that misses a real control reaches the app.
 
-## Published insets: opt-in polish, never a requirement
+## A true overlay: the app never reflows around harness chrome
 
-An app *may* want its own chrome to sit visually clear of the dock. It must not
-have to know the dock's size to do that — that would be exactly the coupling
-this design removes, and a hardcoded guess is how the bug above was originally
-"fixed".
+**Hard invariant.** The overlay floats above the page with zero layout
+influence — the app renders exactly as if the overlay were absent. No inset
+variables are published, no padding is expected of the app, and nothing the
+overlay does may cause a reflow of the page underneath. (An earlier design
+published `--app-harness-dock-inset-*` custom properties for the app to pad
+around; that made the page visibly shift when the panel opened, and it assumed
+the one thing a drop-in overlay must never assume — that the app knows the
+overlay exists. Both halves are gone.)
 
-So the overlay measures its own visible chrome from real layout
-(`getBoundingClientRect` over the dock's shown children, tracked by a
-`ResizeObserver` and republished when the panel toggles) and publishes the
-region it occupies as the two custom properties above. An app opts in with
-nothing more than:
+Overlap is handled entirely on the overlay's side, agentation-style:
 
-```css
-padding-right: calc(1rem + var(--app-harness-dock-inset-right, 0px));
-```
+- the dock is compact, **draggable** (pointer or arrow keys on its grip), and
+  **closeable** (a minimal handle remains to reopen it); position and
+  open/closed state persist in the overlay's own localStorage key;
+- the panel opens upward, overlapping content, and the pointer-events
+  discipline above means the app keeps every click that misses real chrome.
 
-An app that never reads them is still fully usable, because correct
-hit-testing — not the inset — is what keeps its controls clickable. The
-fallback is `0px` on purpose: the variable is polish, never a crutch.
+**Framed mode** is the one page-level effect the overlay owns: while the
+harness is open (a tool armed, the panel or composer up) the page insets 8px
+on every side — a paint-only `transform: scale` about the center, with
+`clip-path` rounding the corners 12px — and floats on a slow flowing gradient
+painted as `<html>`'s own background. Transforms do not trigger reflow, so the
+app's layout metrics stay byte-identical (asserted by the boot tests); every
+inline property written is recorded first and restored verbatim on exit, and
+`prefers-reduced-motion` freezes both the gradient and the transition.
 
 ## Anchoring degrades; it never requires a build plugin
 

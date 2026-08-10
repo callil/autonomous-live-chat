@@ -949,7 +949,7 @@ export class RoomDO extends DurableObject<RuntimeEnv> {
 		const start = Math.max(1, lastSeq - SNAPSHOT_EVENT_COUNT + 1);
 		const events = await this.loadEvents(start, lastSeq);
 		const control = await this.loadControl();
-		const feed = renderFeed({ events, queue: await this.loadQueue(), now, frozen: control.frozen });
+		const feed = renderFeed({ events, queue: await this.loadQueue(), intents: await this.loadIntents(), now, frozen: control.frozen });
 		const chat = events.filter((event) => event.kind === "utterance").map((event) => ({ author: event.payload.author, text: event.payload.text, seq: event.seq, at: event.at }));
 		return { type: "room:snapshot", chat, feed, hasMore: start > 1, beforeSeq: start };
 	}
@@ -964,7 +964,10 @@ export class RoomDO extends DurableObject<RuntimeEnv> {
 		const events = await this.loadEvents(Math.max(1, lastSeq - BROADCAST_FEED_ITEMS + 1), lastSeq);
 		this.broadcast({
 			type: "feed:update",
-			queue: renderQueueChips(queue, now),
+			// Chips project INTENTS, not just queued runs: an accepted request
+			// stays visibly active through building/verifying/deploying until
+			// its terminal fact (live/parked/withdrawn) lands.
+			queue: renderQueueChips(queue, now, await this.loadIntents()),
 			frozen: control.frozen,
 			items: events.map(renderFeedItem).filter((item) => item !== null),
 		});

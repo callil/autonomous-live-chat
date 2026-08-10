@@ -74,8 +74,8 @@ owns, lift the real one.
 the behavioural halves of `ui-contract` and `update-awareness`. These execute
 the actual client scripts against the shared DOM harness in
 `platform/test/support/dom.mjs` and assert they **run**: no throw on mount, the
-transport starts, controls exist and are pointer-hittable, insets publish, a
-message round-trips.
+transport starts, controls exist and are pointer-hittable, the page never
+reflows around overlay chrome, a message round-trips.
 
 **Catches:** failure mode A. A load-time throw, a transport that never starts,
 a control that is drawn but unclickable, a room that renders but is inert.

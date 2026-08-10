@@ -44,18 +44,13 @@ body { margin: 0; font: 15px/1.5 ui-sans-serif, system-ui, sans-serif; height: 1
 .message .message-text { overflow-wrap: anywhere; }
 .message time { font-size: .72rem; opacity: .55; margin-left: .4rem; }
 
-/* Keep the composer's controls clear of the overlay's bottom-right dock.
-   The overlay measures its own dock and publishes the region it occupies as
-   --app-harness-dock-inset-right / --app-harness-dock-inset-bottom on :root;
-   we just consume it, so no guess about the dock's size lives here. The
-   fallback is only for the case where no overlay is present at all.
-
-   This is cosmetic, not load-bearing: the overlay is pointer-transparent
-   outside its actual controls, so Send stays clickable even if these
-   properties never arrive. */
+/* The App Harness overlay is a TRUE overlay: it floats above this page and
+   never influences its layout — this app styles itself as if the overlay did
+   not exist. (The overlay's dock is draggable and closeable on its own side,
+   and it is pointer-transparent outside its visible controls, so Send stays
+   clickable regardless of where the dock sits.) */
 .composer {
   display: flex; gap: .5rem; padding: .6rem 1rem .8rem; border-top: 1px solid var(--line);
-  padding-right: calc(1rem + var(--app-harness-dock-inset-right, 0px));
 }
 .composer textarea { flex: 1; resize: none; font: inherit; padding: .5rem .7rem; border-radius: .6rem; border: 1px solid var(--line); background: transparent; color: inherit; }
 button.send, button.primary { font: inherit; padding: .5rem .9rem; border-radius: .6rem; border: 0; background: var(--accent); color: #fff; cursor: pointer; }
@@ -75,12 +70,4 @@ button:disabled { opacity: .5; cursor: default; }
 .join-card h2 { margin: 0 0 .25rem; font-size: 1rem; }
 .join-card input { font: inherit; padding: .5rem .6rem; border-radius: .5rem; border: 1px solid var(--line); background: transparent; color: inherit; }
 
-/* Narrow viewports: the dock has nowhere to sit beside the composer, so give
-   it room underneath instead — again from the overlay's own measurement. */
-@media (max-width: 52rem) {
-  .composer {
-    padding-right: 1rem;
-    padding-bottom: calc(.8rem + var(--app-harness-dock-inset-bottom, 0px));
-  }
-}
 @media (max-width: 34rem) { .app-update > span { display: none; } .topbar-status { gap: .4rem; } }

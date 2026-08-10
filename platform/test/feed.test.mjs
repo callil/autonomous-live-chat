@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { formatEta, renderFeed, renderFeedItem, renderQueueChips } from "../contracts/feed.js";
 import { createLedgerEvent, LEDGER_EVENT_KINDS } from "../contracts/ledger.js";
-import { enqueueRun, startRun } from "../contracts/queue.js";
+import { beginDeploying, beginVerifying, completeRun, enqueueRun, startRun } from "../contracts/queue.js";
 
 test("every ledger event kind has a deterministic template", () => {
 	const payloads = {
@@ -73,17 +73,53 @@ test("the projection is deterministic: same facts in, same feed out", () => {
 	assert.match(first.items[0].text, /darken the header/u, "user speech is quoted verbatim");
 });
 
-test("honest queue chips embed position and a moving ETA", () => {
+test("pipeline chips stay active through every phase, not just while queued", () => {
+	// The outage this guards: the projection only rendered QUEUED runs, so the
+	// dock's active count dropped to zero the moment a build started — minutes
+	// before the change was live — and read as "your edit never landed".
 	let queue = enqueueRun([], { runId: "run-1", intentId: "intent-1", enqueuedAt: 0 });
 	queue = startRun(queue, { runId: "run-1", attemptId: "attempt-1", startedAt: 0 });
 	queue = enqueueRun(queue, { runId: "run-2", intentId: "intent-2", enqueuedAt: 1 });
+
 	const chips = renderQueueChips(queue, 60_000);
-	assert.equal(chips.length, 1);
-	assert.equal(chips[0].position, 1);
-	assert.equal(chips[0].label, "#1 in line · ~4 min");
-	const feed = renderFeed({ events: [], queue, now: 60_000, frozen: true });
-	assert.deepEqual(feed.queue, chips, "queue state is embedded in the feed payload");
+	assert.equal(chips.length, 2, "a running build is still active work");
+	const running = chips.find((chip) => chip.runId === "run-1");
+	assert.equal(running.phase, "building", "the running phase is named for the user");
+	const queued = chips.find((chip) => chip.runId === "run-2");
+	assert.equal(queued.phase, "queued");
+	assert.equal(queued.position, 1);
+	assert.equal(queued.label, "#1 in line · ~4 min");
+
+	// verifying and deploying remain visibly active until the terminal fact.
+	queue = beginVerifying(queue, { runId: "run-1", attemptId: "attempt-1", at: 61_000, verification: { branch: "room/1/a", prNumber: 7, headSha: "a".repeat(40) } });
+	assert.equal(renderQueueChips(queue, 62_000).find((chip) => chip.runId === "run-1").phase, "verifying");
+	queue = beginDeploying(queue, { runId: "run-1", attemptId: "attempt-1", at: 63_000, mergeSha: "b".repeat(40) });
+	assert.equal(renderQueueChips(queue, 64_000).find((chip) => chip.runId === "run-1").phase, "deploying");
+
+	// Terminal states leave the pipeline.
+	queue = completeRun(queue, { runId: "run-1", attemptId: "attempt-1", state: "merged", at: 65_000 });
+	const after = renderQueueChips(queue, 66_000);
+	assert.equal(after.find((chip) => chip.runId === "run-1"), undefined, "a merged (live) run is no longer active");
+
+	const feed = renderFeed({ events: [], queue, now: 66_000, frozen: true });
+	assert.deepEqual(feed.queue, after, "pipeline state is embedded in the feed payload");
 	assert.equal(feed.frozen, true);
+});
+
+test("accepted intents count as active before their run exists, and reviewing intents after a failed one", () => {
+	const openIntent = { id: "intent-open", state: "open", openedAt: 5 };
+	const reviewing = { id: "intent-review", state: "dispatched", openedAt: 1 };
+	const done = { id: "intent-done", state: "live", openedAt: 0 };
+	const chips = renderQueueChips([], 10_000, [openIntent, reviewing, done]);
+	assert.equal(chips.length, 2, "terminal intents are not active");
+	assert.equal(chips.find((chip) => chip.intentId === "intent-open").phase, "accepted", "a request is visibly active from the moment it is accepted");
+	assert.equal(chips.find((chip) => chip.intentId === "intent-review").phase, "reviewing", "a dispatched intent between runs stays honestly visible");
+
+	// An intent whose run is in the queue projects through the run, never twice.
+	let queue = enqueueRun([], { runId: "run-9", intentId: "intent-open", enqueuedAt: 0 });
+	const merged = renderQueueChips(queue, 10_000, [openIntent]);
+	assert.equal(merged.length, 1, "one chip per intent");
+	assert.equal(merged[0].phase, "queued");
 });
 
 test("ETAs read as estimates", () => {

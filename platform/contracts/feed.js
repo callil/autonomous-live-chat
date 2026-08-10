@@ -1,4 +1,5 @@
 import { queueStatus } from "./queue.js";
+import { TERMINAL_INTENT_STATES } from "./intent.js";
 
 /**
  * The feed is a PURE PROJECTION of durable ledger facts through fixed
@@ -83,22 +84,64 @@ export function renderFeedItem(event) {
 	return { seq: event.seq, at: event.at, kind: event.kind, text, ...(refs === null ? {} : { refs }) };
 }
 
-/** Honest queue chips: position and moving ETA for every queued run. */
-export function renderQueueChips(queue, now) {
-	return queueStatus(queue, now).map((entry) => ({
-		...entry,
-		label: `#${entry.position} in line · ${formatEta(entry.etaMs)}`,
-	}));
+/**
+ * Pipeline chips: one chip per intent that is ACTIVE from the user's point of
+ * view — accepted and not yet terminal (live, parked, or withdrawn). The
+ * previous projection only rendered QUEUED runs, so the "N active" indicator
+ * dropped to zero the moment a build started running/verifying/deploying,
+ * minutes before the change was actually live. That read as "your edit never
+ * landed". Every phase of the pipeline is now visible:
+ *
+ *   accepted -> queued (#N in line · ETA) -> building -> verifying ->
+ *   deploying -> (terminal: live / parked / withdrawn)
+ *
+ * plus the honest in-between: a dispatched intent whose run failed and is
+ * waiting on the Doctor's retry-or-park verdict stays visible as "reviewing".
+ * Deterministic in (queue, intents, now).
+ */
+const RUN_PHASES = {
+	queued: "queued",
+	running: "building",
+	verifying: "verifying",
+	deploying: "deploying",
+};
+
+export function renderQueueChips(queue, now, intents = []) {
+	const chips = [];
+	const intentsWithRuns = new Set();
+	const positions = new Map(queueStatus(queue, now).map((entry) => [entry.runId, entry]));
+	for (const run of queue) {
+		if (!(run.state in RUN_PHASES)) continue;
+		intentsWithRuns.add(run.intentId);
+		const phase = RUN_PHASES[run.state];
+		if (run.state === "queued") {
+			const status = positions.get(run.runId);
+			chips.push({ ...status, phase, label: `#${status.position} in line · ${formatEta(status.etaMs)}` });
+		} else {
+			chips.push({ runId: run.runId, intentId: run.intentId, phase, label: phase });
+		}
+	}
+	// Intents that are active but have no live run: accepted requests still
+	// inside their cancel window (or awaiting admission), and dispatched
+	// intents between a failed run and the Doctor's verdict.
+	const waiting = intents
+		.filter((intent) => !TERMINAL_INTENT_STATES.has(intent.state) && !intentsWithRuns.has(intent.id))
+		.sort((a, b) => a.openedAt - b.openedAt);
+	for (const intent of waiting) {
+		if (intent.state === "open") chips.push({ intentId: intent.id, phase: "accepted", label: "accepted" });
+		else chips.push({ intentId: intent.id, phase: "reviewing", label: "build failed — deciding next step" });
+	}
+	return chips;
 }
 
 /**
- * The complete feed payload: projected items plus embedded honest queue
+ * The complete feed payload: projected items plus embedded honest pipeline
  * state. Deterministic in its inputs.
  */
-export function renderFeed({ events, queue, now, frozen }) {
+export function renderFeed({ events, queue, intents = [], now, frozen }) {
 	return {
 		items: events.map(renderFeedItem).filter((item) => item !== null),
-		queue: renderQueueChips(queue, now),
+		queue: renderQueueChips(queue, now, intents),
 		frozen: frozen === true,
 	};
 }
