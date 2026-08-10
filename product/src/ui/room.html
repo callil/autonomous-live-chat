@@ -8,9 +8,12 @@
 <meta name="ahp-version" content="__DEPLOY_SHA__">
 <link rel="stylesheet" href="/assets/room.css">
 <style>
-.message-reactions { display: flex; gap: .25rem; margin-top: .25rem; }
-.message-reaction { padding: .08rem .4rem; border: 1px solid var(--line); border-radius: 999px; background: var(--soft); color: inherit; font: inherit; font-size: .8rem; cursor: pointer; }
-.message-reaction[aria-pressed="true"] { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.message { position: relative; }
+.message-reactions { position: absolute; z-index: 2; left: .5rem; bottom: -.8rem; display: flex; gap: .15rem; padding: .25rem; border: 1px solid var(--line); border-radius: 999px; background: var(--panel, white); box-shadow: 0 .25rem 1rem rgba(0, 0, 0, .16); opacity: 0; visibility: hidden; transform: translateY(.25rem) scale(.96); transition: opacity .12s ease, transform .12s ease, visibility .12s; }
+.message-reactions[data-open="true"] { opacity: 1; visibility: visible; transform: none; }
+.message-reaction { min-width: 2rem; padding: .22rem .38rem; border: 0; border-radius: 999px; background: transparent; color: inherit; font: inherit; font-size: 1.15rem; line-height: 1.35; cursor: pointer; transition: background .12s ease, transform .12s ease; }
+.message-reaction:hover { background: var(--soft); transform: scale(1.15); }
+.message-reaction[aria-pressed="true"] { background: color-mix(in srgb, var(--accent) 18%, transparent); }
 </style>
 <script>
 /* The product error boundary (task 13): if the room bundle fails to load or
@@ -101,6 +104,11 @@
 (function () {
   var messages = document.getElementById('messages');
   var reactions = [['👍', 'Like'], ['❤️', 'Love'], ['😂', 'Laugh']];
+  function closeReactions(except) {
+    messages.querySelectorAll('.message-reactions[data-open="true"]').forEach(function (bar) {
+      if (bar !== except) bar.setAttribute('data-open', 'false');
+    });
+  }
   function addReactions(message) {
     if (message.querySelector('.message-reactions')) return;
     var body = message.querySelector('.message-body');
@@ -108,6 +116,7 @@
     var bar = document.createElement('div');
     bar.className = 'message-reactions';
     bar.setAttribute('aria-label', 'Reactions');
+    bar.setAttribute('data-open', 'false');
     reactions.forEach(function (reaction) {
       var button = document.createElement('button');
       button.type = 'button';
@@ -115,13 +124,27 @@
       button.textContent = reaction[0];
       button.setAttribute('aria-label', reaction[1]);
       button.setAttribute('aria-pressed', 'false');
-      button.addEventListener('click', function () {
+      button.addEventListener('click', function (event) {
+        event.stopPropagation();
         button.setAttribute('aria-pressed', button.getAttribute('aria-pressed') === 'true' ? 'false' : 'true');
+        bar.setAttribute('data-open', 'false');
       });
       bar.appendChild(button);
     });
+    function openPicker(event) {
+      event.preventDefault();
+      event.stopPropagation();
+      var opening = bar.getAttribute('data-open') !== 'true';
+      closeReactions(opening ? bar : null);
+      bar.setAttribute('data-open', opening ? 'true' : 'false');
+      if (opening) bar.querySelector('button').focus();
+    }
+    message.addEventListener('contextmenu', openPicker);
+    message.addEventListener('dblclick', openPicker);
     body.appendChild(bar);
   }
+  document.addEventListener('click', function () { closeReactions(); });
+  document.addEventListener('keydown', function (event) { if (event.key === 'Escape') closeReactions(); });
   new MutationObserver(function (records) {
     records.forEach(function (record) {
       record.addedNodes.forEach(function (node) {
