@@ -247,16 +247,78 @@ test("an intent in verifying or deploying still renders as ACTIVE until its term
 	// The exact complaint: the count dropped to zero while a change was still
 	// verifying/deploying, minutes before it was actually live.
 	socket.deliver({ type: "feed:update", queue: [{ intentId: "intent-1", runId: "run-1", phase: "verifying", label: "verifying" }], items: [] });
-	assert.match(root.getElementById("status-text").textContent, /^1 /u, "a verifying intent counts as active");
+	assert.equal(root.getElementById("status-text").textContent, "1", "a verifying intent counts as active — and the dock stays terse: just the number");
+	assert.equal(root.getElementById("dot").dataset.phase, "verifying", "the dot's color carries the phase");
+	assert.match(root.getElementById("status-tip").textContent, /1 verifying/u, "the words live in the tooltip");
 
 	socket.deliver({ type: "feed:update", queue: [{ intentId: "intent-1", runId: "run-1", phase: "deploying", label: "deploying" }], items: [] });
-	assert.match(root.getElementById("status-text").textContent, /^1 /u, "a deploying intent counts as active");
+	assert.equal(root.getElementById("status-text").textContent, "1", "a deploying intent counts as active");
+	assert.equal(root.getElementById("dot").dataset.phase, "deploying");
 	const rows = root.getElementById("queue").children;
 	assert.equal(rows.length, 1, "the pipeline entry is visible in the queue panel");
 
 	// Only the terminal fact empties the pipeline.
 	socket.deliver({ type: "feed:update", queue: [], items: [] });
-	assert.match(root.getElementById("status-text").textContent, /^0 /u, "the count returns to zero only when the pipeline is empty");
+	assert.equal(root.getElementById("status-text").textContent, "0", "the count returns to zero only when the pipeline is empty");
+	assert.equal(root.getElementById("dot").dataset.phase, undefined, "no phase color when nothing is active");
+});
+
+test("first run: the toolbar presents itself top center and open; a placed position wins forever after", () => {
+	// Fresh visitor, nothing persisted: top center, open, framed.
+	const fresh = bootOverlay();
+	const dock = fresh.root.getElementById("dock");
+	assert.equal(dock.hidden, false, "the toolbar starts open");
+	assert.ok(dock.classNames().includes("down"), "top placement: the panel would open downward");
+	assert.equal(dock.style.top, "20px", "flush to a 20px top margin");
+	// Centered: the pill's midpoint sits at the viewport's midpoint (1280 wide,
+	// 300 fallback pill width → a 490px offset puts the center at 640).
+	assert.equal(dock.style.right, "490px", "horizontally centered");
+
+	// A returning user's dragged position beats the default.
+	const harness = createSandbox({ scriptDataset: { room: "main" } });
+	harness.sandbox.localStorage.setItem("app-harness.dock.v1", JSON.stringify({ right: 20, bottom: 20 }));
+	runScript(overlay, harness.sandbox);
+	const placedHost = harness.documentElement.children.find((child) => child.getAttribute?.("data-app-harness") === "overlay");
+	const placedDock = placedHost.closedShadowRoot.getElementById("dock");
+	assert.equal(placedDock.style.bottom, "20px", "the persisted position wins on return visits");
+	assert.ok(!placedDock.classNames().includes("down"), "a bottom-right dock keeps its upward flyout");
+});
+
+test("closing attaches a flush tab to the nearest edge; it drags along edges and springs back out on click", () => {
+	const harness = bootOverlay();
+	const { root, sandbox } = harness;
+	const handle = root.getElementById("handle");
+	const dock = root.getElementById("dock");
+
+	// The dock starts top-center, so the nearest edge is the TOP: the closed
+	// state is a flat tab flush against it, not a floating shape.
+	root.getElementById("dock-close").dispatchEvent({ type: "click" });
+	assert.equal(dock.hidden, true);
+	assert.equal(handle.hidden, false);
+	assert.equal(handle.dataset.edge, "top", "the tab attaches to the edge nearest the pill");
+	assert.equal(handle.style.top, "0px", "flush against the edge, protruding into the page");
+
+	// Dragging along the edge moves the tab; persisted on release.
+	handle.dispatchEvent({ type: "pointerdown", target: handle, clientX: 640, clientY: 8, pointerId: 1 });
+	handle.dispatchEvent({ type: "pointermove", target: handle, clientX: 400, clientY: 8, buttons: 1, pointerId: 1 });
+	assert.equal(handle.dataset.edge, "top", "small moves stay on the same edge");
+	assert.equal(handle.style.left, `${400 - 28}px`, "the tab follows the pointer along its edge");
+
+	// Dragging toward another edge re-attaches flush there.
+	handle.dispatchEvent({ type: "pointermove", target: handle, clientX: 12, clientY: 300, buttons: 1, pointerId: 1 });
+	assert.equal(handle.dataset.edge, "left", "crossing the page re-attaches to the new nearest edge");
+	assert.equal(handle.style.left, "0px", "flush against the new edge");
+	handle.dispatchEvent({ type: "pointerup", target: handle, pointerId: 1 });
+	assert.equal(JSON.parse(sandbox.localStorage.getItem("app-harness.dock.v1")).edge, "left", "the tab's edge persists");
+
+	// The click that ends a drag is not a jump-out…
+	handle.dispatchEvent({ type: "click", target: handle });
+	assert.equal(dock.hidden, true, "a drag-release click does not reopen");
+	// …but a plain click springs the toolbar back out at the tab's location.
+	handle.dispatchEvent({ type: "click", target: handle });
+	assert.equal(dock.hidden, false, "a plain click jumps the toolbar back out");
+	assert.ok(root.getElementById("pill").classNames().includes("pop"), "with the springy pop");
+	assert.equal(handle.hidden, true, "the tab stands down while the toolbar is out");
 });
 
 test("Escape peels one layer per press: composer, then mode, then panel", async () => {
