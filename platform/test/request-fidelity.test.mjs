@@ -10,7 +10,7 @@ const runnerWorker = await readFile(new URL("../runner/src/index.ts", import.met
 const job = await readFile(new URL("../runner/job-entrypoint.mjs", import.meta.url), "utf8");
 
 /**
- * REQUEST FIDELITY (the defect this file exists to prevent).
+ * REQUEST FIDELITY — the APPEND ORDER half of the defect.
  *
  * The requester's typed words reached the ledger and then stopped: the
  * `request-accepted` fact carrying them was appended AFTER the intent was
@@ -21,13 +21,17 @@ const job = await readFile(new URL("../runner/job-entrypoint.mjs", import.meta.u
  * and every PR title fell through to the `Live-room change intent-<uuid>`
  * fallback, which is how the two defects turned out to be one.
  *
- * Comment-kind requests looked fine throughout, because their text rides
- * inside the annotation payload rather than the request-accepted fact. That
- * is exactly why this went unnoticed, so these tests cover all three kinds.
+ * SCOPE. This file owns the ORDER in which handleRequest appends facts, and
+ * the refusals that depend on it. The recovery function itself is tested in
+ * evidence.test.mjs, which lifts and executes the REAL `collectEvidence` out
+ * of platform/src/index.ts.
  *
- * These are BEHAVIORAL: they replay the real append order against a fake
- * storage and assert on the recovered evidence. A source-pattern assertion
- * could not have caught a missing pointer, which is the whole lesson.
+ * That split matters: the local `collectEvidence` below is a stand-in used to
+ * exercise append order, and a stand-in can drift from the shipping method
+ * without any test noticing. It did — reintroducing the original outage into
+ * the real worker left every assertion in this file green. Behavioural
+ * coverage of a COPY is still a false green; evidence.test.mjs is what closes
+ * it, and this file stays scoped to what it can honestly prove.
  */
 
 /** A minimal stand-in for the DO storage surface collectEvidence touches. */

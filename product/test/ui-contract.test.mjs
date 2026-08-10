@@ -2,12 +2,41 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { stampDataLoc } from "../src/stamp.js";
+import { createSandbox, parseFragment, runScript } from "../../platform/test/support/dom.mjs";
+
+/**
+ * PRODUCT BOUNDARY CONTRACTS.
+ *
+ * What survives here is only what the app is NOT allowed to change: the
+ * platform/product split, binding isolation, and data-loc stamping. Everything
+ * about how the app looks, reads, and is laid out lives in room-boot.test.mjs
+ * as behaviour, or nowhere at all.
+ *
+ * WHAT WAS REMOVED, AND WHY (this file was the source of failure mode B).
+ * PR #269 added assertions pinning exact prose, exact CSS values, and one-line
+ * formatting of the implementation:
+ *
+ *   - `assert.match(html, /<p>Chat with the room, or use Target, Comment/)`
+ *   - `assert.match(html, /<span class="room-meta">shape this app together<\/span>/)`
+ *   - `assert.match(css, /grid-template-columns: 1\.75rem/)`
+ *   - `assert.match(client, /hash = Math\.imul\(hash, 16777619\)/)`
+ *   - `assert.match(client, /avatar\.style\.color = color; avatar\.setAttribute\(…\)/)`
+ *
+ * Those parked legitimate agent work TWICE. In an autonomous pipeline a brittle
+ * test does not annoy a developer — it rejects a user's real request and
+ * reports it as a failure. An agent asked to reword a heading, restyle a
+ * message, or reformat a line MUST be able to, and copy, colour, and spacing
+ * are exactly what the product surface exists to let agents change.
+ *
+ * The one real invariant hiding in that set — that a speaker is visually
+ * identifiable and consistently so — is now tested as behaviour (same name in,
+ * same colour out; different names, different colours) with no pinned constant.
+ */
 
 const worker = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
 const wrangler = await readFile(new URL("../wrangler.jsonc", import.meta.url), "utf8");
 const html = await readFile(new URL("../src/ui/room.html", import.meta.url), "utf8");
 const client = await readFile(new URL("../src/ui/room.client.js", import.meta.url), "utf8");
-const css = await readFile(new URL("../src/ui/room.css", import.meta.url), "utf8");
 
 test("data-loc stamping is line-accurate, deterministic, and idempotent", () => {
 	const source = ["<html>", "<body>", '  <div class="x">', '    <p data-loc="keep:1">hi</p>', "  </div>", "</body>", "</html>"].join("\n");
@@ -26,80 +55,80 @@ test("stamping never rewrites script or style bodies", () => {
 	assert.match(stamped, /<span data-loc="f\.html:4">/u);
 });
 
-test("the real room page stamps cleanly and every app landmark survives", () => {
+test("every element an agent could be asked to change carries a data-loc anchor", () => {
+	// Anchoring is how a request ("change THIS") reaches the right source line.
+	// This asserts the PROPERTY over the whole page rather than naming elements:
+	// it keeps holding as the app is rewritten, and it catches a stamper that
+	// silently stops covering some tag.
 	const stamped = stampDataLoc(html, "product/src/ui/room.html");
-	for (const anchor of ['id="messages"', 'id="composer"', 'id="chat-input"', 'id="join-form"']) {
-		assert.ok(stamped.includes(anchor), `${anchor} must exist in the room shell`);
+	const unstamped = parseFragment(stamped)
+		.flatMap((node) => node.descendants())
+		.filter((element) => !["HTML", "HEAD", "META", "TITLE", "LINK", "SCRIPT", "STYLE", "#TEXT"].includes(element.tagName))
+		.filter((element) => !element.hasAttribute("data-loc"));
+	assert.deepEqual(unstamped.map((element) => element.tagName), [], "every visible element must be anchorable");
+
+	// And the anchors point at real lines in this file.
+	const lines = html.split("\n").length;
+	for (const match of stamped.matchAll(/data-loc="product\/src\/ui\/room\.html:(\d+)"/gu)) {
+		const line = Number(match[1]);
+		assert.ok(line >= 1 && line <= lines, `data-loc line ${line} is outside the file`);
 	}
-	// Stamping must reach the header, but this must NOT pin its class list:
-	// the header is app code, and an agent restyling it (adding a class, say)
-	// is exactly the kind of change the product surface exists to allow.
-	assert.match(stamped, /<header\b[^>]*\bdata-loc="product\/src\/ui\/room\.html:\d+"/u);
 });
 
 /**
- * The platform/product split (task #13). The harness surface — authoring
- * tools, build queue, activity feed, provenance — is served by the PLATFORM
- * into a closed shadow root. It must not exist in product source at all:
- * that is what makes it impossible for an agent change to this app to break
- * or falsify the status surface reporting on that very change.
+ * The platform/product split. The harness surface — authoring tools, build
+ * queue, activity feed, provenance — is served by the PLATFORM into a closed
+ * shadow root. It must not exist in product source at all: that is what makes
+ * it impossible for an agent change to this app to break or falsify the status
+ * surface reporting on that very change.
  */
-test("the app embeds the platform-owned overlay and owns no harness chrome", () => {
-	assert.match(html, /<script src="\/overlay\.js"[^>]*><\/script>/u, "the app embeds the platform overlay by URL");
-	for (const forbidden of ["id=\"queue-chips\"", "id=\"feed-items\"", "id=\"tool-target\"", "id=\"tool-comment\"", "id=\"tool-draw\"", "id=\"request-composer\"", "id=\"pending-acks\"", "id=\"active-session-count\""]) {
-		assert.ok(!html.includes(forbidden), `${forbidden} is overlay chrome and must not live in the product page`);
-	}
-	// The app speaks chat only. These assert on CODE, not prose: each pattern
-	// is a string literal or property access that only real harness rendering
-	// would contain.
+test("the app owns no harness chrome and speaks no harness protocol", () => {
+	// These assert on CODE, not prose: each pattern is a protocol literal that
+	// only real harness rendering would contain. The app is free to restyle and
+	// reword everything it does own.
 	assert.doesNotMatch(client, /"request:(?:target|comment|draw)"|`request:\$\{/u, "request envelopes belong to the overlay");
 	assert.doesNotMatch(client, /"feed:update"|"feed:history"|"request:ack"/u, "feed rendering belongs to the overlay");
 	assert.doesNotMatch(client, /domSnapshot:|dataLoc:|drawingPoints:/u, "annotation capture belongs to the overlay");
+	assert.doesNotMatch(client, /classif/iu, "the app renders conversation and never classifies intent");
 });
 
-test("each speaker gets a stable generated colour shared by their initials placeholder and name", () => {
-	assert.match(client, /function avatarColor\(name\)/u, "the per-user colour is generated from the name");
-	assert.match(client, /hash = Math\.imul\(hash, 16777619\)/u, "FNV-1a keeps the colour stable across sessions and clients");
-	assert.match(client, /avatar\.style\.color = color; avatar\.setAttribute\("aria-hidden", "true"\)/u, "the placeholder is decorative and carries the colour");
-	assert.match(client, /author\.style\.color = color/u, "the author name shares the same generated colour");
-	assert.match(client, /avatar\.textContent = initials\(/u, "the placeholder shows the speaker's initials");
-	assert.match(css, /\.message-avatar \{[^}]*border-radius/u, "the placeholder has its own presentation");
-	assert.match(css, /\.message \{[^}]*grid-template-columns: 1\.75rem/u, "messages lead with the avatar column");
+test("a speaker is identified consistently, without pinning how", async () => {
+	// The invariant restored by #269 that IS real: the same person reads the
+	// same way everywhere, and two different people are told apart. The hash
+	// function, the colour space, the markup and the CSS are all the app's to
+	// change — pinning `Math.imul(hash, 16777619)` was pinning an implementation.
+	async function renderAuthors(authors) {
+		const harness = createSandbox({ html });
+		runScript(client, harness.sandbox);
+		harness.fetches.at(-1).respond({ ok: true, json: async () => ({ id: "s1", name: "Ada" }) });
+		await Promise.resolve();
+		await Promise.resolve();
+		await Promise.resolve();
+		harness.sockets[0].emit("open", {});
+		authors.forEach((author, index) => harness.sockets[0].deliver({ type: "chat:message", seq: index + 1, author, text: "hi", at: 1_700_000_000_000 }));
+		// Whatever element carries the colour, and whichever property it uses.
+		return harness.document.getElementById("messages").children.map((row) =>
+			row.descendants().map((element) => element.style.getPropertyValue("color") || element.style.color).filter(Boolean).join("|"),
+		);
+	}
+
+	const [first, second, third] = await renderAuthors(["Ada", "Grace", "Ada"]);
+	assert.ok(first, "a speaker is given some visual identity");
+	assert.equal(first, third, "the same speaker reads the same way every time");
+	assert.notEqual(first, second, "two different speakers are told apart");
+
+	// And it is stable across page loads, so a person looks the same to everyone.
+	const [reloaded] = await renderAuthors(["Ada"]);
+	assert.equal(reloaded, first, "identity is derived from the name, not from session order");
 });
 
-test("the room intro keeps both its heading and its explanatory paragraph", () => {
-	assert.match(html, /<h1>[^<]+<\/h1>/u, "the intro keeps a heading (its wording is the room's to change)");
-	assert.match(html, /<p>Chat with the room, or use Target, Comment, and Draw/u);
-	assert.match(html, /<span class="room-meta">shape this app together<\/span>/u);
-	assert.match(css, /\.room-intro p \{/u);
-	assert.match(css, /\.room-meta \{/u);
-});
-
-test("the error boundary falls back to the platform's frozen minimal UI", () => {
-	assert.match(html, /<meta name="ahp-fallback" content="\/fallback">/u);
-	assert.match(html, /location\.replace\(target\)/u);
-	assert.match(client, /window\.__ahpBooted = true/u);
+test("the error boundary and version stamp the platform depends on are present", () => {
+	// Integration points with the frozen platform: the fallback target the page
+	// bails to, and the SHA the reconciler observes to call a deploy live.
+	assert.match(html, /<meta name="ahp-fallback"/u);
+	assert.match(html, /<meta name="ahp-version" content="__DEPLOY_SHA__">/u, "the placeholder the deploy replaces");
+	assert.match(client, /window\.__ahpBooted = true/u, "the client stands the error boundary down");
 	assert.match(worker, /Response\.redirect\(new URL\("\/fallback", env\.PLATFORM_ORIGIN\)/u);
-});
-
-test("the app renders conversation and never classifies intent", () => {
-	assert.match(client, /type: "chat:send"/u);
-	assert.match(client, /event\.type === "chat:message"/u);
-	assert.doesNotMatch(client, /classif/iu);
-});
-
-test("the join flow completes: hidden always wins the cascade and failures are surfaced", () => {
-	assert.match(css, /\[hidden\]\s*\{\s*display:\s*none\s*!important;?\s*\}/u);
-	assert.match(html, /id="join" hidden/u);
-	assert.match(client, /joinError\.textContent = \(await response\.text\(\)\) \|\| `Join failed \(\$\{response\.status\}\)\.`/u);
-	assert.match(client, /joinError\.textContent = "Could not reach the room\. Try again\."/u);
-	assert.match(client, /joinButton\.disabled = true/u);
-});
-
-test("the client speaks only the platform's room protocol, same-origin", () => {
-	assert.match(client, /\/api\/rooms\/main/u);
-	assert.match(client, /fetch\("\/api\/session"/u);
-	assert.doesNotMatch(client, /https:\/\/app-harness-platform/u);
 });
 
 test("the product worker is binding-isolated and proxies the overlay to the platform", () => {

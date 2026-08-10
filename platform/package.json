@@ -8,7 +8,8 @@
     "deploy": "wrangler deploy",
     "cf-typegen": "wrangler types",
     "typecheck": "tsc --noEmit --noUnusedLocals --noUnusedParameters",
-    "test": "node test/ledger.test.mjs && node test/queue.test.mjs && node test/intent.test.mjs && node test/envelope.test.mjs && node test/feed.test.mjs && node test/checks.test.mjs && node test/reconcile.test.mjs && node test/session.test.mjs && node test/tier.test.mjs && node test/platform-worker.test.mjs && node test/request-fidelity.test.mjs && node test/pr-title.test.mjs && node test/overlay.test.mjs"
+    "test": "node --test \"test/*.test.mjs\"",
+    "smoke": "node test/smoke.mjs"
   },
   "devDependencies": {
     "@types/node": "^26.1.2",

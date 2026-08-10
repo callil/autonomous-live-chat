@@ -86,161 +86,37 @@ test("the target description prefers the app's own words over a selector", () =>
 });
 
 /**
- * HIT-TESTING. The overlay floats over an app it knows nothing about, so any
- * region it captures but does not draw is a control the app silently loses.
- * This actually happened: the dock container was pointer-events:auto, so its
- * shrink-to-fit box swallowed clicks ~290px wide while the visible pill was a
- * fraction of that, and the host app's Send button became unclickable.
+ * HIT-TESTING and INSET PUBLISHING used to be asserted here by parsing the
+ * overlay's CSS text and grepping its source. Both are now asserted where they
+ * are observable: overlay-boot.test.mjs mounts the real overlay, applies its
+ * real stylesheet to the real tree, and hit-tests geometrically — so a
+ * container that regains pointer-events:auto, or a measurement that starts
+ * counting hidden chrome, fails on behaviour rather than on wording.
  *
- * These assertions read the overlay's real CSS rules rather than grepping for
- * a string, so a container that regains pointer-events:auto fails here even if
- * it is written differently.
+ * The defect that motivated it: the dock container was pointer-events:auto, so
+ * its shrink-to-fit box swallowed clicks ~290px wide while the visible pill was
+ * a fraction of that, and the host app's Send button became unclickable.
  */
-const overlayCss = overlay.slice(overlay.indexOf("<style>"), overlay.indexOf("</style>"));
-
-/** Every declared value of `property` for `selector`, in source order. */
-function declaredValues(selector, property) {
-	const values = [];
-	const escaped = selector.replaceAll(/[.*+?^${}()|[\]\\]/gu, String.raw`\$&`);
-	const matcher = new RegExp(String.raw`(?:^|[,{}])\s*${escaped}\s*\{([^}]*)\}`, "gmu");
-	for (const match of overlayCss.matchAll(matcher)) {
-		for (const decl of match[1].split(";")) {
-			const [name, value] = decl.split(":");
-			if (name?.trim() === property) values.push(value.trim());
-		}
-	}
-	return values;
-}
-
-test("the overlay never captures clicks outside the controls it actually draws", () => {
-	// The host is transparent, and so is every container inside it. Only leaf
-	// controls opt back in. An app that knows nothing about the overlay keeps
-	// every click that does not land on visible overlay chrome.
-	assert.match(overlay, /host\.style\.cssText = "[^"]*pointer-events:none/u, "the host element must be pointer-transparent");
-
-	for (const container of [".layer", ".dock", ".draw", ".hint"]) {
-		const values = declaredValues(container, "pointer-events");
-		assert.ok(values.length > 0, `${container} must state pointer-events explicitly`);
-		assert.ok(
-			values.every((value) => value === "none"),
-			`${container} is a container: it must never capture clicks (found ${values.join(", ")})`,
-		);
-	}
-
-	// The controls the user can see DO take clicks — otherwise the overlay is
-	// merely broken in the opposite direction.
-	for (const control of [".pill", ".panel", ".composer"]) {
-		assert.deepEqual(declaredValues(control, "pointer-events"), ["auto"], `${control} is a real control and must be clickable`);
-	}
-
-	// The draw layer is the one container that arms itself, and only while the
-	// draw tool is active.
-	assert.deepEqual(declaredValues(".draw.active", "pointer-events"), ["auto"]);
-});
-
-test("the overlay publishes its occupied region instead of apps hardcoding it", () => {
-	// Measured from real layout, not a constant.
-	assert.match(overlay, /getBoundingClientRect\(\)/u);
-	assert.match(overlay, /--app-harness-dock-inset-right/u);
-	assert.match(overlay, /--app-harness-dock-inset-bottom/u);
-	assert.match(overlay, /new ResizeObserver/u, "the published region must track layout changes");
-	assert.match(overlay, /setProperty\(INSET_RIGHT/u);
-	// Measurement walks the dock's visible children, never the pointer-transparent
-	// container, whose box is wider than what is drawn.
-	assert.match(overlay, /for \(const el of dockEl\.children\)/u);
-	assert.match(overlay, /if \(el\.hidden\) continue;/u);
-});
 
 /**
- * The overlay must actually RUN. The source-grep tests above all passed while
- * the shipped overlay threw `ReferenceError: Cannot access 'dockEl' before
- * initialization` on load — a `const` used by mount() was declared below it,
- * so the whole IIFE died before the transport started and the surface went
- * silent. Executing the script against a DOM stub is the only assertion that
- * catches an ordering mistake like that.
+ * Executing the overlay — that it loads, mounts, starts its transport, keeps
+ * its controls hittable, and publishes measured insets — is covered in
+ * overlay-boot.test.mjs against a shared DOM harness. That layer replaced the
+ * bespoke inline stub that used to live here, and it is what catches the
+ * `ReferenceError: Cannot access 'dockEl' before initialization` class of
+ * outage that every grep in this file sailed straight through.
  */
-test("the overlay script executes cleanly and publishes insets on mount", () => {
-	const frames = [];
-	const rafCallbacks = [];
-	const rootStyle = new Map();
-	const dockChildren = [
-		{ hidden: false, getBoundingClientRect: () => ({ left: 1000, top: 660, width: 264, height: 44 }) },
-		{ hidden: true, getBoundingClientRect: () => ({ left: 780, top: 300, width: 480, height: 400 }) },
-	];
 
-	const makeEl = () => ({
-		style: { cssText: "", setProperty() {} },
-		dataset: {},
-		children: [],
-		hidden: false,
-		classList: { add() {}, remove() {}, toggle() {} },
-		setAttribute() {}, removeAttribute() {}, getAttribute: () => null,
-		addEventListener() {}, append() {}, replaceChildren() {}, remove() {},
-		getBoundingClientRect: () => ({ x: 0, y: 0, left: 0, top: 0, width: 0, height: 0 }),
-		attachShadow() {
-			return {
-				innerHTML: "",
-				getElementById: () => makeEl(),
-				querySelector: (selector) => (selector === ".dock" ? { children: dockChildren } : null),
-			};
-		},
-	});
-
-	const documentElement = { style: { setProperty: (name, value) => rootStyle.set(name, value) } };
-	const sandbox = {
-		document: {
-			currentScript: { dataset: { room: "main" } },
-			documentElement,
-			body: makeEl(),
-			createElement: makeEl,
-			createElementNS: makeEl,
-			addEventListener() {},
-			querySelectorAll: () => [],
-			elementFromPoint: () => null,
-		},
-		window: {},
-		innerWidth: 1280,
-		innerHeight: 720,
-		requestAnimationFrame: (fn) => { rafCallbacks.push(fn); return rafCallbacks.length; },
-		addEventListener() {},
-		ResizeObserver: class { observe() {} },
-		WebSocket: class { constructor() { this.readyState = 0; } addEventListener() {} close() {} },
-		fetch: () => new Promise(() => {}),
-		setTimeout: () => 0,
-		clearTimeout() {},
-		getComputedStyle: () => ({ getPropertyValue: () => "" }),
-		crypto: { randomUUID: () => "id" },
-		location: { pathname: "/", protocol: "https:", host: "example.test", origin: "https://example.test" },
-		URL,
-		console: { error: (...args) => frames.push(args) },
-	};
-	sandbox.window = sandbox;
-	sandbox.globalThis = sandbox;
-
-	// Executing the real overlay source: a ReferenceError from declaration order
-	// (or any other load-time throw) surfaces right here.
-	const run = new Function(...Object.keys(sandbox), overlay);
-	assert.doesNotThrow(() => run(...Object.values(sandbox)), "the overlay must not throw while loading");
-
-	// mount() defers measurement to the next frame; run it.
-	assert.equal(rafCallbacks.length, 1, "mount must schedule a measurement");
-	assert.doesNotThrow(() => rafCallbacks[0](), "measuring must not throw");
-
-	// The visible pill (right edge 1264 of a 1280 viewport) is measured; the
-	// hidden panel, which is the wider child, is correctly ignored.
-	assert.equal(rootStyle.get("--app-harness-dock-inset-right"), "280px");
-	assert.equal(rootStyle.get("--app-harness-dock-inset-bottom"), "60px");
-});
-
-test("the example tenant consumes the published inset and hardcodes no dock size", async () => {
+test("the example tenant consumes the published inset instead of guessing the dock's size", async () => {
+	// A tenant-integration invariant, not a style rule: the app reads whatever
+	// the overlay measures, and defaults to zero. It may restyle freely; it may
+	// not hardcode a gutter, because the dock's real size is not knowable here.
 	const css = await readFile(new URL("../../product/src/ui/room.css", import.meta.url), "utf8");
 	assert.match(css, /var\(--app-harness-dock-inset-right, 0px\)/u);
 	assert.match(css, /var\(--app-harness-dock-inset-bottom, 0px\)/u);
-	// The guess this replaced. Any reappearing magic gutter fails the test.
-	assert.doesNotMatch(css, /padding-right:\s*1[0-9]rem/u, "the app must not guess the dock's width");
 	// Falling back to zero is deliberate: with correct hit-testing the app is
 	// usable with no inset at all, so the variable is polish, never a crutch.
-	assert.doesNotMatch(css, /var\(--app-harness-dock-inset-right,\s*[1-9]/u);
+	assert.doesNotMatch(css, /var\(--app-harness-dock-inset-right,\s*[1-9]/u, "the fallback must be zero, not a guessed gutter");
 });
 
 test("tenancy is configuration, and the example room is just an installed tenant", () => {
