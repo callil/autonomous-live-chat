@@ -1,4 +1,5 @@
 import { validateAnnotationPayload } from "./ledger.js";
+import { normalizeRunMode } from "./mode.js";
 
 /**
  * The SOLE request trigger (v1 non-negotiable, task #20): an explicit
@@ -34,6 +35,9 @@ export function parseRequestEnvelope(message) {
 		kind,
 		text: kind === "comment" ? annotation.text : text,
 		annotation,
+		// The requester's explicit speed choice for THIS request. Only a literal
+		// "fast" is fast; the system never downgrades a run on its own.
+		mode: normalizeRunMode(message.mode),
 		clientSubmissionId: typeof message.clientSubmissionId === "string" && message.clientSubmissionId.length <= 128 ? message.clientSubmissionId : undefined,
 	};
 }

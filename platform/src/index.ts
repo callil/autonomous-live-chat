@@ -27,7 +27,7 @@ import {
 	type Intent,
 } from "../contracts/intent.js";
 import { cancelDeadline, parseRequestEnvelope } from "../contracts/envelope.js";
-import { classifyRunTier, type RunTier } from "../contracts/tier.js";
+import { normalizeRunMode, type RunMode } from "../contracts/mode.js";
 import { renderFeed, renderFeedItem, renderQueueChips } from "../contracts/feed.js";
 import { classifyCheckRuns, includesMigrationMarker } from "../contracts/checks.js";
 import { decide, type ReconcileAction } from "../contracts/reconcile.js";
@@ -109,6 +109,10 @@ const DEFAULT_DAILY_BUDGET_USD = 25;
 const WATCHDOG_WINDOW_MS = 5 * 60_000;
 /** The product deploy leg, reused for reverts via its sha input. */
 const DEPLOY_WORKFLOW_FILE = "deploy-product.yml";
+
+/** Ledger export bounds: page size and the most facts one filtered export may scan. */
+const MAX_EXPORT_EVENTS = 200;
+const MAX_EXPORT_SCAN = 2_000;
 
 const SESSION_COOKIE = "ahp_session";
 const IDENTITY_ID_HEADER = "x-ahp-session-id";
@@ -326,8 +330,10 @@ export class RoomDO extends DurableObject<RuntimeEnv> {
 					await this.appendEvent("run-verifying", { runId, intentId: run.intentId, ...verification }, now);
 					// Measurement rides alongside the terminal report, never gating
 					// it: a malformed timings block costs the fact, not the run.
+					// Mode and effort are recorded for observability (outcome and
+					// duration by mode stay measurable in the ledger).
 					const timing = sanitizeTimings(input.timings);
-					if (timing) await this.appendEvent("run-timing", { runId, intentId: run.intentId, tier: input.tier === "small" ? "small" : "normal", ...timing }, now);
+					if (timing) await this.appendEvent("run-timing", { runId, intentId: run.intentId, mode: normalizeRunMode(input.mode), effort: input.effort === "low" ? "low" : "medium", ...timing }, now);
 				} else {
 					// Once the attempt has reported "verifying" the run belongs to
 					// the platform: a late "failed" push (the in-container watchdog
@@ -351,6 +357,39 @@ export class RoomDO extends DurableObject<RuntimeEnv> {
 		await this.poke();
 		await this.broadcastFeed();
 		return { accepted: true };
+	}
+
+	/**
+	 * Owner observability: one bounded, read-only page of raw ledger facts
+	 * (ascending seq within the page; pages walk backwards via beforeSeq).
+	 * Powers offline analysis — per-phase run timings, outcome by mode —
+	 * without touching the truth path. Never mutates anything.
+	 */
+	async exportEvents(input: { beforeSeq?: unknown; count?: unknown; kinds?: unknown }): Promise<{ events: LedgerEvent[]; lastSeq: number }> {
+		const lastSeq = (await this.ctx.storage.get<number>(EVENT_SEQUENCE_KEY)) ?? 0;
+		const before = Number.isSafeInteger(input.beforeSeq) && (input.beforeSeq as number) > 1 ? (input.beforeSeq as number) : null;
+		const count = Number.isSafeInteger(input.count) ? Math.min(Math.max(input.count as number, 1), MAX_EXPORT_EVENTS) : MAX_EXPORT_EVENTS;
+		const kinds = Array.isArray(input.kinds) ? new Set(input.kinds.filter((kind): kind is string => typeof kind === "string")) : null;
+		const end = before === null ? lastSeq : Math.min(before - 1, lastSeq);
+		const collected: LedgerEvent[] = [];
+		let cursor = end;
+		let scanned = 0;
+		// Walk backwards in bounded pages so a kind filter still fills its
+		// count; the scan cap keeps a sparse filter from reading all history.
+		while (cursor >= 1 && collected.length < count && scanned < MAX_EXPORT_SCAN) {
+			const start = Math.max(1, cursor - MAX_EXPORT_EVENTS + 1);
+			const page = await this.loadEvents(start, cursor);
+			scanned += cursor - start + 1;
+			for (let index = page.length - 1; index >= 0; index -= 1) {
+				const event = page[index];
+				if (kinds && !kinds.has(event.kind)) continue;
+				collected.push(event);
+				if (collected.length >= count) break;
+			}
+			cursor = start - 1;
+		}
+		collected.reverse();
+		return { events: collected, lastSeq };
 	}
 
 	/** Owner lever: freeze pauses request intake and dispatch; chat stays open. */
@@ -564,7 +603,7 @@ export class RoomDO extends DurableObject<RuntimeEnv> {
 		const budget = await this.loadBudget(now);
 		const attemptId = `attempt-${crypto.randomUUID()}`;
 		const intent = await this.ctx.storage.get<Intent>(`${INTENT_PREFIX}${head.intentId}`);
-		const evidence = intent ? await this.collectEvidence(intent) : { requestText: "", requestedBy: "unknown", annotations: [] };
+		const evidence = intent ? await this.collectEvidence(intent) : { requestText: "", requestedBy: "unknown", annotations: [], mode: "standard" as RunMode };
 
 		// THE BLIND-BUILD INVARIANT. A builder with an anchor but no
 		// instructions does not fail — it invents a plausible change and ships
@@ -589,16 +628,18 @@ export class RoomDO extends DurableObject<RuntimeEnv> {
 		// from latest main. No stacks, no parents, no expected order.
 		const intentSeq = intent && Number.isSafeInteger(intent.openSeq) ? intent.openSeq : 0;
 		const branch = `room/${intentSeq}/${attemptId.slice(8, 16)}`;
-		// Sizing is deterministic and recorded, so error rates by tier stay
-		// measurable. It tunes only the agent's own budgets — never the gates.
-		const tier = this.runTier(evidence);
+		// The mode is the REQUESTER'S explicit choice, recovered verbatim from
+		// the request-accepted fact. The system never downgrades a run on its
+		// own: absent an explicit "fast", every run builds at standard quality.
+		// Mode tunes only the agent's own budgets — never the gates.
+		const mode = normalizeRunMode(evidence.mode);
 		await this.ctx.storage.transaction(async () => {
 			const current = startRun(await this.loadQueue(), { runId: head.runId, attemptId, startedAt: now });
 			await this.ctx.storage.put(QUEUE_KEY, current);
 			await this.ctx.storage.put(BUDGET_KEY, { ...budget, spentUsd: budget.spentUsd + ESTIMATED_RUN_COST_USD } satisfies BudgetRecord);
-			await this.appendEvent("run-started", { runId: head.runId, intentId: head.intentId, attemptId, branch, tier }, now);
+			await this.appendEvent("run-started", { runId: head.runId, intentId: head.intentId, attemptId, branch, mode }, now);
 		});
-		const result = await this.startRunViaPort({ runId: head.runId, attemptId, intentId: head.intentId, branch, evidence, tier });
+		const result = await this.startRunViaPort({ runId: head.runId, attemptId, intentId: head.intentId, branch, evidence, mode });
 		if (result.accepted) return;
 		await this.ctx.storage.transaction(async () => {
 			let current = await this.loadQueue();
@@ -610,7 +651,7 @@ export class RoomDO extends DurableObject<RuntimeEnv> {
 	}
 
 	/** Mint the per-dispatch Git credential and hand the runner its complete job. */
-	private async startRunViaPort(input: { runId: string; attemptId: string; intentId: string; branch: string; evidence: { requestText: string; requestedBy: string; annotations: unknown[] }; tier: RunTier }): Promise<{ accepted: true } | { accepted: false; reason: string }> {
+	private async startRunViaPort(input: { runId: string; attemptId: string; intentId: string; branch: string; evidence: { requestText: string; requestedBy: string; annotations: unknown[] }; mode: RunMode }): Promise<{ accepted: true } | { accepted: false; reason: string }> {
 		const app = this.githubApp();
 		if (!app) return { accepted: false, reason: "github-app-not-configured" };
 		let gitToken: string;
@@ -793,10 +834,11 @@ export class RoomDO extends DurableObject<RuntimeEnv> {
 	 * comment carries them inside the annotation payload. All three are
 	 * recovered here, so no kind can dispatch a build blind.
 	 */
-	private async collectEvidence(intent: Intent): Promise<{ requestText: string; requestedBy: string; annotations: unknown[] }> {
+	private async collectEvidence(intent: Intent): Promise<{ requestText: string; requestedBy: string; annotations: unknown[]; mode: RunMode }> {
 		const annotations: unknown[] = [];
 		let requestText = "";
 		let annotationText = "";
+		let mode: RunMode = "standard";
 		for (const seq of [...intent.refs.annotationSeqs, ...intent.refs.utteranceSeqs]) {
 			const event = await this.ctx.storage.get<LedgerEvent>(eventStorageKey(seq));
 			if (!event) continue;
@@ -805,30 +847,17 @@ export class RoomDO extends DurableObject<RuntimeEnv> {
 				const annotation = event.payload.annotation as { text?: unknown } | undefined;
 				if (typeof annotation?.text === "string" && annotation.text.trim().length) annotationText = annotation.text.trim();
 			}
-			if (event.kind === "request-accepted" && typeof event.payload.text === "string" && event.payload.text.trim().length) {
-				requestText = event.payload.text.trim();
+			if (event.kind === "request-accepted") {
+				if (typeof event.payload.text === "string" && event.payload.text.trim().length) requestText = event.payload.text.trim();
+				// The requester's explicit speed choice rides the accepted fact.
+				if (event.payload.mode === "fast") mode = "fast";
 			}
 			// A plain utterance attached to an intent is requester speech too.
 			if (event.kind === "utterance" && typeof event.payload.text === "string" && !requestText.trim().length) {
 				requestText = event.payload.text.trim();
 			}
 		}
-		return { requestText: requestText || annotationText, requestedBy: intent.openedBy, annotations };
-	}
-
-	/**
-	 * Size this run from durable evidence alone: the envelope kind carried by
-	 * the anchoring annotation, the verbatim request text, and how many anchors
-	 * the intent collected. Deterministic — the same facts always pick the same
-	 * tier — and biased to "normal" whenever smallness is not positively proven.
-	 */
-	private runTier(evidence: { requestText: string; annotations: unknown[] }): RunTier {
-		const first = evidence.annotations[0] as { annotation?: { kind?: unknown } } | undefined;
-		return classifyRunTier({
-			kind: first?.annotation?.kind,
-			text: evidence.requestText,
-			annotationCount: evidence.annotations.length,
-		});
+		return { requestText: requestText || annotationText, requestedBy: intent.openedBy, annotations, mode };
 	}
 
 	private async handleChat(socket: WebSocket, message: Extract<ClientMessage, { type: "chat:send" }>, identity: { id: string; name: string }): Promise<void> {
@@ -882,7 +911,7 @@ export class RoomDO extends DurableObject<RuntimeEnv> {
 			// else): recording the intent first and this fact afterwards — the
 			// original order — left requestText permanently empty and dispatched
 			// every build with an anchor and no instructions.
-			const acceptedEvent = await this.appendEvent("request-accepted", { intentId, by: identity.name, text: envelope.text, at: now, cancelDeadline: deadline }, now);
+			const acceptedEvent = await this.appendEvent("request-accepted", { intentId, by: identity.name, text: envelope.text, mode: envelope.mode, at: now, cancelDeadline: deadline }, now);
 			const intent = createIntent({
 				id: intentId,
 				openedBy: identity.name,
@@ -1088,7 +1117,15 @@ export class RoomDO extends DurableObject<RuntimeEnv> {
 			if (Number.isSafeInteger(acceptedSeq)) {
 				const event = await this.ctx.storage.get<LedgerEvent>(eventStorageKey(acceptedSeq as number));
 				if (event?.kind === "request-accepted" && typeof event.payload?.text === "string") {
-					decorated = { ...decorated, requestText: event.payload.text as string, requestedBy: typeof event.payload.by === "string" ? event.payload.by as string : undefined };
+					decorated = {
+						...decorated,
+						requestText: event.payload.text as string,
+						requestedBy: typeof event.payload.by === "string" ? event.payload.by as string : undefined,
+						// The accepted fact's mode is the authoritative record (it is
+						// what dispatch uses); the annotation stamp above is the
+						// overlay's convenience copy. Either one marks the chip.
+						...(event.payload.mode === "fast" ? { requestMode: "fast" as const } : {}),
+					};
 				}
 			}
 			out.push(decorated);
@@ -1158,6 +1195,13 @@ export default {
 			if (request.method !== "POST") return new Response("Method not allowed", { status: 405 });
 			if (pathname === "/api/admin/freeze") return Response.json(await room().freeze(true));
 			if (pathname === "/api/admin/unfreeze") return Response.json(await room().freeze(false));
+			if (pathname === "/api/admin/events") {
+				// Read-only ledger export for offline analysis (timings, outcomes
+				// by mode). Same owner bearer as the other levers; bounded pages.
+				let body: Record<string, unknown>;
+				try { body = JSON.parse((await request.text()) || "{}") as Record<string, unknown>; } catch { return new Response("Invalid JSON", { status: 400 }); }
+				return Response.json(await room().exportEvents(body));
+			}
 			if (pathname === "/api/admin/revert") {
 				let body: { sha?: unknown };
 				try { body = JSON.parse(await request.text()) as typeof body; } catch { return new Response("Invalid JSON", { status: 400 }); }

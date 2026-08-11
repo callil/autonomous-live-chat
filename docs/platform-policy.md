@@ -7,7 +7,7 @@ App Harness does not use character counts or retained-record counts as product p
 3. **Admission:** one record must fit the platform that stores it. Admission is measured in UTF-8 bytes against Cloudflare's documented SQLite Durable Object key-plus-value limit. An oversized single submission is rejected visibly and can be split into smaller steps.
 4. **Authoring envelope:** target metadata is intentionally narrow so the overlay never captures arbitrary DOM state, form values, or secrets. Its named schema bounds live beside the platform policy; they do not limit the request text itself.
 
-The canonical values and helpers are in the dependency-free `@app-harness/contracts` package. Both the demo runtime and reusable React overlay consume it, so their target schemas cannot silently drift. Tests verify that a delivery page stays within documented platform boundaries and that multi-key deletion is batched correctly.
+The canonical values and helpers live in the dependency-free contract modules under `platform/contracts/`, consumed by both the platform Worker and the overlay, so their schemas cannot silently drift. Tests verify that a delivery page stays within documented platform boundaries.
 
 Every number belongs to one of three classes:
 

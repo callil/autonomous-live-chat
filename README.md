@@ -20,7 +20,7 @@ docs/                      product, architecture, operations, and safety
 
 The split is the safety model: agent branches (`room/*`) may only change `product/`. The platform firewall fails any agent diff touching `platform/`, CI configuration, dependency manifests, or wrangler configs. The overlay, the build queue, and the activity feed are served by the frozen platform, so an agent change to the app can never break or falsify the status surface that reports on its own builds.
 
-## Run locally
+## Quickstart for contributors
 
 Requires Node.js 22.
 
@@ -29,6 +29,18 @@ npm install
 npm run check       # generated Cloudflare types, TypeScript, all test layers
 npm run smoke       # post-deploy checks against the real deployed origin
 ```
+
+Then read [docs/README.md](./docs/README.md) in order — product, architecture,
+and the [pipeline lifecycle](./docs/pipeline.md) are enough to orient. The
+rules that matter most:
+
+- Humans change `platform/` on ordinary branches; agents (`room/*`) may only
+  change `product/`. CI config, dependency manifests, lockfiles, and wrangler
+  configs are frozen surfaces (new dependencies are human-gated).
+- Platform merges auto-deploy the runner: never land a `platform/**` merge
+  while a build run is in flight (check the room's queue chips first).
+- Tests assert behaviour and invariants, never copy or source text — read
+  [the testing doctrine](./docs/testing.md) before adding one.
 
 ## Deployed services
 

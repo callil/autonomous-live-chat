@@ -23,7 +23,7 @@ export function formatEta(etaMs) {
 const TEMPLATES = {
 	"utterance": (payload) => null, // Chat renders in the chat lane, not the feed.
 	"annotation": (payload) => `${payload.by} marked ${clip(payload.annotation?.dataLoc, 80)} (${payload.annotation?.kind}).`,
-	"request-accepted": (payload) => `Request ${payload.intentId} accepted from ${payload.by} — cancellable for ${Math.round((payload.cancelDeadline - payload.at) / 1000)}s: “${clip(payload.text)}”`,
+	"request-accepted": (payload) => `Request ${payload.intentId} accepted from ${payload.by}${payload.mode === "fast" ? " as a fast pass" : ""} — cancellable for ${Math.round((payload.cancelDeadline - payload.at) / 1000)}s: “${clip(payload.text)}”`,
 	"request-cancelled": (payload) => `Request ${payload.intentId} cancelled by ${payload.by} inside its cancel window.`,
 	"intent-opened": (payload) => `Intent ${payload.intentId} opened by ${payload.by}.`,
 	"intent-amended": (payload) => `Intent ${payload.intentId} amended by ${payload.by} (v${payload.version}).`,
@@ -33,7 +33,9 @@ const TEMPLATES = {
 	"intent-withdrawn": (payload) => `Intent ${payload.intentId} withdrawn.`,
 	"intent-retried": (payload) => `Intent ${payload.intentId} gets one fresh build (run ${payload.runId}) — Doctor: ${clip(payload.note, 200)}`,
 	"run-queued": (payload) => `Run ${payload.runId} queued for intent ${payload.intentId}.`,
-	"run-started": (payload) => `Run ${payload.runId} started building.`,
+	// Honesty rule: a fast pass is always labeled a fast pass, so nobody
+	// mistakes a speed-traded result for the system's best.
+	"run-started": (payload) => `Run ${payload.runId} started building${payload.mode === "fast" ? " (fast pass)" : ""}.`,
 	"run-heartbeat": () => null, // Progress facts are durable but not feed lines.
 	"run-timing": () => null, // Measurement facts are durable but not feed lines.
 	"run-verifying": (payload) => `Run ${payload.runId} pushed ${clip(payload.branch, 60) || "its branch"}${Number.isSafeInteger(payload.prNumber) ? ` (PR #${payload.prNumber})` : ""} — CI is verifying.`,
@@ -124,6 +126,8 @@ export function renderQueueChips(queue, now, intents = []) {
 			...(intent.anchor ? { anchor: intent.anchor } : {}),
 			...(typeof intent.requestText === "string" && intent.requestText.length ? { text: clip(intent.requestText, 120) } : {}),
 			...(typeof intent.requestedBy === "string" && intent.requestedBy.length ? { by: intent.requestedBy } : {}),
+			// Honest labeling: a fast pass reads as a fast pass on its chip
+			// (the overlay renders chip.mode as the lightning marker).
 			...(intent.requestMode === "fast" ? { mode: "fast" } : {}),
 		};
 	};

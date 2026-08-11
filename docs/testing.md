@@ -54,7 +54,7 @@ Each catches a different class of failure. None of them substitutes for another.
 ### Layer 1 — Contract tests (`platform/test/*.test.mjs`)
 
 Pure functions in `platform/contracts`: ledger, queue, intent, envelope, feed,
-reconcile, checks, session, tier. Already the strongest part of the suite.
+reconcile, checks, session, mode. Already the strongest part of the suite.
 Fast, deterministic, no I/O.
 
 **Catches:** wrong state transitions, unsafe configuration accepted, a green

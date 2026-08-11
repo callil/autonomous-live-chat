@@ -58,6 +58,7 @@ async function loadCollectEvidence() {
 		.slice(open, end)
 		// Strip the TypeScript the method carries; the logic itself is plain JS.
 		.replaceAll("const annotations: unknown[] = []", "const annotations = []")
+		.replaceAll('let mode: RunMode = "standard"', 'let mode = "standard"')
 		.replaceAll("await this.ctx.storage.get<LedgerEvent>(", "await storage.get(")
 		.replaceAll(" as { text?: unknown } | undefined", "");
 
@@ -222,4 +223,23 @@ test("the platform refuses to dispatch a build with no instructions", () => {
 	// no recoverable request means a recorded refusal, not a guessed change.
 	assert.match(worker, /if \(!evidence\.requestText\.trim\(\)\.length\)/u, "dispatch checks the recovered words");
 	assert.match(worker, /request-text-missing/u, "the refusal is a recorded, honest fact");
+});
+
+test("the shipping evidence path recovers the requester's explicit fast mode — and only fast", async () => {
+	const storage = fakeStorage();
+	const annotation = storage.append("annotation", { by: "cal", byId: "s1", annotation: { kind: "target", dataLoc: "f:1", domSnapshot: "<h1>x</h1>" } });
+	const opened = storage.append("intent-opened", { intentId: "i2", by: "cal" });
+	const accepted = storage.append("request-accepted", { intentId: "i2", by: "cal", text: "darken this", mode: "fast", at: 1, cancelDeadline: 2 });
+	const intent = createIntent({
+		id: "i2",
+		openedBy: "cal",
+		openedById: "s1",
+		at: 1_700_000_000_000,
+		refs: { utteranceSeqs: [accepted.seq], annotationSeqs: [annotation.seq] },
+		openSeq: opened.seq,
+	});
+	assert.equal((await collectEvidence(storage, intent)).mode, "fast");
+	// An accepted fact recorded before the mode field existed reads standard.
+	const legacy = acceptRequest("target", "darken this");
+	assert.equal((await collectEvidence(legacy.storage, legacy.intent)).mode, "standard");
 });

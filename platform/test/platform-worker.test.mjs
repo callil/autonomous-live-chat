@@ -178,3 +178,27 @@ test("the firewall fails agent diffs touching platform, CI, manifests, lockfiles
 	assert.match(firewall, /exit 1/u);
 	assert.match(firewall, /persist-credentials: false/u);
 });
+
+test("the mode flows envelope -> accepted fact -> dispatch -> runner payload, and the system never downgrades", () => {
+	// The envelope parse carries the requester's explicit choice...
+	assert.match(worker, /mode: envelope\.mode/u, "the accepted fact records the requester's mode");
+	// ...evidence recovers it from the durable fact, the run-started fact and
+	// the dispatch both carry it verbatim...
+	assert.match(worker, /const mode = normalizeRunMode\(evidence\.mode\)/u, "dispatch mode comes from durable evidence");
+	assert.match(worker, /attemptId, branch, mode \}, now\)/u, "run-started records the mode");
+	assert.match(worker, /branch, evidence, mode \}\)/u, "the dispatch relays the mode to the runner");
+	// ...and no automatic sizing survives anywhere in the platform.
+	assert.doesNotMatch(worker, /classifyRunTier|runTier/u, "the tier classifier is gone; fast is a user choice only");
+	assert.match(ports, /mode: "standard" \| "fast"/u, "the dispatch contract names the mode vocabulary");
+});
+
+test("run-timing facts record mode and effort for observability", () => {
+	assert.match(worker, /"run-timing", \{ runId, intentId: run\.intentId, mode: normalizeRunMode\(input\.mode\), effort:/u);
+});
+
+test("the admin ledger export is read-only, bounded, and behind the same bearer", () => {
+	assert.match(worker, /"\/api\/admin\/events"/u);
+	assert.match(worker, /MAX_EXPORT_EVENTS = 200/u);
+	assert.match(worker, /MAX_EXPORT_SCAN = 2_000/u);
+	assert.doesNotMatch(worker.slice(worker.indexOf("async exportEvents"), worker.indexOf("async freeze")), /storage\.(put|delete|transaction)/u, "exportEvents never mutates");
+});
