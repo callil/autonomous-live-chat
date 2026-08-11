@@ -9,10 +9,11 @@
 <link rel="stylesheet" href="/assets/room.css">
 <style>
 .message { position: relative; }
+.message:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 .message-reactions { position: absolute; z-index: 2; left: .5rem; bottom: -.8rem; display: flex; gap: .15rem; padding: .25rem; border: 1px solid var(--line); border-radius: 999px; background: var(--panel, white); box-shadow: 0 .25rem 1rem rgba(0, 0, 0, .16); opacity: 0; visibility: hidden; transform: translateY(.25rem) scale(.96); transition: opacity .12s ease, transform .12s ease, visibility .12s; }
 .message-reactions[data-open="true"] { opacity: 1; visibility: visible; transform: none; }
 .message-reaction { min-width: 2rem; padding: .22rem .38rem; border: 0; border-radius: 999px; background: transparent; color: inherit; font: inherit; font-size: 1.15rem; line-height: 1.35; cursor: pointer; transition: background .12s ease, transform .12s ease; }
-.message-reaction:hover { background: var(--soft); transform: scale(1.15); }
+.message-reaction:hover, .message-reaction:focus-visible { background: var(--soft); transform: scale(1.15); }
 .message-reaction[aria-pressed="true"] { background: color-mix(in srgb, var(--accent) 18%, transparent); }
 .message-my-reaction { display: inline-flex; align-items: center; margin-left: .3rem; padding: .05rem .35rem; border: 1px solid var(--line); border-radius: 999px; background: color-mix(in srgb, var(--accent) 12%, transparent); font-size: 1rem; line-height: 1.25; }
 .message-my-reaction[hidden] { display: none; }
@@ -115,6 +116,8 @@
     if (message.querySelector('.message-reactions')) return;
     var body = message.querySelector('.message-body');
     if (!body) return;
+    message.tabIndex = 0;
+    message.setAttribute('aria-label', 'Message. Press Enter to react.');
     var meta = body.querySelector('.message-meta');
     var selected = document.createElement('span');
     selected.className = 'message-my-reaction';
@@ -153,6 +156,9 @@
     }
     message.addEventListener('contextmenu', openPicker);
     message.addEventListener('dblclick', openPicker);
+    message.addEventListener('keydown', function (event) {
+      if ((event.key === 'Enter' || event.key === ' ') && event.target === message) openPicker(event);
+    });
     body.appendChild(bar);
   }
   document.addEventListener('click', function () { closeReactions(); });
